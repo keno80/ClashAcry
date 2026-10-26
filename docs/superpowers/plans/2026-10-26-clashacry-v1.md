@@ -427,7 +427,7 @@ public static class EventTypes
 {
     public const string CoreStateChanged = "core.state", UpdateProgress = "core.update.progress",
         UpdateResult = "core.update.result",
-        SettingsChanged = "settings.changed", Log = "log";
+        SettingsChanged = "settings.changed";   // 四个事件即全部；预检删掉的 `Log` 死事件不得加回
 }
 
 // Frame.cs
@@ -468,7 +468,7 @@ public static class FrameCodec
     private static readonly JsonSerializerOptions Opts = new()
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-        Encoder = System.Text.Json.Encodings.Default.JavaScriptEncoder
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.Default  // .NET 10 里没有 `System.Text.Json.Encodings.Default`
     };
 
     public static string Encode(Frame f) => JsonSerializer.Serialize(f, Opts) + "\n";
@@ -487,7 +487,7 @@ public static class FrameCodec
     }
 }
 
-public sealed class FrameTooLongException : InvalidDataException
+public sealed class FrameTooLongException : IOException   // .NET 10 里 InvalidDataException 已 sealed
 {
     public FrameTooLongException(int chars) : base($"frame too long: {chars} chars") { }
 }

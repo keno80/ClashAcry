@@ -1874,7 +1874,7 @@ git commit -m "feat(core): 系统代理 HKCU 开关与悬挂清理（只清指�
   - `CoreState State { get; }` / `int MixedPort { get; }` / `int? RunningProcessId { get; }` / `int StartAttemptCount { get; }` / `int SpawnCount { get; }` / `int ConcurrentGuardHits { get; }`
   - `event Action<CoreStateChanged>? StateChanged`；`IReadOnlyList<CoreStateChanged> StateChangedEvents { get; }`（`CoreStateChanged` 记录类型由 Task 3 定义在 Contracts，本任务直接 import，不再声明）
   - `Task<bool> StartAsync(CancellationToken ct)` / `Task StopAsync(CancellationToken ct)` / `Task ReloadAsync(CancellationToken ct)` / `Task<SwapOutcome> SwapExecutableAsync(Func<Task> replaceFiles, CancellationToken ct)`
-  - `record struct SwapOutcome(bool CoreRunningAfter, bool RolledBack)`
+  - `record struct SwapOutcome(bool CoreRunningAfter, bool RolledBack)`——工厂叫 `SwapOutcome.Done(bool)` 与 `SwapOutcome.Rollback(bool)`（**不是** `RolledBack`，那与属性同名，CS0102；实测修正见 Step 5 注 ③）
   - `IReadOnlyList<string> StderrTail(int n = 50)`
   - `sealed class StderrRing(int capacity) { void Add(string line); void Clear(); IReadOnlyList<string> Snapshot(); }`
 
@@ -2272,7 +2272,7 @@ public sealed class CoreManager : IAsyncDisposable
             Transition(CoreState.Updating);
             await StopLockedAsync();
             try { await replaceFiles(); }
-            catch (IOException) { var back = await StartLockedAsync(); return SwapOutcome.RolledBack(back); }
+            catch (IOException) { var back = await StartLockedAsync(ct); return SwapOutcome.Rollback(back); }
             var started = wasRunning ? await StartLockedAsync() : true;
             return SwapOutcome.Done(started);
         }, ct);
@@ -2388,7 +2388,8 @@ public sealed class CoreManager : IAsyncDisposable
 public readonly record struct SwapOutcome(bool CoreRunningAfter, bool RolledBack)
 {
     public static SwapOutcome Done(bool running) => new(running, false);
-    public static SwapOutcome RolledBack(bool running) => new(running, true);
+    // 实测修正（见本任务 Step 5 注 ③）：工厂不得叫 `RolledBack`——与位置参数生成的同名属性冲突（CS0102）。
+    public static SwapOutcome Rollback(bool running) => new(running, true);
 }
 ```
 
@@ -2401,7 +2402,7 @@ Expected: PASS。过滤 `CoreManagerTests|StderrRingTests|MihomoClientTests` 跑
 
 **修复轮（R-8h + 四条小钉）后的计数**：`CoreManagerTests` 由 9 条变 **11** 条（新增 R-8h 的取消用例与 R-8c 的 `DisposeAsync_KillsCoreAndLeavesStopped`），过滤总数 **21**，全套 **59/59**。
 
-**耗时预期（不是卡死）**：`StartAsync` 的探活循环按 spec 写死 20×250 ms，失败路径要跑满两次尝试，所以 `Start_DoesNotReachRunning_...` 与 `Start_FailsWhenVersionNeverResponds_...` 各约 10 s，本套件单跑约 25~30 s。不许为了跑得快把 5 s 缩成 1 s——那是 spec §9 的判据，缩了等于把"内核慢启动被误判 Crashed"这个真实故障放回代码里。
+**耗时预期（不是卡死）**：`StartAsync` 的探活循环按 spec 写死 20×250 ms，失败路径要跑满两次尝试。**实测修正**：mixed 端口无人监听时，本机一次 TCP connect 要约 2 s 才拿到拒绝，而 `TcpAlive` 的预算只有 1 s，所以「内核活着但 mixed 不通」这一支每轮约 1.25 s，`Start_DoesNotReachRunning_...` 单条实测 **50 s**（`Start_FailsWhenVersionNeverResponds_...` 因 controller 先失败短路，仍约 10 s），本套件单跑约 1 分钟。判据与数字都见 spec §9「探活成本实测」。不许为了跑得快把窗口缩成 1 s——那是 spec §9 的判据，缩了等于把"内核慢启动被误判 Crashed"这个真实故障放回代码里；但 UI/Tray 侧必须把这段 `Starting` 停留当"进行中"来显示（AGENTS.md：长耗时操作必须有进行中反馈）。
 
 - [x] **Step 5: 提交**
 
@@ -3564,7 +3565,7 @@ public class CoreUpdaterTests
     private static async Task<SwapOutcome> TestSwap(Func<Task> replaceFiles, CancellationToken ct)
     {
         try { await replaceFiles(); return SwapOutcome.Done(true); }
-        catch (IOException) { return SwapOutcome.RolledBack(false); }
+        catch (IOException) { return SwapOutcome.Rollback(false); }
     }
 
     // 假 release zip：内存里造，含单个 .exe 条目
@@ -3710,7 +3711,7 @@ Expected: FAIL（类型不存在）
 - 进度：`pct = (int)(received * 100 / total)`；与上次回调的 `pct` 相同则不发（节流），首次与 100% 必发——`Progress_IsMonotonic_Throttled_AndEndsAt100` 用「回调次数 == 去重次数且 <100」双向卡住这条。
 - 缓存命中（`core\downloads\<资产名>` 存在**且能解出 `.exe` 条目**）→ 完全跳过网络，`CachedZip_SkipsNetworkEntirely_AndStillInstalls` 就是这条（该测试里 `/dl` 根本没注册，走通即证明没联网）。
 - 解包：取 zip 内**首个 `.exe` 条目**（真实包内文件名带资产后缀，不是 `mihomo.exe`）写到临时文件，再由换文件动作落为 `core\mihomo.exe`。
-- 换文件动作（交给 `swap` 委托执行的那段）：**先 `File.Copy(CoreExecutable, CoreExecutable + ".bak", overwrite: true)` 再 `File.Copy(temp, CoreExecutable, overwrite: true)`**。不要用 `File.Replace`——目标被内核占用时它会直接失败、不产生 `.bak`，回滚就无据可依；备份先行则 `InUseTarget_RollsBackAndReportsInUseRolledBack` 的 `.bak` 断言成立。IOException 从委托里抛出 → `SwapOutcome.RolledBack` → 返回 `InUseRolledBack`，**旧内核继续跑**。
+- 换文件动作（交给 `swap` 委托执行的那段）：**先 `File.Copy(CoreExecutable, CoreExecutable + ".bak", overwrite: true)` 再 `File.Copy(temp, CoreExecutable, overwrite: true)`**。不要用 `File.Replace`——目标被内核占用时它会直接失败、不产生 `.bak`，回滚就无据可依；备份先行则 `InUseTarget_RollsBackAndReportsInUseRolledBack` 的 `.bak` 断言成立。IOException 从委托里抛出 → `SwapOutcome.Rollback` → 返回 `InUseRolledBack`，**旧内核继续跑**。
 - 状态：更新期间的 `CoreState.Updating` 迁移由 `CoreManager.SwapExecutableAsync` 在生命周期锁内完成（Task 8 已实现），`CoreUpdater` **不得自己改状态、不得碰进程**（spec §3 禁令 1/3）。
 
 - [ ] **Step 4: 跑测试确认通过**

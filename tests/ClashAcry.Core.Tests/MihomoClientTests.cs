@@ -125,4 +125,20 @@ public class MihomoClientTests : IDisposable
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => Client().GetDelayAsync("n1", "http://e/204", 5000, cts.Token));
     }
+
+    [Fact]
+    public async Task Delay_404_ThrowsApiException_AndDoesNotFoldToMinusOne()
+    {
+        // spec §4.2 实测：provider 成员调 /proxies/{name}/delay 直接 404（成员不在顶层路由表）。
+        // 折成 -1 等于把「这条名字没有注册」渲染成「节点超时」，Task 15 会显示假的红色状态。
+        // 这条是 Task 6 交付时唯一没有回归锁的 spec 既定要求（把 catch 条件手改成 409 or 404，全套仍绿）。
+        _wire.Reset();
+        _wire.Given(Request.Create().WithPath("/proxies/prov-node/delay").UsingGet())
+             .RespondWith(Response.Create().WithStatusCode(404).WithBody("not found"));
+
+        var ex = await Assert.ThrowsAsync<ApiException>(
+            () => Client().GetDelayAsync("prov-node", "http://e/204", 5000, default));
+
+        Assert.Equal(404, ex.StatusCode);
+    }
 }

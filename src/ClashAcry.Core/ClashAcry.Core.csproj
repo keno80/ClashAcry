@@ -5,4 +5,9 @@
   <ItemGroup>
     <PackageReference Include="YamlDotNet" Version="18.1.0" />
   </ItemGroup>
+  <!-- Task 8：CoreStateChanged / CoreState 住 Contracts（Task 3 裁定「一个事件一种形状、payload 全住
+       Contracts」），CoreManager 只 import 不重复定义，所以 Core 直引 Contracts。 -->
+  <ItemGroup>
+    <ProjectReference Include="..\ClashAcry.Contracts\ClashAcry.Contracts.csproj" />
+  </ItemGroup>
 </Project>

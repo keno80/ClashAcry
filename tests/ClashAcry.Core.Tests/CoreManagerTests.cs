@@ -165,7 +165,8 @@ public class CoreManagerTests : IDisposable
     }
 
     [Fact]
-    public async Task StartCancelled_KillsCore_TransitionsStopped_AndThrowsWithoutRetrying()    {
+    public async Task StartCancelled_KillsCore_TransitionsStopped_AndThrowsWithoutRetrying()
+    {
         // 裁定 R-8h + spec §9 取消语义：调用方取消不是「启动失败」。三步顺序不可换——
         // 杀掉已 spawn 的进程（绝不留孤儿内核）→ Transition(Stopped) → 原样抛 OperationCanceledException，
         // 且不许拿着已取消的令牌再跑第二轮重试。

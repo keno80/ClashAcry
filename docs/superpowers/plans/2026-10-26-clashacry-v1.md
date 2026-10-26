@@ -1899,6 +1899,13 @@ git commit -m "feat(core): 系统代理 HKCU 开关与悬挂清理（只清指�
   这条同样要回写 **spec §9**：`StartAsync` 的取消语义（杀掉已 spawn 的进程 + `Stopped` + 抛 `OperationCanceledException`，且不进重试）。
   **回归锁（必做，否则这条裁定随时会被下一次重构抹掉）**：`StartCancelled_KillsCore_TransitionsStopped_AndThrowsWithoutRetrying`。不能用「进函数前就取消好的令牌」——那会在 `InLifecycle` 的 `_lifecycle.WaitAsync(ct)` 就抛，压根没 spawn，测试空转。要卡在循环中间：夹具的 `FakeProbe.ControllerAlive` 改成 `await _gate.Task`（**不带 ct**，让测试掌控时机）→ 复用现成的假内核夹具（`cmd.exe /c ping -n 60 127.0.0.1`，别用 `timeout /t`，它拒绝非交互控制台）。步骤：`var start = mgr.StartAsync(cts.Token);`（不 await）→ 轮询等 `mgr.SpawnCount == 1 && mgr.State == Starting` → `cts.Cancel(); gate.SetResult(false);` → `await Assert.ThrowsAnyAsync<OperationCanceledException>(() => start);`。断言四件：抛的是 OCE（`when (ct.IsCancellationRequested)` 命中，不是别的异常）；`State == Stopped`（不是 `Crashed`，也不是卡在 `Starting`）；`SpawnCount == 1`（重试循环没拿着已取消的令牌再 spawn 第二个进程）；`StartAttemptCount == 1`。取消后 `Task.Delay(250, ct)` 立即抛，整条用例不超过 1 s。同样挂 `[Collection("RegistryGuard")]` + `RegistrySnapshot` 与同类用例保持一致（取消路径其实不经 `StopLockedAsync`、不写注册表，挂上只是防并发还原互相覆盖）。
 - **评审带出的四条小钉（同一轮修复里一起办，都是本任务自己的面积）**：① `RunningProcessId` 在锁外读 `_proc.HasExited`，而 `KillProcess` 可能并发 `_proc.Dispose()` → Task 11 的管道线程读它会拿 `ObjectDisposedException`，改成 try/catch 返回 null；② `StateChangedEvents` 现在把活的 `_events` 直接交出去，`Transition` 还在往里 `Add` → 读时返回快照；③ `Start_ControllerPortAlreadyOwned...` 缺 `Assert.Equal(2, mgr.StartAttemptCount)`——R-8a 明写过「占用被拒也吃一次重试」，这句副作用目前没有回归锁；④ **R-8c 目前没有任何回归锁**（全套没一处调用 `DisposeAsync`）→ 补一条 `DisposeAsync_KillsCoreAndLeavesStopped`（Running 后释放 → 进程消失、`State == Stopped`、二次释放是 no-op；它同样会走 `CleanupIfStale`，所以必须 `RegistrySnapshot` + `RegistryGuard`）。
+- **R-8i（修复轮 2，实现者报上来的实测）：探活窗口改成「墙上时间 5 s」，`TcpAlive` 的单次预算从 1 s 降到 250 ms。** `20 × 250 ms` 这个写法把「间隔」当成了「预算」，而间隔之外还要付一次 TCP 探活：控制器独立复测（`net10.0` 小程序，本机 win-x64）——**对没人在听的 loopback 端口发起 connect，拿到 ConnectionRefused 要约 2.03 s**（`TcpClient.ConnectAsync`、同步 `Socket.Connect` 三种写法各跑三次，2027~2044 ms，无预热效应），而**真在听的端口 0 ms**。所以 `TcpAlive` 那 1 s 预算在「mixed 不通」这一支每次吃满 1 s，一轮 = 250 ms + 1 s，20 轮 ≈ 25 s，两次尝试 ≈ 50 s（回归用例 `Start_DoesNotReachRunning_...` 实测 50 s）。这不是慢，是**说谎**：spec §9 写的是「5 s 内未就绪」，实现给了 25 s，UI 会把「内核起不来」渲染成 25 秒的假死。裁定三条，都要落代码：
+  ① 窗口按墙上时间算——`Stopwatch` 起表，`while (sw.Elapsed < 5 s)` 继续轮，超时即判失败；**不许**再用固定轮数当预算（轮数 × 间隔在任何一次探活变慢时都会失真）。
+  ② `CoreProbe.TcpAlive` 的单次超时 **250 ms**（loopback 上活监听者 0 ms 应答，250 ms 已是三个数量级的余量）；这同时把 `ControllerPortOccupied` 预检的最坏成本从 1 s 压到 250 ms。
+  ③ 理由文案里的「5 s」必须与真实窗口一致，失败文案照旧写「5 s 内未就绪」——改完它就名副其实了。
+  净效果：失败路径从 ~50 s 降到 ~5 s/次尝试（约 10 轮 × (250 ms 间隔 + ≤250 ms 探活)），全套测试时间随之下降；`Starting` 期间 UI 仍要显示"正在探活"（AGENTS.md：长耗时操作必须有进行中反馈），但不再有 25 s 的失真窗口。
+  **回归锁**：`Start_DoesNotReachRunning_WhenControllerAliveButMixedPortDead` 加一句 `Assert.True(elapsed < 8 s)`（在测试里用 `Stopwatch` 夹住 `StartAsync`，8 s = 名义 5 s + 一次重试的余量取一半），这样"窗口又悄悄变成轮数制"会被测出来而不是被 1 分钟的等待默默容忍。
+- **实现者报的「`KillProcess` 的 `catch { }` 可能吞掉一次杀不掉的内核、我们却广播 Stopped」——不单独加代码，裁定为已由 ④ 的用例覆盖。** 新补的 `DisposeAsync_KillsCoreAndLeavesStopped` 真拿 PID 在 `Process.GetProcesses()` 里等它消失，等于把「说 Stopped 就得真没了」钉成了可执行断言；而 `Kill(entireProcessTree)` 对我们自己的子进程返回"拒绝访问"在 v1 里没有可达路径（同一用户、同一安全上下文）。若将来引入提权运行或外部看管进程，这条要重开。
 
 - [x] **Step 1: 写失败的测试**
 
@@ -2188,7 +2195,10 @@ public class CoreProbe(MihomoClient client)
         {
             using var tcp = new TcpClient();
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeout.CancelAfter(1000);
+            // 裁定 R-8i②：单次探活预算 250 ms（不是 1 s）。实测 loopback 上「真在听」是 0 ms 应答，
+            // 而「没人在听」要 2.03 s 才拿到 ConnectionRefused——预算给 1 s 就是让每次失败都吃满 1 s，
+            // 把 5 s 的窗口拖成 25 s。250 ms 相对 0 ms 已有三个数量级余量。
+            timeout.CancelAfter(250);
             await tcp.ConnectAsync(host, port, timeout.Token);
             return true;
         }
@@ -2323,7 +2333,11 @@ public sealed class CoreManager : IAsyncDisposable
             _proc.BeginOutputReadLine(); _proc.BeginErrorReadLine();
 
             var controllerOk = false; var mixedOk = false;
-            for (var i = 0; i < 20; i++)     // 20 x 250ms = 5s
+            // 裁定 R-8i①：窗口按**墙上时间**算，不按轮数算。`for (i < 20)` 把「间隔」当「预算」，
+            // 可每轮还要付一次 TCP 探活：实测 loopback 上没人听时 connect 要 2.03 s 才拒绝，
+            // 于是名义 5 s 实际 25 s（两次尝试 50 s），UI 表现为假死——见 spec §9 探活成本实测。
+            var probeWindow = Stopwatch.StartNew();
+            while (probeWindow.Elapsed < TimeSpan.FromSeconds(5))
             {
                 await Task.Delay(250, ct);
                 if (_proc.HasExited)
@@ -2402,7 +2416,7 @@ Expected: PASS。过滤 `CoreManagerTests|StderrRingTests|MihomoClientTests` 跑
 
 **修复轮（R-8h + 四条小钉）后的计数**：`CoreManagerTests` 由 9 条变 **11** 条（新增 R-8h 的取消用例与 R-8c 的 `DisposeAsync_KillsCoreAndLeavesStopped`），过滤总数 **21**，全套 **59/59**。
 
-**耗时预期（不是卡死）**：`StartAsync` 的探活循环按 spec 写死 20×250 ms，失败路径要跑满两次尝试。**实测修正**：mixed 端口无人监听时，本机一次 TCP connect 要约 2 s 才拿到拒绝，而 `TcpAlive` 的预算只有 1 s，所以「内核活着但 mixed 不通」这一支每轮约 1.25 s，`Start_DoesNotReachRunning_...` 单条实测 **50 s**（`Start_FailsWhenVersionNeverResponds_...` 因 controller 先失败短路，仍约 10 s），本套件单跑约 1 分钟。判据与数字都见 spec §9「探活成本实测」。不许为了跑得快把窗口缩成 1 s——那是 spec §9 的判据，缩了等于把"内核慢启动被误判 Crashed"这个真实故障放回代码里；但 UI/Tray 侧必须把这段 `Starting` 停留当"进行中"来显示（AGENTS.md：长耗时操作必须有进行中反馈）。
+**耗时预期（修复轮 2 / 裁定 R-8i 之后）**：探活窗口按墙上时间计（`Stopwatch` + 5 s），`TcpAlive` 单次预算 250 ms。失败路径 `Start_DoesNotReachRunning_...` 与 `Start_FailsWhenVersionNeverResponds_...` 各约 10 s（两次尝试 × 5 s 窗口），本套件单跑约 25~30 s。R-8i 之前的旧写法会把这两条拖到 50 s（名义 5 s 实际 25 s/尝试），原因是"每轮 250 ms"只是间隔不是预算、每次 TCP 探活对无监听 loopback 端口要 2.03 s 才拒绝——实测与推论见 spec §9「探活成本实测」。不许为了跑得快把 5 s 窗口缩成 1 s：那是 spec §9 的判据；但也不许留着 25 s 的失真窗口，它把"内核起不来"渲染成 25 秒假死，违反 AGENTS.md 的进行中反馈要求。`Starting` 期间 UI/Tray 必须持续显示"正在探活"。
 
 - [x] **Step 5: 提交**
 

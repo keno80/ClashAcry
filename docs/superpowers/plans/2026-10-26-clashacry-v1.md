@@ -949,7 +949,9 @@ public class ConfigInjectorTests
     private static string Dump(YamlNode n)
     {
         var s = new StringWriter();
-        new YamlStream(new YamlDocument(n)).Save(s);
+        // assignAnchors:false 是必需的：默认 true 会给**内容重复**的节点发随机锚点（`&1065887375`），
+        // 夹具一旦有重复标量，结构比对就会因随机 ID 偶发红灯。Task 8/10 之后任何写 yaml 的地方同理。
+        new YamlStream(new YamlDocument(n)).Save(s, assignAnchors: false);
         return s.ToString();
     }
     private static string[] Match(string text, string key) =>
@@ -1140,6 +1142,37 @@ public class SubscriptionImportTests : IDisposable
         Assert.Empty(Directory.GetFiles(p.ImportsDir));
     }
 
+    [Fact]
+    public void Import_NodeLinesWithColonInRemark_StillRejected_WritesNothing()
+    {
+        // 顶层键嗅探的回归锁（Task 5 评审提出）：真实节点行的备注常写成 `#name: hk`，含冒号+空格。
+        // 正则若退回宽松的 `[A-Za-z_-]+.*:\s`，这串会被当 Clash yaml 的顶层键，整份列表被存档并写进产物
+        // ——spec §6 的「节点行导入不做」红线重新洞开且无声。
+        var body = "ss://AAA@1.2.3.4:8389#name: hk1\nvmess://BBB#name: jp2\n";
+        var (p, s) = Fixture("mode: old\n");
+
+        var r = new SubscriptionImport(p, s).ImportFromText(body);
+
+        Assert.Contains("不支持节点行导入", r.ReasonIfFailed);
+        Assert.Equal("mode: old\n", File.ReadAllText(p.ConfigFile));
+        Assert.Empty(Directory.GetFiles(p.ImportsDir));
+    }
+
+    [Fact]
+    public void Import_Base64OfNodeLinesWithColon_StillRejected_WritesNothing()
+    {
+        // 同上，但走 base64 剥壳通路：解码后的判定必须与明文走同一条拒绝分支。
+        var b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(
+            "ss://AAA@1.2.3.4:8389#name: hk1\ntrojan://pw@1.2.3.4:443#name: us2\n"));
+        var (p, s) = Fixture("mode: old\n");
+
+        var r = new SubscriptionImport(p, s).ImportFromText(b64);
+
+        Assert.Contains("不支持节点行导入", r.ReasonIfFailed);
+        Assert.Equal("mode: old\n", File.ReadAllText(p.ConfigFile));
+        Assert.Empty(Directory.GetFiles(p.ImportsDir));
+    }
+
     private string UrlSafeNoPad(string s) =>
         Convert.ToBase64String(Encoding.UTF8.GetBytes(s)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
@@ -1198,11 +1231,16 @@ using System.Text.RegularExpressions;
 private static readonly Regex NodeLine = new(@"^\s*(ss|ssr|vmess|trojan|vless|hysteria2?)://",
     RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-/// 节点行列表：没有 `:` 形式的顶层 yaml 键，却有多行 `scheme://`。
+/// 节点行列表：没有「标识符 + : + 空白/行尾」形式的顶层 yaml 键，却有多行 `scheme://`。
+/// 键的正则不许写成 `[A-Za-z_-]+.*:\s`：那个 `.*` 会让 `ss://h:1#name: 香港` 这类节点行冒充键，
+/// 整份节点行列表被当 Clash yaml 存档并写进产物（spec §6 明令拒绝）。Task 5 实测收口为下面这条。
+private static readonly Regex TopLevelKey = new(@"^[A-Za-z_-][A-Za-z0-9_-]*:(?=\s|$)",
+    RegexOptions.Compiled | RegexOptions.Multiline);
+
 private static bool IsNodeLineList(string text)
 {
     var lines = text.Split('\n');
-    return !Regex.IsMatch(text, @"^\s*[A-Za-z_-]+.*:\s", RegexOptions.Multiline)
+    return !TopLevelKey.IsMatch(text)
         && lines.Count(l => NodeLine.IsMatch(l)) >= 2;
 }
 
@@ -1233,7 +1271,7 @@ private static string Pad(string compact)
 > 这条通路**不需要联网**，所以判定「机场实际发的是不是 base64」不靠记忆：后续任何一次真实订阅链接复测（Task 18 的人工冒烟会用到真链接）若与这里的假设不符——例如某些站点 gzip 后再 base64，或返回 `text/html` 的网页订阅——按实测回写 spec §12 与本任务，不许让用户去手工解码。
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter SubscriptionImportTests`
-Expected: PASS，7/7（七条行为契约：下载失败不动旧配置 / 原文先存档再注入 / 明文节点行拒绝且零落盘 / base64 里的 Clash yaml / base64 里的节点行仍拒绝 / url-safe 无填充也能解 / `ImportFromFile` 不动用户原件）。
+Expected: PASS，9/9（九条行为契约：下载失败不动旧配置 / 原文先存档再注入 / 明文节点行拒绝且零落盘 / base64 里的 Clash yaml / base64 里的节点行仍拒绝 / url-safe 无填充也能解 / `ImportFromFile` 不动用户原件 / 带 `#name: xx` 的节点行回归锁（明文 + base64 各一条））。
 
 - [x] **Step 6: 提交**
 

@@ -1337,7 +1337,7 @@ git commit -m "feat(core): yaml 最小键注入与订阅导入（失败保留旧
 - **R-6b：`GetDelayAsync` 的 `-1` 只表示「这个节点测不出延迟」，不表示「调用方不要了」。** 样例 `catch (TaskCanceledException)` 会把**外部取消**（Task 15 轮询切页、窗口关闭时的 `CancellationTokenSource.Cancel`）也吞成 `-1`，UI 于是把「这次刷新被取消」渲染成「节点超时」——正面违反「轮询不得产生可见抖动/错误数据」。改为 `catch (TaskCanceledException) when (!ct.IsCancellationRequested)`；补一条测试：服务端延迟 2 秒、`cts` 100ms 取消，断言抛 `OperationCanceledException` 而不是返回 `-1`。
 - **不做的事（YAGNI）**：`GET /providers/proxies/{name}` 详情端点本任务不封装。Task 15 需要的 provider 成员健康样本已经出现在 `GET /providers/proxies` 的 `ProviderInfo.Proxies` 里（spec §4.2），v1 没有别的调用方，别为不存在的需求加方法。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```csharp
 public class MihomoClientTests : IDisposable
@@ -1455,12 +1455,12 @@ public class MihomoClientTests : IDisposable
 `WithDelay` 的单位随 WireMock 版本而异（2.x 的 int 重载是毫秒；若编译期警告/报错就换 `WithDelay(TimeSpan.FromMilliseconds(2000))`）——唯一要求是真延迟明显大于 `cts` 的 100ms，别把它调成巧合。
 `_wire.LogEntries` 里可能混有 WireMock 自己的 admin 请求：一律先 `Where(m => m.Path == ...)` 过滤再取，别赌 `.Last()` 的时序。）
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter MihomoClientTests`
 Expected: FAIL（类型不存在）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```csharp
 // MihomoModels.cs
@@ -1585,12 +1585,12 @@ public sealed class ApiException : Exception
 
 `GET /configs` 已由 Task 1 实测为 **200**（spec §4.2），`CoreConfigView` 与 `GetConfigsAsync` 都保留。该次探针打印截断到 200 字符，逐字证到的键是 `port/socks-port/redir-port/tproxy-port/mixed-port/tun`，`mode` 在完整响应里但未被逐字证到——Step 1 里再加一条用例，用能同时给出 `mode` 与 `mixed-port` 的响应体断言两者都解析出来；若真机（Task 8 首次联调时）发现 `mode` 键名不同，按实测改模型并回写 spec §4.2，**不许**改端点或删方法。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter MihomoClientTests`
 Expected: PASS，**7/7**（样例 4 条 + 两条裁定回归锁 + `/configs` 一条）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/ClashAcry.Core/MihomoClient.cs src/ClashAcry.Core/MihomoModels.cs tests/ClashAcry.Core.Tests/MihomoClientTests.cs

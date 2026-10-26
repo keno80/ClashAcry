@@ -50,9 +50,51 @@ public class SettingsStoreTests : IDisposable
         var s = Store().Load();
 
         Assert.Equal(7899, s.MixedPort);
-        Assert.Equal("ab", s.Secret);
+        // "ab" 不合 32hex，按裁定在 Load 里就被 Heal 成新值（缺键回落其余字段的语义不变）
+        Assert.Matches("^[0-9a-f]{32}$", s.Secret);
         Assert.Equal(9097, s.ControllerPort);
         Assert.Equal("127.0.0.1", s.ControllerHost);
+    }
+
+    [Fact]
+    public void MissingSecretKey_HealsToNewSecret_AndPersistsIt()
+    {
+        var settings = AppPaths.ForTest(_dir).SettingsFile;
+        File.WriteAllText(settings, """{"mixed_port":7899}""");
+        var s = Store().Load();
+
+        Assert.Matches("^[0-9a-f]{32}$", s.Secret);
+        Assert.Equal(7899, s.MixedPort);
+        // 修补必须落盘：否则每次 Load 都换一个全新 secret，Task 8 起内核时两边用的值不一样，认证必断
+        Assert.Equal(s.Secret, Store().Load().Secret);
+        var onDisk = System.Text.Json.JsonSerializer.Deserialize<Settings>(File.ReadAllText(settings))!;
+        Assert.Equal(s.Secret, onDisk.Secret);
+    }
+
+    [Fact]
+    public void NullAndOutOfRangeValues_HealToDefaults()
+    {
+        // STJ 会把 JSON 的 null 原样塞进非空声明的 string（不做可空性检查），
+        // 所以下游 `new YamlScalarNode(s.Secret)` 与 Bearer 头是 NRE 现场——读盘必须归一化。
+        File.WriteAllText(AppPaths.ForTest(_dir).SettingsFile,
+            """{"secret":null,"controller_host":null,"controller_port":0,"mixed_port":-5,"delay_test_url":""}""");
+        var s = Store().Load();
+
+        Assert.Matches("^[0-9a-f]{32}$", s.Secret);
+        Assert.Equal("127.0.0.1", s.ControllerHost);
+        Assert.Equal(9097, s.ControllerPort);
+        Assert.Equal(7897, s.MixedPort);
+        Assert.Equal("http://www.gstatic.com/generate_204", s.DelayTestUrl);
+    }
+
+    [Fact]
+    public void FileIsJsonNull_RebuildsStableSecret()
+    {
+        File.WriteAllText(AppPaths.ForTest(_dir).SettingsFile, "null");
+        var first = Store().Load().Secret;
+
+        Assert.Matches("^[0-9a-f]{32}$", first);
+        Assert.Equal(first, Store().Load().Secret);   // 整体 null 也要走 Write，否则两次 Load 得到两个 secret
     }
 
     [Fact]

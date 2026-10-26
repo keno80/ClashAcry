@@ -69,7 +69,7 @@ UI 起来发现管道不存在（Tray 未运行或被杀）→ 顶部横幅"托�
 
 鉴权一律 `Authorization: Bearer ${secret}`。
 
-**下表全部为 2026-10-26 真机实测**（内核 `mihomo-windows-amd64-compatible` **v1.19.33**，`GET /version` → `{"meta":true,"version":"v1.19.33"}`；夹具 `packaging/imports-sample/minimal.yaml`，`external-controller 127.0.0.1:9097`、`mixed-port 7897`、`secret probe-secret`；复现：`powershell -File scripts/probe-mihomo-api.ps1`，完整转录见 `.superpowers/sdd/2026-10-26-clashacry-v1/probe-run1.txt` / `probe-run2.txt`）。
+**下表全部为 2026-10-26 真机实测**（内核 `mihomo-windows-amd64-compatible` **v1.19.33**，`GET /version` → `{"meta":true,"version":"v1.19.33"}`；夹具 `packaging/imports-sample/minimal.yaml`，`external-controller 127.0.0.1:9097`、`mixed-port 7897`、`secret probe-secret`；复现：`powershell -File scripts/probe-mihomo-api.ps1`，完整转录当时打印在 `.superpowers/sdd/2026-10-26-clashacry-v1/probe-run1.txt` / `probe-run2.txt`，该目录 git-ignored、不在仓库里；要证据就重跑 `scripts/probe-mihomo-api.ps1`（两种模式各一次））。
 
 | 用途 | 端点 | 实测 |
 |---|---|---|
@@ -78,9 +78,9 @@ UI 起来发现管道不存在（Tray 未运行或被杀）→ 顶部横幅"托�
 | 选择成员 | `PUT /proxies/{name}` body `{"name":...}` | **204** 空体；body 换成 `{"proxy":...}` 实测 **400**——请求体只认 `name` 键，`proxy` 键不被接受（Task 6 必须发 `{"name":...}`） |
 | 单节点测延迟 | `GET /proxies/{name}/delay?url=&timeout=` | 组与普通节点 **200** `{"delay":N}`；**provider 成员（`prov-node-1`）404** `{"message":"Resource not found"}` |
 | Provider 列表 | `GET /providers/proxies` | **200**，响应根为对象 `{"providers": {...}}`——根键是复数 **`providers`**，其值是**以 provider 名为键的对象表**（不是数组）。表内除真实 provider 外还含每个组的隐式 Compatible provider 与 `default`，客户端须按 `vehicleType`（实测出现值：文件型 `"File"`、隐式 `"Compatible"`；HTTP 型未在 v1 探针内实测）过滤；成员条目带 `"provider-name"` 回指 |
-| Provider 详情 | `GET /providers/proxies/{name}` | **200**，直接返回 provider 对象本身（**无** `providers` 外层包装），键为 `name/type/vehicleType/proxies/testUrl/expectedStatus/updatedAt` |
+| Provider 详情 | `GET /providers/proxies/{name}` | **200**，直接返回 provider 对象本身（**无** `providers` 外层包装），键为 `name/type/vehicleType/proxies/testUrl/expectedStatus/updatedAt`（详情端点打印同样被截断，这份键表取自同一 provider 对象在 `GET /providers/proxies` 全量结构打印里的形态） |
 | Provider 手动刷新 | `PUT /providers/proxies/{name}` | **204** 空体（无需请求体） |
-| 读当前运行配置 | `GET /configs` | **200**（受支持，返回全量运行配置 JSON，含 `mode`、`mixed-port`、`tun` 等） |
+| 读当前运行配置 | `GET /configs` | **200**（受支持，返回全量运行配置 JSON；探针打印截断到 200 字符，逐字证到的键是 `port`/`socks-port`/`redir-port`/`tproxy-port`/`mixed-port`/`tun`。`mode` 在完整响应里但本次打印未证到——Task 6 的 `CoreConfigView.Mode` 若反序列化取不到值，以实测为准，别改端点） |
 | 切模式（rule/global/direct） | `PATCH /configs {"mode":...}` | **204**；`PUT /configs {"mode":...}` 亦 **204**（两者皆可，v1 统一用 `PATCH`） |
 | 热切配置文件 | `PATCH /configs {"path":...}` | **204**；`PUT` 同体亦 **204**；两者都会触发内核全量重载（stdout 出现第二次 `Start initial configuration`） |
 
@@ -111,7 +111,7 @@ mixed 端口被占用的真机行为（Task 8 `Running` 判据依据，`-OccupyM
 
 ```
 ClashAcry.sln
-src/ClashAcry.Core/        SettingsStore(原子写) · ConfigInjector · CoreManager(状态机+stderr环+双探活)
+src/ClashAcry.Core/        SettingsStore(原子写) · ConfigInjector · CoreManager(状态机+内核输出环+双探活)
                            SystemProxy(winreg+InternetSetOptionW) · MihomoClient(HttpClient)
                            CoreUpdater(GitHub release 挑选/下载/解包/轮换) · PipeProtocol / PipeServer / PipeClient
 src/ClashAcry.Contracts/   管道消息与 DTO（UI ↔ Tray 唯一契约，无业务逻辑）
@@ -128,10 +128,10 @@ docs/superpowers/{specs,plans,checklists}/
 
 | 模块 | 内容 | 机制 |
 |---|---|---|
-| 内核托管 | 启停、重载、崩溃检测 + 启动时一次自动重试、stderr 环形 200 行、状态事件 | `CoreManager`：`Process` + `DataReceived`，`GET /version` 探活退避 |
+| 内核托管 | 启停、重载、崩溃检测 + 启动时一次自动重试、内核输出环形 200 行（**stdout 为主**，实测 mihomo 的 Go 日志全走 stdout、stderr 恒空，两流各订阅一次进同一个环）、状态事件 | `CoreManager`：`Process` + 两路 `DataReceived`，`GET /version` 探活退避 |
 | 配置导入 | 订阅 URL 下载 或 本地 yaml → 注入必需字段 → 写 `runtime\config.yaml` → 热切；失败保留旧配置 | `ConfigInjector`（只覆盖必需键，其余原样透传） |
 | 节点面板 | 策略组/节点树、手动切换、单点测速 + 全组顺序测速（并发上限 4，结果就地更新） | `MihomoClient` 直连 §4.2 |
-| Provider | 手动刷新，展示 `updatedAt` 与成员数 | `GET/PUT /providers/proxies` |
+| Provider | 手动刷新，展示 `updatedAt` 与成员数；**列表按 `vehicleType` 过滤**（实测表内混有每组自动生成的 `Compatible` 伪 provider 与 `default`） | `GET/PUT /providers/proxies` |
 | 开关 | 系统代理开/关；rule / global / direct 模式 | `SystemProxy` + `PATCH /configs {mode}` |
 | 托盘 | 关窗即退 UI；Tray 常驻；快捷启停与切模式；退出清理 | Win32 托盘 + 管道 |
 | 内核更新 | 内置一份 + 应用内检查/下载最新 release；进度百分比实时显示；旧版 `.bak` 轮换；`version.txt` 记 tag | `CoreUpdater` |
@@ -160,7 +160,7 @@ docs/superpowers/{specs,plans,checklists}/
 
 | 类别 | 场景 | 策略 |
 |---|---|---|
-| 内核启动失败 | controller 端口占用、yaml 语法错 | stderr 环形缓冲，UI 展示 Go 原文**不翻译**；仅启动时自动重试一次，重试仍失败落 `Crashed` 并保留原因 |
+| 内核启动失败 | controller 端口占用、yaml 语法错 | 内核输出环形缓冲（stdout+stderr），UI 展示 Go 原文**不翻译**；仅启动时自动重试一次，重试仍失败落 `Crashed` 并保留原因 |
 | 状态失真 | mixed 端口被占但 controller 正常，内核活着却不通 | `Running` 判据 = `GET /version` 成功 **且** mixed 端口 TCP 可连；任一不符不进入 `Running`，横幅报"端口 7897 被占用" |
 | API 断连 | secret 不符、controller 未监听、Tray 掉线 | `MihomoClient` 透出真实状态码；UI 顶部横幅态 + 写操作按钮置灰；管道断开则提示一键重启 Tray |
 | 系统代理残留 | UI/Tray 被强杀后注册表悬挂 | 三层：正常退出钩子必清；Tray 启动时校验"注册表代理指向本应用端口且探活失败"才清（指向其他软件的代理**绝不触碰**）；托盘"停止内核"顺带清 |
@@ -184,7 +184,7 @@ docs/superpowers/{specs,plans,checklists}/
 3. 空壳常驻实测：纯 Win32 Tray（含 self-contained）与 WinUI 3 UI 关窗前后的 Working Set；
 4. Tray 是否可 `PublishTrimmed`（trimming 警告清零才采用）。
 
-**Core（xUnit，全自动化）**：`SettingsStore` 原子写与默认值；`ConfigInjector` 覆盖集与"其余字段字节级不变"；`CoreManager` 状态机与 stderr 环（假内核用 WireMock.Net + 一个占端子的 `cmd.exe` 假进程）；`SystemProxy` 打真实 HKCU（备份/还原夹具）；`CoreUpdater` 资产名匹配、zip 解包、`.bak` 轮换（WireMock 假 release 响应）。
+**Core（xUnit，全自动化）**：`SettingsStore` 原子写与默认值；`ConfigInjector` 覆盖集与"其余字段字节级不变"；`CoreManager` 状态机与内核输出环——假内核必须往 **stdout** 写日志才测得到环（假内核用 WireMock.Net + 一个占端子的 `cmd.exe` 假进程）；`SystemProxy` 打真实 HKCU（备份/还原夹具）；`CoreUpdater` 资产名匹配、zip 解包、`.bak` 轮换（WireMock 假 release 响应）。
 
 **UI（FlaUI / UIAutomation，只读断言为主）**：断言"只有真窗口才有"的判据——断连时按钮置灰、横幅文案、开关回显、backdrop 档位切换后设置项标注实际生效值。不引快照测试。
 

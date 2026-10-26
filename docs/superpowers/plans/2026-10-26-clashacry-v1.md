@@ -160,7 +160,9 @@ try {
 Run: `powershell -File scripts/probe-mihomo-api.ps1`
 Expected: 12 行状态码输出，无 `ERR`（除故意探测的不支持组合）。
 
-- [x] **Step 3: 读内核 stderr 观察 mixed 端口占用行为**
+实测交付（Task 1 已完成）：脚本最终 **15 条探针**——为核实 provider 面加了 `PUT /proxies` 双请求体对照、provider 成员 `delay`、`GET/PUT /providers/proxies/{name}` 与两段结构化打印，并同时捕获 stdout/stderr。两处计划假设被实测推翻，已回写 spec §4.2：`proxies:` 里写 provider 名在 v1.19.33 是启动 fatal（正解 `use:`）、file 型 provider 的 `url` 可省略。另：脚本必须存成 **UTF-8 with BOM**，否则 PowerShell 5.1 按 GBK 解码，中文注释的末字节会吞掉下一条语句。
+
+- [x] **Step 3: 读内核输出观察 mixed 端口占用行为**（原计划写「stderr」；实测日志在 stdout，stderr 恒空）
 
 再跑一次脚本，在起内核前先占住 7897：`powershell -File scripts/probe-mihomo-api.ps1 -OccupyMixedPort`（脚本加该开关：用 `System.Net.Sockets.TcpListener` 提前绑定 7897）。记录：controller 是否正常、`GET /version` 是否 200、内核是否退出。这条直接决定 Task 8 `CoreManager` 的 `Running` 判据是否必须包含 mixed 端口 TCP 探活。
 
@@ -830,6 +832,10 @@ public sealed class ConfigShapeException : Exception
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter ConfigInjectorTests`
 Expected: PASS，4/4。**同时肉眼比对一次输出**：把 Task 1 的 `minimal.yaml` 喂进去，确认 `proxy-groups` 与 `proxies` 的嵌套结构仍是 block 风格；若变成 flow 风格，记录为已知限制写进 spec §12（内核仍能读，但人类难读）。
 
+Task 1 实测带来的两条硬约束（改注入器时不许破）：
+- **`proxy-groups` 整棵子树原样透传**，尤其 `use:` 列表。v1.19.33 里把 provider 名当节点名写进 `proxies:` 是**启动 fatal**（`proxy group[1]: PROBE-SELECT: 'PROBE-PROV' not found`），聚合订阅的唯一正确写法是 `use:`。注入器若"顺手"把 `use:` 展平、丢弃或改名，用户订阅会直接起不来。
+- **`proxy-providers` 整棵子树同样原样透传**，不得补 `url`、不得改 `type`/`path`/`interval`。实测 file 型 provider 只写 `type/path/interval` 就能加载（`url` 可省略），擅自补一个不可达 URL 虽被接受但会误导用户。
+
 - [ ] **Step 5: SubscriptionImport 与它的测试**
 
 `SubscriptionImport` 的行为契约（测试必须逐条覆盖）：
@@ -1031,12 +1037,16 @@ public sealed class ProviderInfo
     [JsonPropertyName("vehicleType")] public string? VehicleType { get; set; }
     [JsonPropertyName("updatedAt")] public DateTime? UpdatedAt { get; set; }
     [JsonPropertyName("testUrl")] public string? TestUrl { get; set; }
-    [JsonPropertyName("history")] public List<DelaySample>? History { get; set; }
+    [JsonPropertyName("expectedStatus")] public string? ExpectedStatus { get; set; }
+    // Task 1 实测：provider 对象上**没有** `history` 键，健康样本在每个成员的 `history`/`extra` 里。
+    // 曾按 provider.history 兜底显示「上次」是错的，别加回来。
     [JsonPropertyName("proxies")] public List<ProxyDetail>? Proxies { get; set; }
 }
 public sealed record ProvidersResponse(
-    // 根键名与形状以 Task 1 实测为准：这里按「对象表（键为 provider 名）」写，实测若是数组就改 List<ProviderInfo>
-    [property: JsonPropertyName("provider")] Dictionary<string, ProviderInfo> Providers);
+    // Task 1 实测（v1.19.33）：根键是复数 `providers`，值是「键为 provider 名」的对象表，不是数组。
+    // 表里还混有每个策略组自动生成的 `vehicleType:"Compatible"` 伪 provider 与 `default`：
+    // 真实订阅一律按 `vehicleType` 过滤（只留 File / Http），否则节点页会出现一堆假 provider。
+    [property: JsonPropertyName("providers")] Dictionary<string, ProviderInfo> Providers);
 public sealed record CoreConfigView([property: JsonPropertyName("mode")] string? Mode,
     [property: JsonPropertyName("mixed-port")] int? MixedPort);
 
@@ -1079,6 +1089,9 @@ public sealed class MihomoClient
     {
         var path = $"/proxies/{Uri.EscapeDataString(name)}/delay?url={Uri.EscapeDataString(url)}&timeout={timeoutMs}";
         try { var d = await GetAsync<JsonElement>(path, ct); return d.GetProperty("delay").GetInt32(); }
+        // 只把「测不了」（409 / 超时）折成 -1。Task 1 实测 provider 成员名与 provider 名一律 **404**
+        // （spec §4.2 已写成既定实现要求）：404 = 调用方用错了通路，必须原样抛出去，不许在这里顺手吞成 -1，
+        // 否则 Task 15 误调成员时会安静地显示"超时"，永远看不出是通路用错。
         catch (ApiException e) when (e.StatusCode is 409) { return -1; }
         catch (TaskCanceledException) { return -1; }
     }
@@ -1277,6 +1290,8 @@ git commit -m "feat(core): 系统代理 HKCU 开关与悬挂清理（只清指�
   - `record struct SwapOutcome(bool CoreRunningAfter, bool RolledBack)`
   - `IReadOnlyList<string> StderrTail(int n = 50)`
   - `sealed class StderrRing(int capacity) { void Add(string line); void Clear(); IReadOnlyList<string> Snapshot(); }`
+
+  命名说明（Task 1 实测后的定名裁定）：`StderrRing` / `StderrTail` / 线格式键 `stderr_tail` 是**历史名，实为"内核输出环"**——真内核把日志写在 stdout。名字不改（改名要连带动 Task 3 契约、Task 8、Task 14 显示与 spec §4.1，收益只有好看），但**语义必须在文档与注释里写清"两流进同一个环"**，否则下一个人会以为只看 stderr。
   - `sealed class CoreProbe(MihomoClient client) { Task<bool> ControllerAlive(CancellationToken ct); static Task<bool> TcpAlive(string host, int port, CancellationToken ct); }`
 
 - [ ] **Step 1: 写失败的测试**
@@ -1310,9 +1325,12 @@ public class CoreManagerTests : IDisposable
     // 假内核：把 .cmd 脚本当内核跑（CoreManager 的 launchFactory 注入点）
     private static ProcessStartInfo CmdLaunch(string exe) => new("cmd.exe", $"/c \"{exe}\"")
     { RedirectStandardError = true, RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true };
-    private static string SleepScript() => "@echo off\r\necho start 1>&2\r\ntimeout /t 60 /nobreak >nul\r\n";
-    private static string StderrScript(string text) => $"@echo off\r\necho {text} 1>&2\r\ntimeout /t 60 /nobreak >nul\r\n";
-    private static string ExitScript() => "@echo off\r\necho boom 1>&2\r\nexit 3\r\n";
+    // Task 1 实测：真内核（mihomo v1.19.33）的 Go 日志全部走 **stdout**，stderr 恒空。
+    // 假内核照这一点写：日志行 echo 到 stdout。若这里还写 `1>&2`，测试只能证明 stderr 支路通了，
+    // 证明不了真实内核那条主路会被采进环（环的 stdout 订阅漏掉时测试仍然全绿）。
+    private static string SleepScript() => "@echo off\r\necho start\r\ntimeout /t 60 /nobreak >nul\r\n";
+    private static string KernelLogScript(string text) => $"@echo off\r\necho {text}\r\ntimeout /t 60 /nobreak >nul\r\n";
+    private static string ExitScript() => "@echo off\r\necho boom\r\nexit 3\r\n";
 
     private int FreePort()
     {
@@ -1361,7 +1379,7 @@ public class CoreManagerTests : IDisposable
     {
         _wire.Reset();                       // /version 不再返回 200
         using var mixed = new TcpListener(IPAddress.Loopback, 0); mixed.Start();
-        var mgr = Build(StderrScript("config file error: bad dns section"), Port(mixed), _wire.Port);
+        var mgr = Build(KernelLogScript("config file error: bad dns section"), Port(mixed), _wire.Port);
 
         Assert.False(await mgr.StartAsync(default));
         Assert.Equal(CoreState.Crashed, mgr.State);
@@ -1559,6 +1577,9 @@ public sealed class CoreManager : IAsyncDisposable
         {
             SpawnCount++;
             _proc = Process.Start(_launch(exe))!;
+            // Task 1 实测：mihomo v1.19.33 的 Go 日志全部走 **stdout**，stderr 恒空。
+            // 两条流进同一个环（字段名 `_stderr` 是历史名，实际是"内核输出环"），顺序由到达时间决定；
+            // 只订阅 ErrorDataReceived 的话日志面板永远是一片空白。每条流各订阅一次，重复订阅会让每行进环两次。
             _proc.ErrorDataReceived += (_, e) => { if (e.Data is not null) _stderr.Add(e.Data); };
             _proc.OutputDataReceived += (_, e) => { if (e.Data is not null) _stderr.Add(e.Data); };
             _proc.BeginOutputReadLine(); _proc.BeginErrorReadLine();
@@ -3344,14 +3365,19 @@ public class ProxiesViewModelTests
     public async Task Providers_AreProjectedAsRowsWithNameTimeAndCount()
     {
         // spec §6「Provider：手动刷新，展示 updatedAt 与成员数」——这三样在 VM 里成形，页面上只绑不做运算
+        // Task 1 实测：`GET /providers/proxies` 的表里混有每个策略组自动生成的 `vehicleType:"Compatible"`
+        // 伪 provider 与一个 `default`。VM 必须按 vehicleType 过滤（只留 File / Http），否则页面上是一堆假行。
         var vm = Vm();
         await vm.RefreshAsync(Resp(Group("G", "n1", "n1"), Node("n1", provider: "sub-a")),
             new ProvidersResponse(new Dictionary<string, ProviderInfo>
             {
-                ["sub-b"] = new() { Name = "sub-b", UpdatedAt = new DateTime(2026, 10, 26, 8, 30, 0),
+                ["sub-b"] = new() { Name = "sub-b", VehicleType = "File", UpdatedAt = new DateTime(2026, 10, 26, 8, 30, 0),
                                     Proxies = new() { Node("n2", "sub-b"), Node("n3", "sub-b") } },
-                ["sub-a"] = new() { Name = "sub-a", UpdatedAt = new DateTime(2026, 10, 25, 1, 2, 0),
-                                    Proxies = new() { Node("n1", "sub-a") } }
+                ["sub-a"] = new() { Name = "sub-a", VehicleType = "Http", UpdatedAt = new DateTime(2026, 10, 25, 1, 2, 0),
+                                    Proxies = new() { Node("n1", "sub-a") } },
+                ["G"] = new() { Name = "G", VehicleType = "Compatible",
+                                Proxies = new() { Node("n1", null) } },           // 组自动生成的伪 provider：不得成行
+                ["default"] = new() { Name = "default", VehicleType = "Compatible", Proxies = new() { } },
             }));
 
         Assert.Equal(new[] { "sub-a", "sub-b" }, vm.ProviderRows.Select(r => r.Name));   // 按名排序：轮询不得让行序跳动
@@ -3440,7 +3466,9 @@ Expected: FAIL（类型不存在）→ 实现后 PASS，8/8（新增 Providers_A
 - `RefreshAsync` 合并而非替换：`Groups` 按组名查/建，`Nodes` 按 `Name` 查/建，只更新属性；**只有成员增减才 `Add`/`Remove`**。这是「不抖动」的实现点——整表重置会让 `ListView` 重挂容器，滚动条跳回顶部，用户一眼就看出"每 2 秒闪一次"。
 - 延迟文本三档：实时值 → `NN ms`；无实时值但有 history → `上次 NN ms`；都没有 → `超时`。`-1` 一律视为"无实时值"（`MihomoClient.GetDelayAsync` 已把 409/超时折成 -1）。
 - provider 成员详情来自 `ProvidersResponse[*].Proxies`：合并时按 `Name` 覆盖/补齐节点，`ProviderName` 一并带上；`show_hidden`（`UiPrefs`）决定是否隐藏 `hidden: true` 成员，默认隐藏。
+- **provider 成员不许走 `GET /proxies/{name}/delay`**（Task 1 实测 v1.19.33 对成员名与 provider 名一律 **404** `{"message":"Resource not found"}`，spec §4.2 已把它写成既定实现要求）。成员延迟只从 `ProvidersResponse[*].Proxies[i]` 的 `history` / `extra` 健康样本取，取不到落「上次/超时」档；`measure` 委托与 `TestAllAsync` 只对非 provider 成员（`ProviderName` 为空）调用——全组测速时对 provider 成员直接跳过（它们已有 history 样本），别调了拿 404 再静默吞错。
 - `ProviderRows` 在每次 `RefreshAsync` 里整体按 `Name` 排序后**就地更新**（同 `Groups` 的查/建手法：行存在就改属性，只有 provider 增减才 `Add`/`Remove`）；`UpdatedAtText` 取 `ProviderInfo.UpdatedAt`，`MemberCount` 取 `Proxies.Count`，`Proxies` 为 null 记 0。provider 列表本来不常变，整表重建等于给自己埋一次抖动。
+- **`ProviderRows` 必须先按 `vehicleType` 过滤**（Task 1 实测：`GET /providers/proxies` 的 `providers` 表里混有每个策略组自动生成的 `"Compatible"` 伪 provider 和一个 `"default"`，只留 `"File"`/`"Http"`）。不过滤的话节点页底部会多出十几个假 provider 行，还能对它们发 PUT 刷新。**过滤只作用于行**：成员详情合并仍吃整张表——`Compatible` 伪 provider 里列的就是组内节点，按 `Name` 覆盖是无操作，不会污染数据。
 - 选中项来源永远是 `ProxyDetail.Now`（mihomo 是事实源，spec §7）；`SelectAsync` 顺序固定为 `putProxy` → `fetch` → 设 `Highlight`（1.2s 后自动撤），中间不做乐观翻转。
 - 测速并发：`SemaphoreSlim(TestConcurrency = 4)`；`IsTesting` 在拿到许可时置真、释放时置假，`DelayText` 只在有值时改。
 - `INotifyPropertyChanged` 只给真正会变的属性（`DelayText`/`Selected`/`IsTesting`/`Highlight`），`Name`/`ProviderName` 设为 `init`——少一个通知就少一次重绘机会。
@@ -3743,6 +3771,16 @@ Write-Output "产物：$out.zip"
 - [ ] **Step 2: 内置内核走"本机准备"，不入 git**
 
 `.gitattributes` 的 LFS 路线不采用（远端未开 LFS 会直接报错，配额也不值得赌）。`scripts/fetch-bundled-core.ps1` 从 GitHub `MetaCubeX/mihomo/releases/latest` 取 `mihomo-windows-amd64-compatible-<tag>.zip`、解出包内 exe 落成 `packaging/core/mihomo-windows-amd64-compatible.exe`，并把 tag 写进 `packaging/core/BUNDLED.txt`（记录内置版本，spec §6「内置带一个」的可追溯来源）；`packaging/core/` 整目录加进 `.gitignore`。脚本要幂等：目标存在且 `BUNDLED.txt` 与最新 tag 一致就跳过网络。
+
+Task 1 评审提出的溯源要求（本任务必须补上，`packaging/core/` 不入库意味着**产物里的 exe 在 git 里没有任何对应物**）：`BUNDLED.txt` 不止写 tag，写三行——
+
+```
+tag: v1.19.33
+asset: https://github.com/MetaCubeX/mihomo/releases/download/v1.19.33/mihomo-windows-amd64-compatible-v1.19.33.zip
+sha256: <下载 zip 的 SHA-256>
+```
+
+`sha256` 由脚本用 `Get-FileHash -Algorithm SHA256` 对**下载的 zip 原文**计算后写入（不是对解出来的 exe；zip 才是 release 页面上的资产）。发布前跑一次 `scripts/publish.ps1` 之前，先按这三行校验本地 `packaging/core` 的来源；校验不过就重新下载。这样任何人重建产物包时能证明里面那颗 `core\mihomo.exe` 来自哪个 release，而不是"某台机器上恰好有个 exe"。
 
 - [ ] **Step 3: 验证产物**
 

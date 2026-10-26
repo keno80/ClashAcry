@@ -3034,7 +3034,12 @@ Task 9 修复轮 1 实测回写（2026-10-26 / win-x64 / .NET 10 SDK 10.0.203，
 
 **Files:**
 - Create: `src/ClashAcry.Tray/NativeMethods.cs` `Win32NotifyIcon.cs` `TrayCommandRouting.cs` `TrayHost.cs` `Program.cs`（替换 Task 2 占位）`app.ico`
-- Modify: `src/ClashAcry.Tray/ClashAcry.Tray.csproj`（嵌入 `app.ico`）
+- Modify: `src/ClashAcry.Tray/ClashAcry.Tray.csproj`（`app.ico` **复制到输出目录**，见 R-10d④）
+- Modify: `src/ClashAcry.Core/CoreManager.cs`（一行：`StopAsync` 返回 `Task<bool>`，见 R-10b）
+- Modify: `src/ClashAcry.Core/PipeServer.cs`（三行：`public Task Completion`，见 R-10j②）
+- Modify: `tests/ClashAcry.Core.Tests/ClashAcry.Core.Tests.csproj`（加 Tray 项目引用，见 R-10k）
+- Create: `scripts/make-icon.ps1`（构建期产 `app.ico`，见 R-10d⑤）
+- Modify: `src/ClashAcry.Tray/ClashAcry.Tray.csproj`（`InternalsVisibleTo ClashAcry.Core.Tests`，让 R-10c 的 `DecodeTrayParam` 能被单测——照 R-9f 在 Core 里的同一条写法）
 - Modify: `src/ClashAcry.Contracts/Commands.cs`（追加 `ModeRequest`/`SysProxyRequest`/`SysProxyState`/`SettingsPatch`，与本任务路由共用同一形状）
 - Test: `tests/ClashAcry.Core.Tests/TrayCommandRoutingTests.cs`
 
@@ -3044,6 +3049,28 @@ Task 9 修复轮 1 实测回写（2026-10-26 / win-x64 / .NET 10 SDK 10.0.203，
   - `sealed class TrayHost { Task RunAsync(CancellationToken ct); CoreManager Core; PipeServer Pipe; TrayCommandRouting Routing; }`
   - `sealed class TrayCommandRouting { Task<Frame?> Handle(Frame f); }` —— 命令路由**独立于托盘/窗口**，可单测；构造签名见 Step 3
   - `sealed class Win32NotifyIcon(string icoPath, string tooltip) : IDisposable` —— `void MenuItem(int id, string text, Action onPick)` / `void SetTip(string tip)`；Step 4 的实现就是这份接口，测试与 `TrayHost` 都按它调用
+
+派发前控制器裁定（本任务的样例把**唯一无法单测的 Win32 细节**和**跨任务引用**都写在了代码里，下面 R-10a/10b/10c/10d 四条不先裁掉，实现者要么编译不过、要么托盘「图标出现但点了没反应」——而那要到 Task 18 才看得见）：
+
+- **R-10a（阻断级）：`CoreUpdater` / `ReleaseClient` 此刻还不存在（Task 11 才建），路由不许依赖具体类型。** 样例的 `Func<CoreUpdater> _updater` 与 `_updater().InstallLatestAsync(progress, _core.SwapExecutableAsync, default)` 直接 CS0246。brief 的 Consumes 自己写了「Task 11 前用桩」，裁定就是把这条缝做成委托：`TrayCommandRouting` 构造参数改成
+  `Func<IProgress<UpdateProgress>?, CancellationToken, Task<UpdateResult>> updateCore`，
+  `UpdateCoreAsync` 里调用 `updateCore(progress, ct)`，进度广播、`UpdateResult.Updated` 时回写版本号、结果广播三条**留在路由里不动**（这三条是 UI 的「进行中反馈」契约，spec §9）。Tray 装配处先接一个诚实的桩：`(p, ct) => Task.FromException<UpdateResult>(new InvalidOperationException("内核在线更新在 Task 11 落地"))`——**不许返回 `AlreadyLatest` 装成功**，否则 `core.update` 在 Task 11 之前会静默地骗人。Task 11 只改这一行装配（`new CoreUpdater(paths, new ReleaseClient(http, ReleaseClient.DefaultLatestUrl)).InstallLatestAsync(p, core.SwapExecutableAsync, ct)`），路由与测试零改动。
+- **R-10b（阻断级）：`CoreManager.StopAsync` 现在返回非泛型 `Task`，样例 `var ok = await _core.StopAsync(default);` 是 CS0815。** Task 8 的实现体本来就 `return true`，只是声明把结果洗掉了。裁定：本任务授权改 `src/ClashAcry.Core/CoreManager.cs` 一行——`public Task<bool> StopAsync(...)`（Task 8 现有用例全部是 `await mgr.StopAsync(...)` 不取值，改宽返回类型不破任何断言）。理由：`core.stop` 的回包要能表达「真的停了」，而不是恒 true 的谎。
+- **R-10c（阻断级）：托盘回调的 `lParam` 解码样例是错的，照写就是「图标在、点了没反应」。** 样例 `self.HandleTray((uint)l, (int)(l.ToInt64() >> 32))` 把整个 lParam 当 uID、把高位 32 位当鼠标消息；而构造函数里明明调了 `NIM_SETVERSION` 用版本 4——**v4 的打包是 LOWORD(lParam)=鼠标消息、HIWORD(lParam)=uID**。按样例写，`mouseMsg` 恒为 0，`WM_RBUTTONUP(0x205)`/`WM_LBUTTONDBLCLK(0x203)` 永不匹配，右键不弹菜单、双击不开界面，而这只有真机点得到、单测摸不着。裁定：抽成可单测的纯函数
+  `internal static (int IconId, int MouseMsg) DecodeTrayParam(long lParam) => (((int)(lParam >> 16) & 0xFFFF), (int)(lParam & 0xFFFF));`
+  并补两条用例：`DecodeTrayParam_KitV4_PacksMsgInLowWord`（`0x00020205` → iconId=2、mouseMsg=0x205）与 `DecodeTrayParam_IgnoresHighBitsBeyondWord`（`0x10000_0203` 的低 16 位仍是消息），**这两条是本任务唯一的托盘回归锁**，其余（Shell_NotifyIcon 真出现图标）只能靠 Step 6 手动确认并在报告里写「肉眼验证」。
+- **R-10d（阻断级，三处 P/Invoke 形状错误 + 一处资源装载方式错误）：**
+  ① `WNDCLASS` 结构体必须带 `CharSet = CharSet.Unicode`——样例只写了 `LayoutKind.Sequential`，默认 Ansi，`RegisterClassW` 会把 `lpszClassName` 按 ANSI 指针读，类名花掉、`CreateWindowExW` 返回 0，然后 `Shell_NotifyIcon` 挂在无效 hWnd 上。② `MSG` 结构体样例写成 `public IntPtr hwnd, message, wParam, lParam;`——`message` 是 `UINT`（4 字节），必须写成 `{ IntPtr hwnd; uint message; uint _pad; IntPtr wParam; IntPtr lParam; uint time; POINT pt; }`（x64 下 OS 布局在 message 后有 4 字节填充，显式写出来，别赌 `GetMessageW` 帮我们清零那 4 字节）。③ `NOTIFYICONDATAW` 保持默认打包即可（WinForms 的 `NotifyIcon` 同样用默认 pack，OS 只看 `cbSize` 做版本前向兼容），但如果 `NIM_ADD` 返回 false，第一个要查的就是 `cbSize`/pack。④ **`app.ico` 是「复制到输出目录」不是「嵌入资源」**：Step 5 用 `Path.Combine(AppContext.BaseDirectory, "app.ico")` + `LoadImageW(LR_LOADFROMFILE)` 从**磁盘**读，嵌进程序集就没有那个路径了。csproj 写 `<None Include="app.ico"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>`，并把 Files 段那句「嵌入 `app.ico`」当笔误处理。
+  ⑤ `app.ico` 由**构建期脚本**生成、产物入库：`scripts/make-icon.ps1` 用 Windows PowerShell 5.1 的 `Add-Type -AssemblyName System.Drawing` 画 32×32 并 `Icon.FromHandle(bmp.GetHicon()).Save(fs)` 落盘。**控制器已实测（2026-10-26）**：这样产出的 .ico（766 字节，目录项 `count=1`、w/h 字节为 0）用 `LoadImageW(IntPtr.Zero, path, IMAGE_ICON, 0, 0, LR_LOADFROMFILE)` 与显式 `32,32` 两种调用**都返回非零 HICON**，所以够用。运行时依然禁 `System.Drawing`（只在脚本里，不在产品代码里）。图案先做占位（圆点即可），像素级观感归 Task 18 验收。
+- **R-10e（Important）：样例的 `FocusUi()` 会无限递归。** 它先 `_ = Routing.Handle(Cmd(CmdTypes.UiFocus))`，而路由的 `ui.focus` 分支又调 `_focusUi` —— 同一个 `FocusUi`，于是 `Handle → FocusUi → Handle → …` 一路爆栈。裁定：`ui.focus` 的动作**只**是「UI 不在就起进程，已在就不动」（起 UI 是 Tray 唯一允许的跨进程 Start，spec §3），菜单项 1 调 `Routing.Handle(Cmd(UiFocus))`，**函数体内不再回头调 Handle**。测试侧：`TrayHarness` 给路由注入的 `focusUi` 必须是一个**记录调用次数的委托**，绝不能接到真的 `Process.Start`——`EveryDeclaredCommand_HasAHandler` 里含 `ui.focus`，单元测试里起进程就是越界。
+- **R-10f（Important，安全）：`settings.update` 的回包不许带 `Settings`。** 样例 `ApplySettings` 返回 `Settings`，于是 `_store` 里的 **`secret`（controller 密钥）和 `core_path` 会被原样序列化进帧**发给 UI——spec §4.1 的红线是 secret 只在 `handshake` 里下发、UI 不持久化不展示；再开一个泄露面就是违规。裁定：`ApplySettings` 返回 `Snapshot()`（同一个 `SettingsSnapshot`，与 `settings.changed` 广播**同一种形状**，正好满足硬规矩③「一个事件类型只有一种 payload 形状」），并补一条测试 `SettingsUpdate_ReplyCarriesSnapshotNotRawSettings`：把回包 JSON 原文断言**不含** `"secret"`/`"core_path"` 两个键（这条是唯一的回归锁，别只断言能反序列化成 `SettingsSnapshot`）。
+- **R-10g（Important）：`SubImport_MissingUrl_RepliesError_NotSilentSuccess` 按样例必红。** 它传 `payload: null`，而 `Read<T>` 对 null payload 抛的是「`sub.import: 缺少请求参数`」——里面**没有** `url` 这个词，`Assert.Contains("url", reply.Error)` 直接失败。裁定：`ImportAsync` 第一件事就是 `if (f.Payload is null) throw new InvalidOperationException("sub.import: 需要 url 或 path")`，把「缺请求」和「请求里两个字段都空」归成同一句文案（UI 要能原样行内展示）。
+- **R-10h（Important，用户红线）：`RegistrySnapshot` 必须放进夹具，不能只放那一条显式的 sysproxy 用例。** `EveryDeclaredCommand_HasAHandler` 的 `[InlineData(CmdTypes.SysProxySet)]` 会**真的**调用 `SystemProxy.Enable("127.0.0.1:<port>", …)`——它会改写 `ProxyServer`，把本机那个**别的软件**留下的 `127.0.0.1:8090` 冲掉（红线：指向其他软件的代理绝不触碰）。裁定：`TrayHarness : IDisposable`，构造时取 `new RegistrySnapshot()`、`Dispose` 里释放，`[Collection("RegistryGuard")]` 标注测试类（R-9g 已全局串行，集合标注表达的是意图，将来放开并行时它是唯一防线）；`PayloadFor(SysProxySet)` 用 `enabled = false` 之外**仍要**快照，因为 `Disable()` 一样写注册表。测试夹具的 `mixed_port` 用**随机空闲端口**（Task 8 的 `FreePort()` 形状），别用 7897，避免和真 Tray 撞。
+- **R-10i（Important，Task 8 踩过的坑原样复发）：夹具必须自带 `FakeProbe`，否则「启动内核」这条在测试里永远失败。** WireMock 就挂在 controller 端口上冒充内核应答面，而 `CoreManager.StartAsync` 的**预检**用真实 `TcpAlive` 探那个端口（R-8a 就是这条），于是「端口被别的进程占了」判据必然为真、启动直接被拒。裁定：`TrayHarness` 复刻 Task 8 的 `sealed class FakeProbe : CoreProbe`，override `ControllerPortOccupied => false`、`ControllerAlive` 走可选 `TaskCompletionSource` 闸门。`CoreStart_IsSerialized_TwoConcurrentRequestsOneAttempt` **双断言**：`ConcurrentGuardHits == 1` **且** 假内核 `SpawnCount == 1`（launchFactory 自己计数），并且用闸门把两次 `Handle` 的重叠期钉住——不加闸门时「第二个请求恰好在第一个还没探完时进来」是靠调度碰运气。
+- **R-10j（Important，接 Task 9 的账）：Tray 必须观察 accept 循环的死因，且只 `await DisposeAsync()` 一次。** Task 9 的 I-1 修复把「就绪之后 accept 循环死了」这条唯一去处放在 `PipeServer.DisposeAsync` 的重新抛出上——**不 await 就永远看不见**（复评原话：宿主必须 await）。同时 Task 9 遗留的 Minor：第二次 `DisposeAsync()` 会**再抛同一个异常**（`_acceptFault` 不清空）。裁定：① 退出钩子里 `try { await Pipe.DisposeAsync(); } catch (Exception ex) { /* 记一行：管道服务此前已故障 */ }`，**只调一次**，`QuitAsync` 上用一个 `Interlocked` 标志挡住菜单连点；② 本任务给 `PipeServer` 补一个**只读观察面** `public Task Completion => _accept ?? Task.CompletedTask;`（三行 + 一条测试 `Completion_Faults_WhenAcceptLoopDies_AfterStart`），Tray 里 `_ = Pipe.Completion.ContinueWith(t => _icon?.SetTip("ClashAcry · 服务异常，请重启托盘"), OnlyOnFaulted)`——**不许自动退出**（控制通道断了就把正在跑的内核一起杀掉，比留着更糟），也不新建日志文件（spec/计划里从来没有 Tray 日志这一项，本任务不发明）。
+- **R-10k（Minor，但要写死省一轮返工）：`tests/ClashAcry.Core.Tests` 要加对 Tray 项目的引用。** 路由住在 `ClashAcry.Tray`，测试却按计划放在 Core.Tests → 不加引用就是 CS0246。**控制器已实测**（临时加引用 + 一个 `ClashAcry.Tray` 命名空间下的探针用例，`dotnet test --filter` 跑过 1/1，11 ms，随后完全回退）：`SelfContained` 的 WinExe 项目可以被 net10.0-windows 测试项目正常引用，产出 `ClashAcry.Tray.dll` 被测试加载。裁定：csproj 加 `<ProjectReference Include="..\..\src\ClashAcry.Tray\ClashAcry.Tray.csproj" />`，测试文件照计划放 Core.Tests；**同时** `ClashAcry.Tray.csproj` 加 `<ItemGroup><InternalsVisibleTo Include="ClashAcry.Core.Tests" /></ItemGroup>`（R-10c 的 `DecodeTrayParam` 是 internal，没有这条就是 CS0117）。另外 `Program.cs` 里 `SetConsoleCtrlHandler` 的委托**必须存静态字段**（临时委托会被 GC 掉，回调进来就是 AV）；WinExe 从终端启动时 `Console.CancelKeyPress` 是可用的主路，P/Invoke 只是补强——两者都写，但报告里说明哪条真的被测到。
+- **R-10l（红线，手动验证的边界）：Step 6 的人工点击**只允许**「启动内核 / 停止内核 / 打开界面 / 退出」，禁止点「切换系统代理」到开启状态**，也禁止在测试之外触发 `Enable`。本机 `ProxyServer` 现在是别的软件写的 `127.0.0.1:8090`（`ProxyEnable=0`），`Enable` 会把它覆盖掉。跑宿主前后各查一次 `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`（`reg query "...Internet Settings" //v ProxyEnable` 与 `//v ProxyServer`，Git Bash 下 `//v`），两个值必须逐字不变，并把 before/after 写进报告。Tray 冷启动会调 `CleanupIfStale`——它只清「指向我们端口且内核已死」的残留（Task 7 实现，`8090` 不匹配、`ProxyEnable=0` 时更早返回），所以这一步是安全的，但**这条安全性正是报告里要证明的东西**。
+- **R-10m（样例里两处 WireMock 断言不可靠）：`ModeSet` 用例不许 `LogEntries.Last()`。** Task 6 实测过 WireMock 的 admin 请求会混进 `LogEntries`、顺序在不同版本不一致（`MihomoClientTests.cs:57`/`:105` 的夹具注释就是这条）。改成按路径取：`_wire.LogEntries.Select(l => l.RequestMessage!).Single(m => m.Path == "/configs")`，并断言 body 里的 `mode` 值（`PUT /configs` 是 mode 端点，形状见 spec §4.2，别在路由里凭记忆拼 URL——路由只调 `_client.SetModeAsync`）。
 
 - [ ] **Step 1: 写路由的失败测试（不依赖托盘）**
 
@@ -3065,7 +3092,8 @@ public class TrayCommandRoutingTests
     [Fact]
     public async Task SysProxySet_True_CallsEnableWithMixedPortAddress()
     {
-        using var _ = new RegistrySnapshot();
+        // R-10h：快照在 TrayHarness 里取（EveryDeclaredCommand 的 sysproxy.set 分支同样写真注册表），
+        // 这条用例只额外断言还原后的真值。
         var h = new TrayHarness();
         await h.Routing.Handle(new Frame("command", CmdTypes.SysProxySet,
             JsonUtil.Element(new { enabled = true }), 0, "c1", null, null));
@@ -3082,7 +3110,9 @@ public class TrayCommandRoutingTests
             JsonUtil.Element(new { mode = "global" }), 0, "c1", null, null));
 
         Assert.Null(reply!.Error);
-        Assert.Equal("global", h.Wire.LogEntries.Last().RequestMessage.BodyMap!["mode"]);
+        // R-10m：不赌 LogEntries 时序，按路径取（Task 6 夹具注释里那条实测教训）。
+        var put = h.Wire.LogEntries.Select(l => l.RequestMessage!).Single(m => m.Path == "/configs");
+        Assert.Equal("global", put.BodyMap!["mode"]);
     }
 
     [Fact]
@@ -3168,14 +3198,17 @@ public sealed class TrayCommandRouting
 {
     private readonly CoreManager _core; private readonly SettingsStore _store;
     private readonly MihomoClient _client; private readonly AppPaths _paths;
-    private readonly HttpClient _http; private readonly Func<CoreUpdater> _updater;
+    private readonly HttpClient _http;   // R-10a：CoreUpdater 是 Task 11 的类型，这里只依赖委托缝
+    private readonly Func<IProgress<UpdateProgress>?, CancellationToken, Task<UpdateResult>> _updateCore;
     private readonly PipeServer _pipe; private readonly Action _focusUi;
 
     public TrayCommandRouting(CoreManager core, SettingsStore store, MihomoClient client,
-        AppPaths paths, HttpClient http, Func<CoreUpdater> updater, PipeServer pipe, Action focusUi)
+        AppPaths paths, HttpClient http,
+        Func<IProgress<UpdateProgress>?, CancellationToken, Task<UpdateResult>> updateCore,
+        PipeServer pipe, Action focusUi)
     {
         _core = core; _store = store; _client = client; _paths = paths;
-        _http = http; _updater = updater; _pipe = pipe; _focusUi = focusUi;
+        _http = http; _updateCore = updateCore; _pipe = pipe; _focusUi = focusUi;
     }
 
     public async Task<Frame?> Handle(Frame f)
@@ -3218,7 +3251,7 @@ public sealed class TrayCommandRouting
 
     private async Task<bool> StopAndCleanProxyAsync()
     {
-        var ok = await _core.StopAsync(default);
+        var ok = await _core.StopAsync(default);   // R-10b：StopAsync 的声明改回 Task<bool>，这里才取得到值
         // 停止后进程已不在；用 RunningProcessId 作真判据，绝不写死 false（重启竞态下会误清）
         SystemProxy.CleanupIfStale(_store.Load().MixedPort, () => _core.RunningProcessId is not null);
         _pipe.Broadcast(EventTypes.SettingsChanged, Snapshot());
@@ -3252,22 +3285,28 @@ public sealed class TrayCommandRouting
         return enabled;
     }
 
-    private Settings ApplySettings(SettingsPatch p)
+    private SettingsSnapshot ApplySettings(SettingsPatch p)
     {
-        var next = _store.Update(s => s with
+        // 边界校验（R-10f + spec §5）：端口不在合法区间就是坏请求，绝不落盘。
+        var bad = (p.MixedPort ?? 0) is var mp && (mp < 1 || mp > 65535 && mp != 0)
+               || (p.ControllerPort ?? 0) is { } cp && (cp < 1 || cp > 65535);
+        if (bad) throw new InvalidOperationException("settings.update: 端口需在 1-65535");
+        _store.Update(s => s with
         {
             MixedPort = p.MixedPort ?? s.MixedPort,
             ControllerPort = p.ControllerPort ?? s.ControllerPort,
-            DelayTestUrl = p.DelayTestUrl ?? s.DelayTestUrl
+            DelayTestUrl = string.IsNullOrWhiteSpace(p.DelayTestUrl) ? s.DelayTestUrl : p.DelayTestUrl
         });
         _pipe.Broadcast(EventTypes.SettingsChanged, Snapshot());
-        return next;
+        // 回包是 SettingsSnapshot 而不是 Settings：Settings 里有 secret / core_path，
+        // 把它们序列化进帧就是第二条 secret 泄露面（R-10f，spec §4.1 红线）。
+        return Snapshot();
     }
 
     private async Task<UpdateResult> UpdateCoreAsync()
     {
         var progress = new Progress<UpdateProgress>(p => { if (_pipe.ClientCount > 0) _pipe.Broadcast(EventTypes.UpdateProgress, p); });
-        var res = await _updater().InstallLatestAsync(progress, _core.SwapExecutableAsync, default);
+        var res = await _updateCore(progress, default);   // Task 11 把装配处换成真 CoreUpdater，路由不动
         if (res is UpdateResult.Updated)                // 版本号只在更新成功时重写，UI 收到 result 后重发 handshake 取新值
         {
             var v = await _client.GetVersionAsync(default);
@@ -3279,6 +3318,7 @@ public sealed class TrayCommandRouting
 
     private async Task<ImportReply> ImportAsync(Frame f)
     {
+        if (f.Payload is null) throw new InvalidOperationException("sub.import: 需要 url 或 path");   // R-10g：缺请求与缺字段同一句文案，且必须含 "url"
         var req = Read<ImportRequest>(f);
         if (req.Url is null && req.Path is null) throw new InvalidOperationException("sub.import: 需要 url 或 path");
         var imp = new SubscriptionImport(_paths, _store);
@@ -3345,7 +3385,10 @@ internal static class NativeMethods
     }
 
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
-    [StructLayout(LayoutKind.Sequential)] public struct MSG { public IntPtr hwnd, message, wParam, lParam; public uint time; public POINT pt; }
+    // R-10d②：message 是 UINT（4 字节），不能写成 IntPtr。x64 下 OS 布局在 message 之后留 4 字节填充，
+    // 显式写出 _pad 而不是赌 GetMessageW 把我们多给的字节清零。
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MSG { public IntPtr hwnd; public uint message; public uint pad; public IntPtr wParam, lParam; public uint time; public POINT pt; }
 
     [DllImport("shell32.dll", CharSet = CharSet.Unicode)] public static extern bool Shell_NotifyIcon(uint dwMessage, ref NOTIFYICONDATAW pnid);
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -3366,9 +3409,13 @@ internal static class NativeMethods
     [DllImport("user32.dll")] public static extern ushort RegisterClassW(ref WNDCLASS wc);
     [DllImport("user32.dll")] public static extern IntPtr GetModuleHandleW(string? name);
 
-    [StructLayout(LayoutKind.Sequential)]
+    // R-10d①：RegisterClassW 要求宽字符；缺 CharSet.Unicode 时按 ANSI 读类名，注册成功但类名花掉，
+    // CreateWindowExW 随即返回 0，托盘挂在无效 hWnd 上——现象是「构造不抛、图标不见」。
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     public struct WNDCLASS { public uint style; public IntPtr lpfnWndProc; public int cbClsExtra, cbWndExtra;
-        public IntPtr hInstance, hIcon, hCursor, hbrBackground; public string lpszMenuName, lpszClassName; }
+        public IntPtr hInstance, hIcon, hCursor, hbrBackground;
+        [MarshalAs(UnmanagedType.LPWStr)] public string? lpszMenuName;
+        [MarshalAs(UnmanagedType.LPWStr)] public string lpszClassName; }
 }
 ```
 
@@ -3421,16 +3468,24 @@ public sealed class Win32NotifyIcon : IDisposable
     {
         if (m == NativeMethods.WM_TRAYICON && ByHwnd.TryGetValue(h, out var self))
         {
-            self.HandleTray((uint)l, (int)(l.ToInt64() >> 32));   // 低位 uID，高位鼠标消息
+            var (iconId, mouseMsg) = DecodeTrayParam(l.ToInt64());
+            self.HandleTray(iconId, mouseMsg);
             return IntPtr.Zero;
         }
         return NativeMethods.DefWindowProcW(h, m, w, l);
     }
 
-    private void HandleTray(uint iconId, int mouseMsg)
+    /// R-10c：NIM_SETVERSION(4) 之后，LOWORD(lParam) 是鼠标消息、HIWORD(lParam) 是 uID。
+    /// 样例把两者反过来（(uint)l 当 uID、l>>32 当消息），后果是 mouseMsg 恒 0、菜单永不响应，
+    /// 而这只有真机点得到。抽成纯函数就是为了能用单测把这条锁住（见 R-10c 的两条用例）。
+    internal static (int IconId, int MouseMsg) DecodeTrayParam(long lParam) =>
+        ((int)((lParam >> 16) & 0xFFFF), (int)(lParam & 0xFFFF));
+
+    private void HandleTray(int iconId, int mouseMsg)
     {
-        if (mouseMsg == NativeMethods.WM_LBUTTONDBLCLK) { _menu.FirstOrDefault(m => m.Id == 1).OnPick?.Invoke(); return; }
-        if (mouseMsg is not (NativeMethods.WM_RBUTTONUP or NativeMethods.WM_CONTEXTMENU)) return;
+        if (mouseMsg == (int)NativeMethods.WM_LBUTTONDBLCLK) { _menu.FirstOrDefault(m => m.Id == 1).OnPick?.Invoke(); return; }
+        // WM_* 常量声明为 uint，与 int 做 `is not (A or B)` 模式匹配要显式降到 int（CS8117 家族）。
+        if (mouseMsg is not ((int)NativeMethods.WM_RBUTTONUP or (int)NativeMethods.WM_CONTEXTMENU)) return;
 
         NativeMethods.GetCursorPos(out var p);
         var menu = NativeMethods.CreatePopupMenu();
@@ -3500,7 +3555,10 @@ public sealed class TrayHost
         Core = new CoreManager(_paths, _store, client, probe);                    // launchFactory 用 Task 8 的默认实现（mihomo -d <runtime>），Tray 侧不自己拼参数
         Pipe = new PipeServer(f => Routing.Handle(f));
         Routing = new TrayCommandRouting(Core, _store, client, _paths, _http,
-            () => new CoreUpdater(_paths, new ReleaseClient(_http, ReleaseClient.DefaultLatestUrl)),
+            // R-10a：Task 11 之前这里是诚实的桩——报错而不是返回 AlreadyLatest 装「已是最新」。
+            // Task 11 只替换这一行为 (p, ct) => new CoreUpdater(_paths, new ReleaseClient(_http, ReleaseClient.DefaultLatestUrl))
+            //                                .InstallLatestAsync(p, Core.SwapExecutableAsync, ct)。
+            (p, ct) => Task.FromException<UpdateResult>(new InvalidOperationException("内核在线更新在 Task 11 落地")),
             Pipe, FocusUi);
         Core.StateChanged += e => Pipe.Broadcast(EventTypes.CoreStateChanged, e);
         await Pipe.StartAsync(ct);                                              // 常驻任务：不能 await 到底
@@ -3520,10 +3578,10 @@ public sealed class TrayHost
     private static Frame Cmd(string type, object? payload = null) =>
         new("command", type, payload is null ? null : JsonUtil.Element(payload), 0, Guid.NewGuid().ToString("N"), null, null);
 
+    // R-10e：这里**绝不**再回头调 Routing.Handle(UiFocus)——路由的 ui.focus 分支就是调本方法，
+    // 回头一次就是 Handle→FocusUi→Handle 爆栈。起 UI 是 Tray 唯一允许的跨进程 Start（spec §3）。
     private void FocusUi()
     {
-        // 已开则由 UI 自己处理 ui.focus（单实例），未开才起进程——起 UI 是 Tray 唯一允许的跨进程 Start
-        _ = Routing.Handle(Cmd(CmdTypes.UiFocus));
         if (Process.GetProcessesByName("ClashAcry.UI").Length == 0)
             Process.Start(new ProcessStartInfo(Path.Combine(AppContext.BaseDirectory, "ClashAcry.UI.exe")) { UseShellExecute = true });
     }

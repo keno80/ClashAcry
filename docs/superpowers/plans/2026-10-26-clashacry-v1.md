@@ -577,7 +577,7 @@ git commit -m "feat(contracts): 命名管道行分帧协议与命令/事件类�
   - `sealed record Settings { string ControllerHost; int ControllerPort; string Secret; int MixedPort; string? CorePath; string DelayTestUrl; string? LastSubscription; string? CoreVersion; }`（record：路由与更新器要用 `with` 做局部改动；磁盘形状是 spec §4.3 的扁平 snake_case 键，每字段显式 `[JsonPropertyName]`）
   - `sealed class SettingsStore { Settings Load(); void Save(Settings s); Settings Update(Func<Settings,Settings> mutate); }`
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```csharp
 public class SettingsStoreTests : IDisposable
@@ -647,12 +647,12 @@ public class SettingsStoreTests : IDisposable
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter SettingsStoreTests`
 Expected: FAIL（类型不存在）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```csharp
 // Paths.cs
@@ -757,12 +757,14 @@ public sealed class SettingsStore
 
 > **缺键行为要先实测（`PartialFile_UsesDefaultsForAbsentKeys` 的实现路径）**：System.Text.Json 历史上**不会**为 positional record 里"JSON 中缺失的可选构造参数"套用 C# 默认值——先跑一条最小复现确认本机 .NET 10 的归属。若确实套用默认值，样例代码原样即可；若填的是 `default(T)`（`0` / `null`），**不许删测试断言迁就实现**，改为在 `Settings` 之外加一个全 nullable 的读盘形状（`SettingsOnDisk`）反序列化，再逐字段 `?? 默认值` 合并成 `Settings`。这条行为是 spec §4.3 的前提（用户会手改 settings.json，也可能被更早版本写坏），测试是它的可执行化；无论走哪条，最终磁盘形状都只有 `Settings` 的扁平 snake_case 键，读盘形状不得写成第二个 `settings.json` 格式。
 
-- [ ] **Step 4: 跑测试确认通过**
+> **实测确认（Task 4 落地时，本机 .NET 10 SDK 10.0.203）**：上面这条历史行为已不成立——最小复现（`JsonSerializer.Deserialize<Settings>("""{"mixed_port":7899,"secret":"ab"}""")`，样例原样的显式 `[JsonPropertyName]` positional record）实测输出 `ControllerHost=[127.0.0.1] ControllerPort=9097 DelayTestUrl=[http://www.gstatic.com/generate_204] CorePath=null`，即**缺失的可选构造参数会套用 C# 默认值**，不填 `default(T)`、不抛。因此**未引入 `SettingsOnDisk` 合并层**，样例代码按原样落地；后续任务对 positional record + 显式 `[JsonPropertyName]` 的缺键回落可直接依赖此行为。
+
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter SettingsStoreTests`
 Expected: PASS，5/5。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/ClashAcry.Core tests/ClashAcry.Core.Tests/SettingsStoreTests.cs

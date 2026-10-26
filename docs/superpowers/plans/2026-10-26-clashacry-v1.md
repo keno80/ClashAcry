@@ -347,7 +347,7 @@ git add . && git commit -m "chore: 四项目解决方案脚手架与常驻开销
   - `sealed record ImportReply(string? ConfigFile, string? Reason = null)` —— `sub.import` 的回包，`Reason == null` 即成功
   - `sealed record CoreStateChanged(CoreState State, string? Reason, IReadOnlyList<string> StderrTail)` / `sealed record UpdateProgress(long Received, long Total, int Pct)` / `enum UpdateResult { Updated, AlreadyLatest, DownloadFailed, ExtractFailed, InUseRolledBack }` —— 三个跨进程 payload 类型在本任务一次建齐，Task 8/11 只 import 不重复定义（Global Constraint：payload 全住 Contracts）
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 `tests/ClashAcry.Core.Tests/FrameCodecTests.cs`：
 
@@ -394,12 +394,12 @@ public class FrameCodecTests
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter FrameCodecTests -v minimal`
 Expected: FAIL / 编译错误 "The type or namespace name 'Frame' could not be found"
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```csharp
 // ContractConstants.cs
@@ -512,17 +512,23 @@ public static class JsonUtil
 }
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter FrameCodecTests -v minimal`
 Expected: PASS，3/3。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/ClashAcry.Contracts tests/ClashAcry.Core.Tests/FrameCodecTests.cs
 git commit -m "feat(contracts): 命名管道行分帧协议与命令/事件类型"
 ```
+
+> **实测偏差（Task 3 落地时对本任务代码样例的三处修正，后续任务 import 时以此为准）**：
+> 1. `EventTypes` 只留四个事件，样例里的 `Log = "log"` 是预检评审删掉的死事件，**不加回**（日志文本随 `CoreStateChanged.StderrTail` 下发）。
+> 2. .NET 10 里 `System.IO.InvalidDataException` 已 `sealed`，`FrameTooLongException` 无法派生它——改基 `IOException`（正是 `InvalidDataException` 的基类），两类分帧错误仍同属 `IOException` 家族，Task 9 一个 `catch` 全兜住。
+> 3. 样例的 `System.Text.Json.Encodings.Default.JavaScriptEncoder` 在 .NET 10 不存在，用等价的 BCL 默认编码器 `System.Text.Encodings.Web.JavaScriptEncoder.Default`（同样转义换行，保证一帧一行）。
+> 4. 除样例的 3 条线格式测试外，另补 3 条断言"三条硬规矩"的测试：枚举走字符串、payload 键名 snake_case、`CoreStateChanged` 经 `JsonUtil` 往返——否则 `JsonUtil` 与 DTO 的线拼写无人消费。
 
 ---
 

@@ -175,6 +175,8 @@ docs/superpowers/{specs,plans,checklists}/
 
 **取消语义（Task 8 回写）**：`StartAsync` 的 `CancellationToken` 一旦被调用方触发，**不算启动失败**——不落 `Crashed`、不进"自动重试一次"的循环。行为固定为三步，顺序不可换：① 杀掉本已 spawn 的 mihomo 进程（绝不留孤儿内核）；② `Transition(Stopped)` 并保留"启动被取消"作为原因；③ 原样抛 `OperationCanceledException`（吞掉就等于伪造业务结论，让调用方以为还能重试）。实现上这条 catch 必须在通用 `catch (Exception)` **之前**，否则取消会被归类成启动异常。
 
+**探活成本实测（Task 8 回写，2026-10-26 / win-x64）**：mixed 端口的 TCP 探活对**没人监听的 loopback 端口**发起 connect，本机约 **2.0 s** 才拿到拒绝（`TcpClient.ConnectAsync` / 同步 `Connect` / `Socket.ConnectAsync` 三种形态实测一致），而 `CoreProbe.TcpAlive` 的预算是 1 s，于是"mixed 不通"时每轮 = 250 ms + controller 探活 + 跑满 1 s 的超时，**`20 × 250 ms ≈ 5 s` 的名义窗口实际约 25 s/次尝试、两次尝试约 50 s**（回归用例 `Start_DoesNotReachRunning_WhenControllerAliveButMixedPortDead` 实测 50 s）。两点推论：① controller 先失败时 `controllerOk && TcpAlive(...)` 短路，所以"内核起不来/端口被占"仍是约 10 s，只有"内核活着但 mixed 不通"这一支被拖长；② 这条路径必须纳入"长耗时操作有进行中反馈"的覆盖面——`Starting` 停留数十秒不是卡死，UI/Tray 要在此期间持续显示"正在探活"，不许把它渲染成无响应。双探活判据本身不改。
+
 ## 10. 常驻开销目标（验收判据）
 
 | 形态 | 目标 | 测量 | 实测（空壳，2026-10-26 / Task 2） |

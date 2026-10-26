@@ -1900,7 +1900,7 @@ git commit -m "feat(core): 系统代理 HKCU 开关与悬挂清理（只清指�
   **回归锁（必做，否则这条裁定随时会被下一次重构抹掉）**：`StartCancelled_KillsCore_TransitionsStopped_AndThrowsWithoutRetrying`。不能用「进函数前就取消好的令牌」——那会在 `InLifecycle` 的 `_lifecycle.WaitAsync(ct)` 就抛，压根没 spawn，测试空转。要卡在循环中间：夹具的 `FakeProbe.ControllerAlive` 改成 `await _gate.Task`（**不带 ct**，让测试掌控时机）→ 复用现成的假内核夹具（`cmd.exe /c ping -n 60 127.0.0.1`，别用 `timeout /t`，它拒绝非交互控制台）。步骤：`var start = mgr.StartAsync(cts.Token);`（不 await）→ 轮询等 `mgr.SpawnCount == 1 && mgr.State == Starting` → `cts.Cancel(); gate.SetResult(false);` → `await Assert.ThrowsAnyAsync<OperationCanceledException>(() => start);`。断言四件：抛的是 OCE（`when (ct.IsCancellationRequested)` 命中，不是别的异常）；`State == Stopped`（不是 `Crashed`，也不是卡在 `Starting`）；`SpawnCount == 1`（重试循环没拿着已取消的令牌再 spawn 第二个进程）；`StartAttemptCount == 1`。取消后 `Task.Delay(250, ct)` 立即抛，整条用例不超过 1 s。同样挂 `[Collection("RegistryGuard")]` + `RegistrySnapshot` 与同类用例保持一致（取消路径其实不经 `StopLockedAsync`、不写注册表，挂上只是防并发还原互相覆盖）。
 - **评审带出的四条小钉（同一轮修复里一起办，都是本任务自己的面积）**：① `RunningProcessId` 在锁外读 `_proc.HasExited`，而 `KillProcess` 可能并发 `_proc.Dispose()` → Task 11 的管道线程读它会拿 `ObjectDisposedException`，改成 try/catch 返回 null；② `StateChangedEvents` 现在把活的 `_events` 直接交出去，`Transition` 还在往里 `Add` → 读时返回快照；③ `Start_ControllerPortAlreadyOwned...` 缺 `Assert.Equal(2, mgr.StartAttemptCount)`——R-8a 明写过「占用被拒也吃一次重试」，这句副作用目前没有回归锁；④ **R-8c 目前没有任何回归锁**（全套没一处调用 `DisposeAsync`）→ 补一条 `DisposeAsync_KillsCoreAndLeavesStopped`（Running 后释放 → 进程消失、`State == Stopped`、二次释放是 no-op；它同样会走 `CleanupIfStale`，所以必须 `RegistrySnapshot` + `RegistryGuard`）。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```csharp
 public class StderrRingTests
@@ -2160,12 +2160,12 @@ public class CoreManagerTests : IDisposable
     }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter CoreManagerTests`
 Expected: FAIL（类型不存在）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```csharp
 // CoreProbe.cs
@@ -2394,7 +2394,7 @@ public readonly record struct SwapOutcome(bool CoreRunningAfter, bool RolledBack
 
 `StderrRing` 按 Task 8 Step 1 的测试实现为固定容量环形缓冲，必须提供 `Clear()`，且三个方法全部加锁（R-8d）。锁纪律是本任务的核心：`StartAsync`/`StopAsync`/`SwapExecutableAsync`/`DisposeAsync` 是**只**取 `_lifecycle` 的四个公开入口，内部 `*Locked` 一律不取（信号量不可重入）；`CoreUpdater`（Task 11）只允许通过 `SwapExecutableAsync` 换文件，**不得自己碰内核进程**。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter "CoreManagerTests|StderrRingTests|MihomoClientTests"`
 Expected: PASS。过滤 `CoreManagerTests|StderrRingTests|MihomoClientTests` 跑出**总数 19**（`CoreManagerTests` 9 + `StderrRingTests` 2 + `MihomoClientTests` 8——前两个文件是本任务新建，MihomoClient 那 8 条里有 7 条是 Task 6 的存量）。全套 `dotnet test tests/ClashAcry.Core.Tests` 应为 **57/57**（Task 7 后基线 45 + 新增 12：CoreManager 9 + StderrRing 2 + MihomoClient 1）。三条测试就是 spec 禁令的可执行化：`EveryTransition_EmitsEvent_AndNoStateIsSilent` —— 实现里出现任何绕过 `Transition` 的 `State =` 赋值它就红（禁令 3）；`ConcurrentStart_GuardHitsSecondRequest_AndSpawnHappensOnce` —— `SpawnCount` 必须为 1（禁令 1 的进程侧保证）；`Start_DoesNotReachRunning_WhenControllerAliveButMixedPortDead` 锁住 spec §9 的状态失真判据。
@@ -2403,12 +2403,21 @@ Expected: PASS。过滤 `CoreManagerTests|StderrRingTests|MihomoClientTests` 跑
 
 **耗时预期（不是卡死）**：`StartAsync` 的探活循环按 spec 写死 20×250 ms，失败路径要跑满两次尝试，所以 `Start_DoesNotReachRunning_...` 与 `Start_FailsWhenVersionNeverResponds_...` 各约 10 s，本套件单跑约 25~30 s。不许为了跑得快把 5 s 缩成 1 s——那是 spec §9 的判据，缩了等于把"内核慢启动被误判 Crashed"这个真实故障放回代码里。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/ClashAcry.Core tests/ClashAcry.Core.Tests
 git commit -m "feat(core): 内核状态机（双探活判 Running、启动一次重试、stderr 环）"
 ```
+
+> **实现轮实测与样例修正（Task 8，2026-10-26，本机 win-x64 / .NET 10 SDK 10.0.203）**：
+> ① **假内核必须是 `.cmd` 且挂到 `Settings.CorePath`**：`cmd.exe` 拒跑「扩展名 `.exe`、内容是批处理」的文件（报"不是有效的 Windows 版本兼容的应用程序"、exit 1），所以样例的 `File.WriteAllText(paths.CoreExecutable, script)` 落不了地——夹具改写 `core/fake-core.cmd` 并用 `CorePath` 指过去（`CoreManager` 的 `s.CorePath ?? _paths.CoreExecutable` 语义不变，生产默认分支仍是 `mihomo.exe`）。
+> ② **假内核挂起用 `ping -n 60 127.0.0.1 >nul`，不许用 `timeout /t`**：`timeout.exe` 会被 Git Bash PATH 里的 coreutils `timeout` 抢先（`invalid time interval '/t'`、exit 125），真 `timeout` 在 stdin 不是控制台时（测试主机就是这种）也立刻退出——两者都让"活着的假内核"变成秒退。R-8h 的回归锁描述已按此写。
+> ③ **样例的 `SwapOutcome.RolledBack(bool)` 工厂编译不过**：与位置参数生成的同名属性冲突（CS0102，改属性名后调用点再报 CS1955）→ 工厂改名 `Rollback(bool)`，`record struct SwapOutcome(bool CoreRunningAfter, bool RolledBack)` 的**对外形状不变**；Task 11 用 `SwapOutcome.Rollback(...)`。
+> ④ **样例的 `StopAsync` 与 `SwapExecutableAsync` 各差一处**：无返回值的 async lambda 推不出 `InLifecycle<T>` 的 T（CS0411）→ 按 R-8c 给 `DisposeAsync` 的形状补 `return true`；`StartLockedAsync()` 漏了必需的 `ct`（CS7036 ×2）→ 传 `ct`。
+> ⑤ **`ClashAcry.Core` 原先没有引用 `Contracts`**（Task 3 只给 UI/测试引了）→ 本任务加 `ProjectReference`，否则 `CoreManager` 无法 import `CoreStateChanged`/`CoreState`。Task 9/10 从 Core 侧说话时可直接用 Contracts。
+> ⑥ **测试侧一处 `TreatWarningsAsErrors` 拦截**：`EveryTransition_...` 样例是 `void` + `.GetAwaiter().GetResult()`，xUnit1031 被升级为编译错误 → 改 `async Task` + `await`（断言与事件序列不变）；后续任务的测试样例若含阻塞式 `.Result`/`.GetAwaiter().GetResult()`，同条规则会红。另：样例夹具里 `private static readonly JsonSerializerOptions No = new();` 全文件未使用（实测编译器**不**告警），按死代码删除。
+> ⑦ **计数**：过滤 `CoreManagerTests|StderrRingTests|MihomoClientTests` = **21**，全套 = **59/59**；`Start_DoesNotReachRunning_...` 实测 **50 s**（成因见 spec §9「探活成本实测」），`Start_FailsWhenVersionNeverResponds_...` 10 s，本套件单跑约 1 分钟，非卡死。
 
 ---
 

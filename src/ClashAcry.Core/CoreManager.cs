@@ -10,13 +10,19 @@ public sealed class CoreManager : IAsyncDisposable
     private readonly StderrRing _stderr = new(200);
     private readonly SemaphoreSlim _lifecycle = new(1, 1);
     private readonly List<CoreStateChanged> _events = new();
-    private Process? _proc; private string? _lastReason;
+    private Process? _proc; private string? _lastReason; private int _disposed;
 
     public CoreState State { get; private set; } = CoreState.Stopped;
     public int MixedPort { get; private set; }
-    public int? RunningProcessId => _proc is { HasExited: false } ? _proc.Id : null;
+    // 评审小钉①：这在锁外读 _proc，而 KillProcess 可能并发 _proc.Dispose()（Task 11 的管道线程就读它）
+    // → ObjectDisposedException。这里只表达"我们不再知道有活内核"，不许把异常抛给调用方。
+    public int? RunningProcessId
+    {
+        get { try { return _proc is { HasExited: false } ? _proc.Id : null; } catch (ObjectDisposedException) { return null; } }
+    }
     public event Action<CoreStateChanged>? StateChanged;
-    public IReadOnlyList<CoreStateChanged> StateChangedEvents => _events;
+    // 评审小钉②：不许把活的 _events 交出去（Transition 还在往里 Add）。同 R-8d 的理由：读侧拷贝 + 加锁。
+    public IReadOnlyList<CoreStateChanged> StateChangedEvents { get { lock (_events) return _events.ToArray(); } }
     public int StartAttemptCount { get; private set; }
     public int SpawnCount { get; private set; }
     public int ConcurrentGuardHits { get; private set; }
@@ -118,6 +124,15 @@ public sealed class CoreManager : IAsyncDisposable
             await KillProcess();
             return false;
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // 裁定 R-8h / spec §9 取消语义：调用方的取消不是「启动失败」，三步顺序不可换——
+            // 先杀进程（绝不能留孤儿内核），再 Transition(Stopped)（状态机不许停在没有对应现实的状态里），
+            // 最后原样抛（吞掉就等于伪造业务结论）。这条 catch 必须在通用 catch 之前。
+            await KillProcess();
+            Transition(CoreState.Stopped, "启动被取消");
+            throw;
+        }
         catch (Exception ex) { _lastReason = ex.Message; await KillProcess(); return false; }
     }
 
@@ -144,7 +159,7 @@ public sealed class CoreManager : IAsyncDisposable
     {
         State = next;
         var e = new CoreStateChanged(next, reason, StderrTail());
-        _events.Add(e);
+        lock (_events) _events.Add(e);   // 与 StateChangedEvents 的快照读同一把锁（小钉②／同 R-8d）
         StateChanged?.Invoke(e);   // spec §3 禁令 3：所有迁移点唯一出口，且必须广播
     }
 
@@ -152,6 +167,9 @@ public sealed class CoreManager : IAsyncDisposable
     // 直接调 StopLockedAsync 会让 Tray 退出与在飞的 StartAsync 并发，最坏结果是一个我们不再持有的孤儿内核。
     public async ValueTask DisposeAsync()
     {
+        // 评审小钉④：二次释放是 no-op——_lifecycle 已被第一次释放 Dispose 掉，再 WaitAsync 就是
+        // ObjectDisposedException（Tray 退出路径上 `using`/手动释放混用会走到这里）。
+        if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
         await InLifecycle(async () => { await StopLockedAsync(); return true; }, CancellationToken.None);
         _lifecycle.Dispose();
     }

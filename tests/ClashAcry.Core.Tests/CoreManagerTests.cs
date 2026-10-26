@@ -46,7 +46,8 @@ public class CoreManagerTests : IDisposable
     }
     private static int Port(TcpListener l) => ((IPEndPoint)l.LocalEndpoint).Port;
 
-    private CoreManager Build(string script, int mixedPort, int controllerPort, bool portOccupied = false)
+    private CoreManager Build(string script, int mixedPort, int controllerPort, bool portOccupied = false,
+                              TaskCompletionSource<bool>? aliveGate = null)
     {
         var paths = AppPaths.ForTest(_dir); paths.EnsureCreated();
         // 本机实测（Task 8）：cmd.exe 不肯执行「扩展名是 .exe、内容是批处理」的文件（报"不是有效的
@@ -58,14 +59,24 @@ public class CoreManagerTests : IDisposable
         store.Save(store.Load() with { ControllerPort = controllerPort, MixedPort = mixedPort, CorePath = fakeCore });
         var client = new MihomoClient(new HttpClient { Timeout = TimeSpan.FromSeconds(2) },
             "127.0.0.1", controllerPort, store.Load().Secret);
-        return new CoreManager(paths, store, client, new FakeProbe(client, portOccupied), CmdLaunch);
+        return new CoreManager(paths, store, client, new FakeProbe(client, portOccupied, aliveGate), CmdLaunch);
     }
 
     // 裁定 R-8a：夹具里 WireMock 常驻在 controller 端口上冒充内核的应答面，所以"端口被别的进程占了"
     // 这件事必须由注入点表达，不能靠裸 TcpAlive——否则成功路径会被预检自己拒掉（样例原来就是这样的，
     // 三条测试必红）。生产路径不传这个类，预检退回真实的 TcpAlive。
-    private sealed class FakeProbe(MihomoClient client, bool portOccupied) : CoreProbe(client)
+    private sealed class FakeProbe(MihomoClient client, bool portOccupied,
+                                   TaskCompletionSource<bool>? aliveGate = null) : CoreProbe(client)
     {
+        // 裁定 R-8h 的时序闸门：ControllerAlive 卡在这道闸上（**不带 ct**，时机由测试掌控），
+        // 取消才能落在探活循环中间——进函数前就取消好的令牌会在 InLifecycle 的 WaitAsync 就抛，
+        // 压根没 spawn，测试空转。
+        public override async Task<bool> ControllerAlive(CancellationToken ct)
+        {
+            if (aliveGate is not null) await aliveGate.Task;
+            return await base.ControllerAlive(ct);
+        }
+
         public override Task<bool> ControllerPortOccupied(string host, int port, CancellationToken ct)
             => Task.FromResult(portOccupied);
     }
@@ -135,8 +146,63 @@ public class CoreManagerTests : IDisposable
         Assert.False(await mgr.StartAsync(default));
 
         Assert.Equal(0, mgr.SpawnCount);                  // 一次都没起进程
+        Assert.Equal(2, mgr.StartAttemptCount);           // 评审小钉③：占用被拒也吃一次重试（R-8a 明写过）
         Assert.Equal(CoreState.Crashed, mgr.State);
         Assert.Contains("占用", mgr.StateChangedEvents.Last().Reason);
+    }
+
+    [Fact]
+    public async Task StartCancelled_KillsCore_TransitionsStopped_AndThrowsWithoutRetrying()
+    {
+        // 裁定 R-8h + spec §9 取消语义：调用方取消不是「启动失败」。三步顺序不可换——
+        // 杀掉已 spawn 的进程（绝不留孤儿内核）→ Transition(Stopped) → 原样抛 OperationCanceledException，
+        // 且不许拿着已取消的令牌再跑第二轮重试。
+        using var _ = new RegistrySnapshot();
+        using var mixed = new TcpListener(IPAddress.Loopback, 0); mixed.Start();
+        var gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var mgr = Build(SleepScript(), Port(mixed), _wire.Port, aliveGate: gate);
+        using var cts = new CancellationTokenSource();
+
+        var start = mgr.StartAsync(cts.Token);            // 故意不 await：要让它停在探活循环中间
+        var spawnDeadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < spawnDeadline && (mgr.SpawnCount != 1 || mgr.State != CoreState.Starting))
+            await Task.Delay(20);
+        Assert.Equal(1, mgr.SpawnCount);
+        Assert.Equal(CoreState.Starting, mgr.State);
+
+        cts.Cancel();
+        gate.SetResult(false);                            // 放行被卡住的那次探活
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => start);
+        Assert.Equal(CoreState.Stopped, mgr.State);        // 不是 Crashed，也不是卡在 Starting
+        Assert.Equal(1, mgr.SpawnCount);                   // 重试循环不许再 spawn 第二个
+        Assert.Equal(1, mgr.StartAttemptCount);
+        Assert.Contains("启动被取消", mgr.StateChangedEvents.Last().Reason);
+    }
+
+    [Fact]
+    public async Task DisposeAsync_KillsCoreAndLeavesStopped()
+    {
+        // 裁定 R-8c 的回归锁（评审小钉④：此前全套没有一处调用 DisposeAsync）：DisposeAsync 是公开入口，
+        // 必须和 Start/Stop 抢同一把 _lifecycle 并真把内核杀掉；二次释放是 no-op（不许抛
+        // ObjectDisposedException——_lifecycle.Dispose() 已经发生过）。
+        using var _ = new RegistrySnapshot();
+        using var mixed = new TcpListener(IPAddress.Loopback, 0); mixed.Start();
+        var mgr = Build(SleepScript(), Port(mixed), _wire.Port);
+        await mgr.StartAsync(default);
+        var pid = mgr.RunningProcessId!.Value;
+
+        await mgr.DisposeAsync();
+
+        Assert.Equal(CoreState.Stopped, mgr.State);
+        Assert.Null(mgr.RunningProcessId);
+        var deadline = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < deadline && Process.GetProcesses().Any(p => p.Id == pid)) await Task.Delay(100);
+        Assert.DoesNotContain(Process.GetProcesses(), p => p.Id == pid);
+
+        await mgr.DisposeAsync();                          // 二次释放
+        Assert.Equal(CoreState.Stopped, mgr.State);
+        Assert.Equal(1, mgr.StateChangedEvents.Count(e => e.State == CoreState.Stopped));   // no-op 不许再广播
     }
 
     [Fact]

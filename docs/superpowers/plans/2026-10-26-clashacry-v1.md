@@ -575,7 +575,7 @@ git commit -m "feat(contracts): 命名管道行分帧协议与命令/事件类�
 - Produces:
   - `sealed class AppPaths { string Root; string RuntimeDir; string ImportsDir; string CoreDir; string SettingsFile; string ConfigFile; string CoreExecutable; string CoreVersionFile; void EnsureCreated(); }`（`AppPaths.Default()` / `AppPaths.ForTest(string dir)` 两个工厂，构造私有；`ForTest` 供测试注入）
   - `sealed record Settings { string ControllerHost; int ControllerPort; string Secret; int MixedPort; string? CorePath; string DelayTestUrl; string? LastSubscription; string? CoreVersion; }`（record：路由与更新器要用 `with` 做局部改动；磁盘形状是 spec §4.3 的扁平 snake_case 键，每字段显式 `[JsonPropertyName]`）
-  - `sealed class SettingsStore { Settings Load(); void Save(Settings s); Settings Update(Func<Settings,Settings> mutate); }`
+  - `sealed class SettingsStore { Settings Load(); void Save(Settings s); Settings Update(Func<Settings,Settings> mutate); }`（`Load()` 不止反序列化：null/空/越界的字段与不合 32hex 的 secret 一律归一化，**归一化结果与盘上不同就立刻回写**，保证同一份残缺文件每次 Load 得到同一个 secret）
 
 - [x] **Step 1: 写失败的测试**
 
@@ -633,6 +633,47 @@ public class SettingsStoreTests : IDisposable
         Assert.Equal("ab", s.Secret);
         Assert.Equal(9097, s.ControllerPort);
         Assert.Equal("127.0.0.1", s.ControllerHost);
+    }
+
+    [Fact]
+    public void MissingSecretKey_HealsToNewSecret_AndPersistsIt()
+    {
+        var settings = AppPaths.ForTest(_dir).SettingsFile;
+        File.WriteAllText(settings, """{"mixed_port":7899}""");
+        var s = Store().Load();
+
+        Assert.Matches("^[0-9a-f]{32}$", s.Secret);
+        Assert.Equal(7899, s.MixedPort);
+        // 修补必须落盘：否则每次 Load 都换一个全新 secret，Task 8 起内核时两边用的值不一样，认证必断
+        Assert.Equal(s.Secret, Store().Load().Secret);
+        var onDisk = System.Text.Json.JsonSerializer.Deserialize<Settings>(File.ReadAllText(settings))!;
+        Assert.Equal(s.Secret, onDisk.Secret);
+    }
+
+    [Fact]
+    public void NullAndOutOfRangeValues_HealToDefaults()
+    {
+        // STJ 会把 JSON 的 null 原样塞进非空声明的 string（不做可空性检查），
+        // 所以下游 `new YamlScalarNode(s.Secret)` 与 Bearer 头是 NRE 现场——读盘必须归一化。
+        File.WriteAllText(AppPaths.ForTest(_dir).SettingsFile,
+            """{"secret":null,"controller_host":null,"controller_port":0,"mixed_port":-5,"delay_test_url":""}""");
+        var s = Store().Load();
+
+        Assert.Matches("^[0-9a-f]{32}$", s.Secret);
+        Assert.Equal("127.0.0.1", s.ControllerHost);
+        Assert.Equal(9097, s.ControllerPort);
+        Assert.Equal(7897, s.MixedPort);
+        Assert.Equal("http://www.gstatic.com/generate_204", s.DelayTestUrl);
+    }
+
+    [Fact]
+    public void FileIsJsonNull_RebuildsStableSecret()
+    {
+        File.WriteAllText(AppPaths.ForTest(_dir).SettingsFile, "null");
+        var first = Store().Load().Secret;
+
+        Assert.Matches("^[0-9a-f]{32}$", first);
+        Assert.Equal(first, Store().Load().Secret);   // 整体 null 也要走 Write，否则两次 Load 得到两个 secret
     }
 
     [Fact]
@@ -709,6 +750,7 @@ namespace ClashAcry.Core;
 public sealed class SettingsStore
 {
     private static readonly JsonSerializerOptions Opts = new() { WriteIndented = true };
+    private static readonly Settings Def = new();   // 默认值只有这一处来源
     private readonly AppPaths _paths;
     private readonly object _gate = new();
 
@@ -716,15 +758,20 @@ public sealed class SettingsStore
 
     public Settings Load()
     {
-        lock (_gate)
+        lock (_gate)   // Monitor 可重入，Update→Load 不构成死锁；换 SemaphoreSlim 才会炸
         {
             if (File.Exists(_paths.SettingsFile))
             {
-                try { return JsonSerializer.Deserialize<Settings>(File.ReadAllText(_paths.SettingsFile), Opts) ?? New(); }
-                catch (JsonException)
+                Settings? fromDisk = null;
+                try { fromDisk = JsonSerializer.Deserialize<Settings>(File.ReadAllText(_paths.SettingsFile), Opts); }
+                catch (JsonException)   // 类型不对（"port":"abc"）STJ 抛的也是 JsonException
                 {
                     File.Copy(_paths.SettingsFile, _paths.SettingsFile + ".corrupt", overwrite: true);
                 }
+                if (fromDisk is null) { var freshNull = New(); Write(freshNull); return freshNull; }
+                var healed = Heal(fromDisk);
+                if (healed != fromDisk) Write(healed);   // 修补必须落盘，否则每次 Load 都换一个新 secret
+                return healed;
             }
             var fresh = New();
             Write(fresh);
@@ -739,16 +786,41 @@ public sealed class SettingsStore
 
     public void Save(Settings s) { lock (_gate) Write(s); }
 
-    private static Settings New() =>
-        new(Secret: Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant());
+    private static Settings New() => new(Secret: NewSecret());
+
+    /// 「能解析」不等于「可用」：手改 settings.json 是 spec §4.3 的预期通路，null/空串必须回落默认值，
+    /// secret 不合 32hex 格式则换新值（旧值仍可从 `.bak`/`.corrupt` 找回）。不落空 secret 的理由是硬的：
+    /// `secret: ""` 注进 config.yaml 等于把无鉴权的 controller 裸暴露在 127.0.0.1:9097。
+    private static Settings Heal(Settings s) => s with
+    {
+        ControllerHost = string.IsNullOrWhiteSpace(s.ControllerHost) ? Def.ControllerHost : s.ControllerHost!,
+        ControllerPort = s.ControllerPort is <= 0 or > 65535 ? Def.ControllerPort : s.ControllerPort,
+        MixedPort = s.MixedPort is <= 0 or > 65535 ? Def.MixedPort : s.MixedPort,   // v1 不支持 0=禁用 mixed port
+        Secret = IsHex32(s.Secret) ? s.Secret : NewSecret(),
+        DelayTestUrl = string.IsNullOrWhiteSpace(s.DelayTestUrl) ? Def.DelayTestUrl : s.DelayTestUrl!,
+    };
+
+    private static bool IsHex32(string? v) =>
+        v is { Length: 32 } && System.Text.RegularExpressions.Regex.IsMatch(v, "^[0-9a-f]{32}$");
+    private static string NewSecret() =>
+        Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
 
     private void Write(Settings s)
     {
         var tmp = Path.Combine(_paths.Root, $".tmp-{Guid.NewGuid():N}.json");
-        File.WriteAllText(tmp, JsonSerializer.Serialize(s, Opts));
-        var target = _paths.SettingsFile;
-        if (File.Exists(target)) File.Replace(tmp, target, target + ".bak");
-        else File.Move(tmp, target);
+        try
+        {
+            File.WriteAllText(tmp, JsonSerializer.Serialize(s, Opts));
+            var target = _paths.SettingsFile;
+            if (File.Exists(target)) File.Replace(tmp, target, target + ".bak");
+            else File.Move(tmp, target);
+        }
+        finally
+        {
+            // 成功的路上 tmp 已经被 Move/Replace 吃掉；失败（目标被钉住）时 best-effort 清掉，
+            // 否则 `.tmp-*` 会留在 Root 里，把「无 .tmp 残留」这条断言变成偶发红灯。
+            try { if (File.Exists(tmp)) File.Delete(tmp); } catch (IOException) { }
+        }
     }
 }
 ```
@@ -762,7 +834,7 @@ public sealed class SettingsStore
 - [x] **Step 4: 跑测试确认通过**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter SettingsStoreTests`
-Expected: PASS，5/5。
+Expected: PASS，8/8。
 
 - [x] **Step 5: 提交**
 

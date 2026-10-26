@@ -1602,13 +1602,20 @@ git commit -m "feat(core): mihomo REST 类型化客户端（状态码原样透�
 ### Task 7: SystemProxy —— HKCU 开关与"只清自己的"守卫
 
 **Files:**
-- Create: `src/ClashAcry.Core/SystemProxy.cs` `NativeInterop.cs`
-- Test: `tests/ClashAcry.Core.Tests/SystemProxyTests.cs`
+- Create: `src/ClashAcry.Core/SystemProxy.cs` `NativeInterop.cs`（裁定 R-7a：`NativeInterop.cs` 必须真建，P/Invoke 都在里面）
+- Test: `tests/ClashAcry.Core.Tests/SystemProxyTests.cs` `RegistrySnapshot.cs`（夹具，Task 10/18 复用）
 
 **Interfaces:**
 - Consumes: `Settings`
 - Produces:
   - `static class SystemProxy { void Enable(string server, string bypass); void Disable(); string? CurrentServer(); bool IsEnabled(); void CleanupIfStale(int mixedPort, Func<bool> coreAlive); void BroadcastChange(); }`
+
+派发前控制器裁定（这一段碰的是**用户真实的系统代理**，判据必须先钉死再派发，同 Task 2/4/5/6 的做法）：
+
+- **R-7a：`NativeInterop.cs` 是真文件，不是笔误。** Files 列表要求创建它，Step 3 样例却把 `DllImport` 塞进了 `SystemProxy`，Step 5 的 `git add` 又漏了它——三处自相矛盾。裁定：`wininet.dll` 的 P/Invoke 声明搬进 `src/ClashAcry.Core/NativeInterop.cs`（`internal static class NativeInterop`，只放 extern 声明与常量），`SystemProxy` 只调它。理由：本任务之后 Task 10 的 `FocusUi`/退出钩子也要往这个文件里加 user32 的声明，散在各处会各抄一遍 `CharSet`/`SetLastError`。Step 5 的 `git add` 同步补上这个文件。
+- **R-7b：`RegistrySnapshot` 必须把「值原本不存在」和「值是空串」当成两种状态**——样例那种"读不出来就存 null、还原时写空串"会把垃圾值永久留在用户注册表里，而 `ProxyOverride` 的垃圾值会静默改变其它应用的旁路行为。要求：① `null` 即「原本不存在」，还原用 `DeleteValue`，存在且同值则一个字节都不写（避免无谓写盘与广播）；② 连子键都是本次新造的就 `DeleteSubKeyTree` 整个删掉；③ 还原必须发生在测试抛异常时也要跑（`using`/`try-finally`）；④ **夹具自己也要有测试，但那条测试不许拿用户真值做破坏性前置**：本机 `reg query` 实测盘上就有 `ProxyServer=127.0.0.1:8090` 与一长串 `ProxyOverride`（别的软件写的），如果在快照之外先删它们，夹具记录到"原本不存在"就会反过来把用户真值删掉——保护当场变成破坏。所以夹具开一个 `internal RegistrySnapshot(string keyPath)` 构造，同一段还原逻辑打到 `Internet Settings\ClashAcrySnapshotTest` 这个 scratch 子键上证「不存在→还原为不存在」（Step 1 第 5 条用例）。
+- **R-7c：`Disable()` 只置 `ProxyEnable=0`，不写 `ProxyServer=""`。** 样例的无条件抹串有两个后果：① 它分不清"这是我们写的"还是"公司代理/别的软件写的"，退出时或 UI 关掉开关时就把别人的服务器地址抹了——用户只能重新手填，且这正是本任务标题「只清自己的」要防的事；② `ProxyEnable=0` 时 WinINET/WinHTTP 根本不读 `ProxyServer`，留着旧串无任何行为影响。`ProxyOverride` 同理不碰。**这不是假想**：派发前 `reg query` 实测本机盘上就是 `ProxyEnable=0x0` + `ProxyServer=127.0.0.1:8090` + `ProxyOverride=localhost;127.*;…;<local>`（另一个本地代理软件留的），按样例实现第一次跑测试就会把用户这条串写空。补一条测试：外部先写 `ProxyServer = "corp.example:8080"` + `ProxyEnable = 1`，调 `Disable()` 后断言代理已关 **且那条串还在**。
+- **已知限制（不许在本任务修，写进报告并回写 spec §9）：** `CleanupIfStale(mixedPort, …)` 用**当前**设置里的端口比对，若用户在系统代理还指着我们旧端口时改了 `mixed_port`，那份悬挂值不会被清掉。v1 接受（换端口后重新开一次系统代理即覆盖），但必须作为明文限制记录，别让它变成 Task 18 验收时的"意外"。
 
 - [ ] **Step 1: 写失败的测试（真实 HKCU + 备份还原夹具）**
 
@@ -1651,10 +1658,116 @@ public class SystemProxyTests
         SystemProxy.CleanupIfStale(7897, coreAlive: () => true);
         Assert.True(SystemProxy.IsEnabled());
     }
+
+    [Fact]
+    public void Disable_TurnsOffButKeepsForeignProxyServerString()
+    {
+        // 裁定 R-7c：ProxyEnable=0 时没人读 ProxyServer，而抹掉它等于删了别人（公司/其它软件）的配置。
+        using var _ = new RegistrySnapshot();
+        using (var k = Registry.CurrentUser.CreateSubKey(SystemProxy.InternetSettingsKey))
+        {
+            k.SetValue("ProxyServer", "corp.example:8080", RegistryValueKind.String);
+            k.SetValue("ProxyEnable", 1, RegistryValueKind.DWord);
+        }
+
+        SystemProxy.Disable();
+
+        Assert.False(SystemProxy.IsEnabled());
+        Assert.Equal("corp.example:8080", SystemProxy.CurrentServer());
+    }
+
+    [Fact]
+    public void RegistrySnapshot_RestoresAbsence_NotEmptyStrings()
+    {
+        // 裁定 R-7b：夹具是用户系统代理的唯一防线，而这条防线本身此前无测试。
+        // 干净机器上 ProxyServer/ProxyOverride 可能不存在，样例会把它们还原成空串=永久留垃圾。
+        //
+        // 关键：**这条用例绝不碰真实的 Internet Settings 值**。本机实测盘上就有
+        // ProxyServer=127.0.0.1:8090、ProxyOverride=localhost;127.*;…（别的软件写的），
+        // 若在快照之外先删它们，夹具记录到的"原本不存在"会反过来把用户的真值删掉——
+        // 夹具的保护当场变成破坏。所以用同一个夹具类打到一个 scratch 子键上，走完全相同的代码路径。
+        const string scratch = SystemProxy.InternetSettingsKey + "\\ClashAcrySnapshotTest";
+        Registry.CurrentUser.DeleteSubKeyTree(scratch, throwOnMissingSubKey: false);
+
+        using (var snap = new RegistrySnapshot(scratch))               // 前置：三值都不存在
+        {
+            using (var k = Registry.CurrentUser.CreateSubKey(scratch))
+            {
+                k.SetValue("ProxyServer", "127.0.0.1:7897", RegistryValueKind.String);
+                k.SetValue("ProxyOverride", "localhost;127.*", RegistryValueKind.String);
+            }
+            using var verify = Registry.CurrentUser.OpenSubKey(scratch);
+            Assert.Equal("127.0.0.1:7897", verify!.GetValue("ProxyServer"));   // 夹具内确实写进去了
+        }
+
+        using (var k = Registry.CurrentUser.OpenSubKey(scratch))
+        {
+            if (k is not null)                       // 原本连子键都不存在 → 整个子键被还原掉
+            {
+                Assert.Null(k.GetValue("ProxyServer"));
+                Assert.Null(k.GetValue("ProxyOverride"));
+            }
+        }
+        Registry.CurrentUser.DeleteSubKeyTree(scratch, throwOnMissingSubKey: false);   // 收尾不留痕
+    }
 }
 ```
 
-`RegistrySnapshot` 是夹具：`IDisposable`，构造时把 `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings` 下 `ProxyEnable/ProxyServer/ProxyOverride` 三值读出存字段，`Dispose` 还原并 `BroadcastChange()`。**没有这个夹具就不许跑这批测试**——它会改用户真实系统代理。
+`RegistrySnapshot` 夹具就照下面写（`tests/ClashAcry.Core.Tests/RegistrySnapshot.cs`，Task 10/18 还会复用）：记录每个值的「存在与否 + 原值」，`Dispose` 时**原本不存在的删键、存在且同值的什么都不写、只有变了才回写**；如果连子键都是本次新造的，就把子键整个删掉；写盘/还原全程 `try-finally` 保证测试抛异常也还原。默认构造指向真实键，`internal` 构造允许指向 scratch 键（同一段代码，两种地址，才让"不存在→还原为不存在"这条路径可测）。
+
+```csharp
+using Microsoft.Win32;
+
+internal sealed class RegistrySnapshot : IDisposable
+{
+    private static readonly string[] Names = ["ProxyEnable", "ProxyServer", "ProxyOverride"];
+    private readonly string _keyPath;
+    private readonly bool _keyExisted;
+    private readonly Dictionary<string, object?> _before = new(StringComparer.Ordinal);
+
+    /// 生产用法：快照真实的 Internet Settings。
+    public RegistrySnapshot() : this(ClashAcry.Core.SystemProxy.InternetSettingsKey) { }
+
+    /// 测试用法：同一个还原逻辑打到 scratch 子键上（R-7b：不许拿用户真值做破坏性前置）。
+    internal RegistrySnapshot(string keyPath)
+    {
+        _keyPath = keyPath;
+        _keyExisted = Registry.CurrentUser.OpenSubKey(keyPath) is not null;
+        using var k = Registry.CurrentUser.OpenSubKey(keyPath);
+        foreach (var name in Names) _before[name] = k?.GetValue(name);   // null = 原本不存在
+    }
+
+    public void Dispose()
+    {
+        try
+        {
+            if (!_keyExisted)
+            {
+                Registry.CurrentUser.DeleteSubKeyTree(_keyPath, throwOnMissingSubKey: false);
+                return;                                   // 子键都是新造的，里面没有需要逐个还原的值
+            }
+            using var k = Registry.CurrentUser.OpenSubKey(_keyPath, writable: true);
+            foreach (var (name, before) in _before)
+            {
+                var now = k!.GetValue(name);
+                if (before is null) k.DeleteValue(name, throwOnMissingValue: false);   // 还原为「不存在」
+                else if (!Equals(now?.ToString(), before.ToString()))
+                    k.SetValue(name, before, KindOf(before));                          // 只有变了才回写
+            }
+        }
+        finally
+        {
+            if (_keyPath == ClashAcry.Core.SystemProxy.InternetSettingsKey)
+                ClashAcry.Core.SystemProxy.BroadcastChange();   // scratch 键系统不读，别白广播
+        }
+    }
+
+    // 代理这三项在 Windows 里类型固定：ProxyEnable 是 REG_DWORD，另两个是 REG_SZ。
+    // 不必从盘上探类型，按 CLR 值类型决定就够（多记一个 Kind 字段反而是摆设）。
+    private static RegistryValueKind KindOf(object value) =>
+        value is int ? RegistryValueKind.DWord : RegistryValueKind.String;
+}
+```
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -1664,17 +1777,27 @@ Expected: FAIL（类型不存在）
 - [ ] **Step 3: 实现**
 
 ```csharp
+// NativeInterop.cs —— 裁定 R-7a：P/Invoke 声明集中在这里，Task 10 还要往同一个文件加 user32 的声明
 using System.Runtime.InteropServices;
+namespace ClashAcry.Core;
+
+internal static class NativeInterop
+{
+    public const int InternetOptionSettingsChanged = 39;
+    public const int InternetOptionRefresh = 37;
+
+    [DllImport("wininet.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool InternetSetOptionW(IntPtr hInternet, int dwOption, IntPtr lpBuffer, int dwBufferLength);
+}
+
+// SystemProxy.cs
 using Microsoft.Win32;
 namespace ClashAcry.Core;
 
 public static class SystemProxy
 {
-    private const string Key = @"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
-    private const int INTERNET_OPTION_SETTINGS_CHANGED = 39, INTERNET_OPTION_REFRESH = 37;
-
-    [DllImport("wininet.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern bool InternetSetOptionW(IntPtr hInternet, int dwOption, IntPtr lpBuffer, int dwBufferLength);
+    /// 测试夹具也要按这个名字读写，所以是 public（R-7b 的还原用例直接开这个键）。
+    public const string InternetSettingsKey = @"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
 
     public static void Enable(string server, string bypass)
     {
@@ -1685,11 +1808,12 @@ public static class SystemProxy
         BroadcastChange();
     }
 
+    /// 裁定 R-7c：只关开关。ProxyEnable=0 时没人读 ProxyServer，而抹掉它可能抹的是别人（公司代理/其它
+    /// 软件）写的地址——本任务的标题就是「只清自己的」。ProxyOverride 同理不碰。
     public static void Disable()
     {
         using var k = OpenWrite();
         k.SetValue("ProxyEnable", 0, RegistryValueKind.DWord);
-        k.SetValue("ProxyServer", "", RegistryValueKind.String);
         BroadcastChange();
     }
 
@@ -1711,26 +1835,27 @@ public static class SystemProxy
 
     public static void BroadcastChange()
     {
-        InternetSetOptionW(IntPtr.Zero, INTERNET_OPTION_SETTINGS_CHANGED, IntPtr.Zero, 0);
-        InternetSetOptionW(IntPtr.Zero, INTERNET_OPTION_REFRESH, IntPtr.Zero, 0);
+        NativeInterop.InternetSetOptionW(IntPtr.Zero, NativeInterop.InternetOptionSettingsChanged, IntPtr.Zero, 0);
+        NativeInterop.InternetSetOptionW(IntPtr.Zero, NativeInterop.InternetOptionRefresh, IntPtr.Zero, 0);
     }
 
     private static RegistryKey OpenWrite() =>
-        Registry.CurrentUser.CreateSubKey(Key, RegistryKeyPermissionCheck.ReadWriteSubTree)
+        Registry.CurrentUser.CreateSubKey(InternetSettingsKey, RegistryKeyPermissionCheck.ReadWriteSubTree)
         ?? throw new InvalidOperationException("无法打开 Internet Settings 键");
-    private static RegistryKey? OpenRead() => Registry.CurrentUser.OpenSubKey(Key);
+    private static RegistryKey? OpenRead() => Registry.CurrentUser.OpenSubKey(InternetSettingsKey);
 }
 ```
 
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter SystemProxyTests`
-Expected: PASS，3/3，且跑完后用户真实代理设置与跑前一致（`RegistrySnapshot` 还原生效）。
+Expected: PASS，**5/5**（样例 3 条 + R-7c 的「关掉但不抹别人的串」+ R-7b 的「夹具把不存在还原成不存在」），且跑完后用户真实代理设置与跑前一致（`RegistrySnapshot` 还原生效——第 5 条用例就是证这件事的）。
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/ClashAcry.Core/SystemProxy.cs tests/ClashAcry.Core.Tests/SystemProxyTests.cs
+git add src/ClashAcry.Core/SystemProxy.cs src/ClashAcry.Core/NativeInterop.cs \
+        tests/ClashAcry.Core.Tests/SystemProxyTests.cs tests/ClashAcry.Core.Tests/RegistrySnapshot.cs
 git commit -m "feat(core): 系统代理 HKCU 开关与悬挂清理（只清指向自己的）"
 ```
 

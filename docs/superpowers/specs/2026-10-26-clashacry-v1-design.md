@@ -69,19 +69,29 @@ UI 起来发现管道不存在（Tray 未运行或被杀）→ 顶部横幅"托�
 
 鉴权一律 `Authorization: Bearer ${secret}`。
 
-| 用途 | 端点 |
-|---|---|
-| 探活 / 版本 | `GET /version` |
-| 组与节点树（含 `now`、`all`、`history`、`hidden`） | `GET /proxies` |
-| 选择成员 | `PUT /proxies/{name}` body `{"name":...}` |
-| 单节点测延迟 | `GET /proxies/{name}/delay?url=&timeout=` |
-| Provider 列表与成员详情 | `GET /providers/proxies` |
-| Provider 手动刷新 | `PUT /providers/proxies/{name}` |
-| 读当前运行配置 | `GET /configs` |
-| 切模式（rule/global/direct） | `PATCH /configs {"mode":...}` |
-| 热切配置文件 | `PATCH /configs {"path":...}` |
+**下表全部为 2026-10-26 真机实测**（内核 `mihomo-windows-amd64-compatible` **v1.19.33**，`GET /version` → `{"meta":true,"version":"v1.19.33"}`；夹具 `packaging/imports-sample/minimal.yaml`，`external-controller 127.0.0.1:9097`、`mixed-port 7897`、`secret probe-secret`；复现：`powershell -File scripts/probe-mihomo-api.ps1`，完整转录见 `.superpowers/sdd/2026-10-26-clashacry-v1/probe-run1.txt` / `probe-run2.txt`）。
 
-上表是**待核实清单**，不是事实陈述：任务 0 前置探针必须逐条打真机核实方法名（`PUT` vs `PATCH`）、请求体形状、`GET /configs` 是否支持、以及 provider 成员是否出现在 `GET /proxies` 顶层表和 `delay` 是否对其 404，并回写本节。凡与 MetaCubeX/mihomo 官方文档或源码不符，以源码为准。
+| 用途 | 端点 | 实测 |
+|---|---|---|
+| 探活 / 版本 | `GET /version` | **200** `{"meta":true,"version":"v1.19.33"}` |
+| 组与节点树（含 `now`、`all`、`history`、`hidden`） | `GET /proxies` | **200**，根键 `proxies`（对象表，键为节点/组名） |
+| 选择成员 | `PUT /proxies/{name}` body `{"name":...}` | **204** 空体；body 换成 `{"proxy":...}` 实测 **400**——请求体只认 `name` 键，`proxy` 键不被接受（Task 6 必须发 `{"name":...}`） |
+| 单节点测延迟 | `GET /proxies/{name}/delay?url=&timeout=` | 组与普通节点 **200** `{"delay":N}`；**provider 成员（`prov-node-1`）404** `{"message":"Resource not found"}` |
+| Provider 列表 | `GET /providers/proxies` | **200**，响应根为对象 `{"providers": {...}}`——根键是复数 **`providers`**，其值是**以 provider 名为键的对象表**（不是数组）。表内除真实 provider 外还含每个组的隐式 Compatible provider 与 `default`，客户端须按 `vehicleType`（实测出现值：文件型 `"File"`、隐式 `"Compatible"`；HTTP 型未在 v1 探针内实测）过滤；成员条目带 `"provider-name"` 回指 |
+| Provider 详情 | `GET /providers/proxies/{name}` | **200**，直接返回 provider 对象本身（**无** `providers` 外层包装），键为 `name/type/vehicleType/proxies/testUrl/expectedStatus/updatedAt` |
+| Provider 手动刷新 | `PUT /providers/proxies/{name}` | **204** 空体（无需请求体） |
+| 读当前运行配置 | `GET /configs` | **200**（受支持，返回全量运行配置 JSON，含 `mode`、`mixed-port`、`tun` 等） |
+| 切模式（rule/global/direct） | `PATCH /configs {"mode":...}` | **204**；`PUT /configs {"mode":...}` 亦 **204**（两者皆可，v1 统一用 `PATCH`） |
+| 热切配置文件 | `PATCH /configs {"path":...}` | **204**；`PUT` 同体亦 **204**；两者都会触发内核全量重载（stdout 出现第二次 `Start initial configuration`） |
+
+provider 形态的两条硬结论（详证见 §12）：
+
+- **provider 成员不出现在 `GET /proxies` 顶层表**（实测顶层键仅 `COMPATIBLE/DIRECT/GLOBAL/PASS/PASS-RULE/PROBE-AUTO/PROBE-SELECT/REJECT/REJECT-DROP/direct-node`），只出现在所属组的 `all` 数组与 `GET /providers/proxies` 的 `proxies` 列表里。
+- **对成员直接测延迟 404**。故测 provider 成员的延迟是**既定实现要求**而非可选兜底：UI 取 provider 成员延迟只能走 `GET /providers/proxies/{name}`（成员 `history` / `extra` 健康检查样本），拿不到最新样本时显示"上次"标注或占位，禁止对成员调 `/proxies/{name}/delay` 并静默吞错。
+
+组内聚合整个 provider 的写法（夹具已用，实测有效）：`proxy-groups` 条目里用 `use: [PROBE-PROV]`；在 `proxies:` 列表里直接写 provider 名会被 v1.19.33 拒绝并在启动时 fatal（`proxy group[1]: PROBE-SELECT: 'PROBE-PROV' not found`）。file 型 provider 的 `url` 字段实测**可省略**（仅 `type/path/interval` 即可加载），填不可达占位 URL 也接受且不会被抓取；夹具保留 `url` 以贴近真实订阅形态。
+
+mixed 端口被占用的真机行为（Task 8 `Running` 判据依据，`-OccupyMixedPort` 实测）：预绑 7897 再起内核——内核**不退出**，controller 照常 `GET /version` **200**，日志打一行 `level=error msg="Start Mixed(http+socks) server error: listen tcp 127.0.0.1:7897: bind: Only one usage of each socket address (protocol/network address/port) is normally permitted."` 后继续完成初始化（provider 启动日志照常出现，controller 全部端点仍应答）；且此时 `GET /configs` 报 `"mixed-port":0`。结论：**controller 应答不能证明代理可用**，`Running` 判据必须包含 mixed 端口 TCP 连接探活（与计划 Task 8 的双探活签名一致）。
 
 ### 4.3 `settings.json`（Tray 独占写）
 
@@ -186,7 +196,8 @@ docs/superpowers/{specs,plans,checklists}/
 
 - **整窗 Desktop Acrylic 的合成开销**：低端 GPU / 远程桌面上可能明显。已用三档可切换 + 自动降级吸收；§10 会量化 Acrylic 相对纯色档的内存差。
 - **WindowsAppSDKSelfContained 的常驻代价未知**：自包含 MRT Core 可能抬高 UI 常驻；探针若发现超标，回退到"依赖机器已装 Windows App Runtime"（Win11 基本自带）并记录。
-- **provider 成员可能不在 `GET /proxies` 顶层表**、`delay` 端点可能对其 404：探针给出真机答案；兜底策略已定——测速拿不到值时显示 `history` 最新样本并标注"上次"，不冒充实时值。
+- **provider 成员与延迟端点——已有真机答案（v1.19.33，不再是风险项）**：`GET /proxies` 顶层表**不含** provider 成员（仅组 `all` 与 `GET /providers/proxies` 的 `proxies` 列表含之）；`GET /proxies/{成员名}/delay` 对成员**404**。据此 §4.2 已把"测 provider 成员延迟走 providers 详情 / 拿不到样本显示'上次'并标注"从兜底升级为既定实现要求。
+- **mixed 端口被占时内核"带病存活"**（v1.19.33 实测，详见 §4.2 末段）：进程不退出、controller 全功能应答、仅 stdout 一行 `level=error` bind 失败；`Running` 判据必须双探活（controller + mixed 端口 TCP），与计划 Task 8 一致。另实测内核 Go 日志写在 **stdout**（stderr 恒空），`CoreManager` 的 stderr 环应同时采集两个流。
 - **mihomo 跨版本 REST 漂移**：契约以 §4.2 + 源码为准，冒烟清单兜底。
 - **secret 落盘明文**（同用户可读）：自用容忍；管道 ACL 限当前用户 SID，`handshake` 之外不向其他进程暴露。
 - **yaml 保真度**：若注入所用库无法保留注释与键序，探针给出结论；v1 只做顶层键覆盖、不做规则级编辑，注释丢失问题仅在用户手改文件时暴露，届时记为已知限制并评估换 DOM 保真库。

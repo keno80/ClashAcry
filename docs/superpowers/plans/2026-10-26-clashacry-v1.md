@@ -83,7 +83,7 @@ docs/superpowers/checklists/v1-acceptance.md
 - Consumes: 无
 - Produces: 一份被证实的端点表（供 Task 6 `MihomoClient` 逐条对齐）；`packaging/imports-sample/minimal.yaml` 作为所有测试的夹具配置
 
-- [ ] **Step 1: 写最小探针配置**
+- [x] **Step 1: 写最小探针配置**
 
 创建 `packaging/imports-sample/minimal.yaml`（**故意保留注释与一个 provider 组**，用于同时验 yaml 保真与 provider 行为）：
 
@@ -106,7 +106,7 @@ proxy-groups:
     interval: 600
 ```
 
-- [ ] **Step 2: 写探针脚本**
+- [x] **Step 2: 写探针脚本**
 
 创建 `scripts/probe-mihomo-api.ps1`。脚本必须：把 `minimal.yaml` 复制到临时 runtime 目录 → 起 `packaging/core/mihomo-windows-amd64-compatible.exe -d <tmp>` → 轮询 `GET /version` 就绪 → 逐条打印「方法 路径 → HTTP 状态码 + 首 200 字符响应」→ 停内核。待核实清单（每条都要打印状态码，不允许凭记忆填表）：
 
@@ -160,15 +160,15 @@ try {
 Run: `powershell -File scripts/probe-mihomo-api.ps1`
 Expected: 12 行状态码输出，无 `ERR`（除故意探测的不支持组合）。
 
-- [ ] **Step 3: 读内核 stderr 观察 mixed 端口占用行为**
+- [x] **Step 3: 读内核 stderr 观察 mixed 端口占用行为**
 
 再跑一次脚本，在起内核前先占住 7897：`powershell -File scripts/probe-mihomo-api.ps1 -OccupyMixedPort`（脚本加该开关：用 `System.Net.Sockets.TcpListener` 提前绑定 7897）。记录：controller 是否正常、`GET /version` 是否 200、内核是否退出。这条直接决定 Task 8 `CoreManager` 的 `Running` 判据是否必须包含 mixed 端口 TCP 探活。
 
-- [ ] **Step 4: 回写 spec**
+- [x] **Step 4: 回写 spec**
 
 把实测结果**逐条**写进 spec §4.2：每行端点后追加实测状态码；`PUT` 与 `PATCH` 谁可用写清；`GET /configs` 不支持就把该行划掉并注明「404 实测」。还必须记录 **`GET /providers/proxies` 响应根的键名与形状**（`provider` 对象表还是数组），Task 6 的 `ProvidersResponse` 按它定型。同时在 §12 追加两条实测结论：provider 成员是否出现在 `GET /proxies` 顶层表、`delay` 对成员是否 404（404 就把兜底策略从「风险」升级为「既定实现要求」写进 §4.2）。若行为与本计划 Task 6 的签名冲突，以 spec 为准并改 Task 6。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add scripts/probe-mihomo-api.ps1 packaging/imports-sample/minimal.yaml docs/superpowers/specs

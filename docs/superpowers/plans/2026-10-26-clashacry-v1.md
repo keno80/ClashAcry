@@ -1329,7 +1329,13 @@ git commit -m "feat(core): yaml 最小键注入与订阅导入（失败保留旧
 - Consumes: **Task 1 回写后的 spec §4.2 端点表**（方法名/请求体形状以它为准；本任务的签名如与实测冲突，改本任务）
 - Produces:
   - `sealed class MihomoClient { MihomoClient(HttpClient http, string host, int port, string secret); Task<VersionInfo?> GetVersionAsync(CancellationToken ct); Task<ProxiesResponse> GetProxiesAsync(CancellationToken ct); Task SetProxyAsync(string group, string node, CancellationToken ct); Task<int> GetDelayAsync(string name, string url, int timeoutMs, CancellationToken ct); Task<ProvidersResponse> GetProvidersAsync(CancellationToken ct); Task RefreshProviderAsync(string name, CancellationToken ct); Task SetModeAsync(string mode, CancellationToken ct); Task ReloadConfigAsync(string path, CancellationToken ct); Task<CoreConfigView?> GetConfigsAsync(CancellationToken ct); }`
-  - `ApiException(int StatusCode, string Body)`；`TimeoutException` 与 409 一律折成 `GetDelayAsync` 的 `-1`。
+  - `ApiException(int StatusCode, string Body)`；`TimeoutException` 与 409 一律折成 `GetDelayAsync` 的 `-1`——但**只折 HTTP 层超时**：调用方 `ct` 取消必须原样抛出（裁定 R-6a/R-6b 见 Step 3 注记）。
+
+派发前控制器裁定（Task 8/10/15 都直接用这个客户端，先钉死再派发，同 Task 2/4/5 的做法）：
+
+- **R-6a：`Authorization` 头逐请求设置，禁止写 `_http.DefaultRequestHeaders`（这是泄露，不只是脏状态）。** 原样例在构造函数里改 `DefaultRequestHeaders`。Task 10 的 `TrayHost` 里 `_http` 是**一个字段、三个用途共享**：`new MihomoClient(_http, …)`、`SubscriptionImport.ImportFromUrl(url, _http, …)`（用户机场地址）与 `new ReleaseClient(_http, …)`（api.github.com）。`DefaultRequestHeaders` 是 `HttpClient` 实例级的，一旦内核客户端写进去，**之后所有订阅下载与 GitHub 请求都会带上 `Authorization: Bearer <controller secret>`**——把本地控制面的鉴权凭据发给第三方机场服务器，正面违反 spec §4.1「secret 不外泄」。改成在 `Send` 里 `msg.Headers.Authorization = new("Bearer", _secret)`：header 属于请求，不属于客户端，更不属于别人的 `HttpClient`。补一条测试锁住：同一个 `HttpClient` 上两个不同 secret 的 `MihomoClient` 各自发出自己的 Bearer（若实现回到 `DefaultRequestHeaders`，第二个客户端会盖掉第一个，此断言必红）。
+- **R-6b：`GetDelayAsync` 的 `-1` 只表示「这个节点测不出延迟」，不表示「调用方不要了」。** 样例 `catch (TaskCanceledException)` 会把**外部取消**（Task 15 轮询切页、窗口关闭时的 `CancellationTokenSource.Cancel`）也吞成 `-1`，UI 于是把「这次刷新被取消」渲染成「节点超时」——正面违反「轮询不得产生可见抖动/错误数据」。改为 `catch (TaskCanceledException) when (!ct.IsCancellationRequested)`；补一条测试：服务端延迟 2 秒、`cts` 100ms 取消，断言抛 `OperationCanceledException` 而不是返回 `-1`。
+- **不做的事（YAGNI）**：`GET /providers/proxies/{name}` 详情端点本任务不封装。Task 15 需要的 provider 成员健康样本已经出现在 `GET /providers/proxies` 的 `ProviderInfo.Proxies` 里（spec §4.2），v1 没有别的调用方，别为不存在的需求加方法。
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -1389,10 +1395,65 @@ public class MihomoClientTests : IDisposable
         Assert.Equal(401, ex.StatusCode);
         Assert.Equal("unauthorized", ex.Body);
     }
+
+    [Fact]
+    public async Task GetConfigs_ParsesModeAndMixedPort()
+    {
+        // spec §4.2：/configs 实测 200，`mixed-port` 逐字证到，`mode` 在完整响应里但那次打印未证到
+        // ——本用例把两者钉死；真机若取不到 mode，改模型并回写 spec，别动端点。
+        _wire.Given(Request.Create().WithPath("/configs").UsingGet()).RespondWith(
+            Response.Create().WithBody("""{"mode":"rule","mixed-port":7897,"port":0}"""));
+
+        var c = await Client().GetConfigsAsync(default);
+
+        Assert.Equal("rule", c!.Mode);
+        Assert.Equal(7897, c.MixedPort);
+    }
+
+    [Fact]
+    public async Task SharedHttpClient_KeepsBearer_PerRequest_AndLeaksNothingToOtherCallers()
+    {
+        // 裁定 R-6a：secret 属于「这一个请求」，不属于别人持有的 HttpClient。
+        // Task 10 的 TrayHost 用同一个 HttpClient 跑 mihomo REST、订阅下载与 GitHub API，
+        // 谁写 DefaultRequestHeaders 谁就把 controller secret 发给第三方机场。
+        _wire.Given(Request.Create().WithPath("/proxies/PROBE").UsingPut()).RespondWith(204);
+        _wire.Given(Request.Create().WithPath("/public").UsingGet())
+             .RespondWith(Response.Create().WithBody("subscription-bytes"));
+
+        await new MihomoClient(Http, "127.0.0.1", _wire.Port, "AAA").SetProxyAsync("PROBE", "n1", default);
+        await Http.GetStringAsync($"{_wire.Url}/public");                       // 模拟订阅下载
+        await new MihomoClient(Http, "127.0.0.1", _wire.Port, "BBB").SetProxyAsync("PROBE", "n2", default);
+
+        // 按请求体里的节点名归位，不依赖 LogEntries 的时间顺序（不同版本新旧排列不一致）
+        var puts = _wire.LogEntries.Select(l => l.RequestMessage)
+            .Where(m => m.Path == "/proxies/PROBE")
+            .ToDictionary(m => JsonDocument.Parse(m.Body!).RootElement.GetProperty("name").GetString()!);
+        Assert.Equal("Bearer AAA", puts["n1"].Headers["Authorization"]);
+        Assert.Equal("Bearer BBB", puts["n2"].Headers["Authorization"]);        // 后一个客户端没被前一个盖住
+
+        var plain = _wire.LogEntries.Select(l => l.RequestMessage).Single(m => m.Path == "/public");
+        Assert.DoesNotContain("Bearer", string.Join("|", plain.Headers.Values)); // 下载里一个鉴权头都没有
+    }
+
+    [Fact]
+    public async Task Delay_CallerCancellation_ThrowsInsteadOfBecomingMinusOne()
+    {
+        // 裁定 R-6b：-1 专指「这个节点测不出延迟」。取消是调用方的意图，吞成 -1 会让
+        // Task 15 的轮询把「这次刷新被取消」渲染成「节点超时」——假的红色状态。
+        _wire.Given(Request.Create().WithPath("/proxies/n1/delay").UsingGet())
+             .RespondWith(Response.Create().WithDelay(2000).WithBody("""{"delay":5}"""));
+        using var cts = new CancellationTokenSource(millisecondsDelay: 100);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => Client().GetDelayAsync("n1", "http://e/204", 5000, cts.Token));
+    }
 }
 ```
 
-（夹具要求：`_wire.Reset()` 在每个用例前调用；`HttpClient` 由测试基类提供并设 `Timeout = 5s`。）
+（夹具要求：`_wire.Reset()` 在每个用例前调用；`HttpClient` 由测试基类提供并设 `Timeout = 5s`。
+`IRequestMessage.Headers` 是 `IDictionary<string, string>`；若某版本取不到 `Authorization` 键，用 `Headers.Values` 做包含断言，**不许**改成只断言状态码。
+`WithDelay` 的单位随 WireMock 版本而异（2.x 的 int 重载是毫秒；若编译期警告/报错就换 `WithDelay(TimeSpan.FromMilliseconds(2000))`）——唯一要求是真延迟明显大于 `cts` 的 100ms，别把它调成巧合。
+`_wire.LogEntries` 里可能混有 WireMock 自己的 admin 请求：一律先 `Where(m => m.Path == ...)` 过滤再取，别赌 `.Last()` 的时序。）
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -1457,12 +1518,13 @@ namespace ClashAcry.Core;
 public sealed class MihomoClient
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
-    private readonly HttpClient _http; private readonly Uri _base;
+    private readonly HttpClient _http; private readonly Uri _base; private readonly string _secret;
     public MihomoClient(HttpClient http, string host, int port, string secret)
     {
-        _http = http;
+        _http = http; _secret = secret;
         _base = new Uri($"http://{host}:{port}");
-        _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", secret);
+        // 裁定 R-6a：绝不写 _http.DefaultRequestHeaders——这个 HttpClient 在 Tray 里还被订阅下载
+        // 与 GitHub API 复用，写进去等于把 controller secret 发给别人的服务器。鉴权头只挂在 msg 上。
     }
 
     public Task<VersionInfo?> GetVersionAsync(CancellationToken ct) =>
@@ -1490,7 +1552,9 @@ public sealed class MihomoClient
         // （spec §4.2 已写成既定实现要求）：404 = 调用方用错了通路，必须原样抛出去，不许在这里顺手吞成 -1，
         // 否则 Task 15 误调成员时会安静地显示"超时"，永远看不出是通路用错。
         catch (ApiException e) when (e.StatusCode is 409) { return -1; }
-        catch (TaskCanceledException) { return -1; }
+        // 裁定 R-6b：`when (!ct.IsCancellationRequested)` 把「调用方取消」留在异常通道里。
+        // HttpClient.Timeout 到点也抛 TaskCanceledException，但那时 ct 没被请求过，仍折成 -1。
+        catch (TaskCanceledException) when (!ct.IsCancellationRequested) { return -1; }
     }
 
     private async Task<T> GetAsync<T>(string path, CancellationToken ct) =>
@@ -1500,6 +1564,7 @@ public sealed class MihomoClient
     private async Task<string> Send(HttpMethod m, string path, object? body, CancellationToken ct)
     {
         using var msg = new HttpRequestMessage(m, new Uri(_base, path));
+        msg.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _secret);   // 每请求一次，不落共享状态
         if (body is not null) msg.Content = new StringContent(JsonSerializer.Serialize(body, Json), Encoding.UTF8, "application/json");
         using var res = await _http.SendAsync(msg, ct);
         var text = await res.Content.ReadAsStringAsync(ct);
@@ -1518,12 +1583,12 @@ public sealed class ApiException : Exception
 }
 ```
 
-`GET /configs` 若 Task 1 实测为 404，删除 `GetConfigsAsync` 与其测试，并把 `CoreConfigView` 一起删掉。
+`GET /configs` 已由 Task 1 实测为 **200**（spec §4.2），`CoreConfigView` 与 `GetConfigsAsync` 都保留。该次探针打印截断到 200 字符，逐字证到的键是 `port/socks-port/redir-port/tproxy-port/mixed-port/tun`，`mode` 在完整响应里但未被逐字证到——Step 1 里再加一条用例，用能同时给出 `mode` 与 `mixed-port` 的响应体断言两者都解析出来；若真机（Task 8 首次联调时）发现 `mode` 键名不同，按实测改模型并回写 spec §4.2，**不许**改端点或删方法。
 
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter MihomoClientTests`
-Expected: PASS，4/4
+Expected: PASS，**7/7**（样例 4 条 + 两条裁定回归锁 + `/configs` 一条）
 
 - [ ] **Step 5: 提交**
 

@@ -98,10 +98,12 @@ mixed 端口被占用的真机行为（Task 8 `Running` 判据依据，`-OccupyM
 ### 4.3 `settings.json`（Tray 独占写）
 
 ```
-{ controller: { host: "127.0.0.1", port: 9097 }, secret: "<32hex 首次随机>",
-  mixed_port: 7897, core_path: null, delay_test_url: "https://www.gstatic.com/generate_204",
+{ controller_host: "127.0.0.1", controller_port: 9097, secret: "<32hex 首次随机>",
+  mixed_port: 7897, core_path: null, delay_test_url: "http://www.gstatic.com/generate_204",
   last_subscription: "<URL 或本地 yaml 绝对路径>", core_version: "<已装内核 tag>" }
 ```
+
+**扁平 snake_case，不嵌套 `controller: {host, port}`**（Task 4 落地裁定）：Task 8/10/11 全部用 `with` 改单个端口字段，嵌套会把每处改动变成 `s with { Controller = s.Controller with { Port = p } }`；且 Task 10 的跨进程 `SettingsPatch` 本就是扁平 `controller_port`，两处同形才不留翻译层。键名逐字段显式 `[JsonPropertyName]`，不靠命名策略推断；缺键必须回落到默认值（用户手改 settings.json 是预期通路）。`delay_test_url` 默认 `http://`（Task 1 探针用它调 `/delay` 实测出过延迟值，且与 UI 侧测速地址下拉、`handshake` 下发的 `delay_test_url` 同值）。
 
 写入必须原子（同目录临时文件 + `File.Replace` 保留 `.bak`）。不放任何 phase 2 才用的占位字段。
 

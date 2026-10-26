@@ -573,8 +573,8 @@ git commit -m "feat(contracts): 命名管道行分帧协议与命令/事件类�
 **Interfaces:**
 - Consumes: 无
 - Produces:
-  - `static class AppPaths { string Root; string RuntimeDir; string ImportsDir; string CoreDir; string SettingsFile; string ConfigFile; string CoreExecutable; string CoreVersionFile; void EnsureCreated(); }`（`AppPaths.ForTest(string dir)` 供测试注入）
-  - `sealed record Settings { string ControllerHost; int ControllerPort; string Secret; int MixedPort; string? CorePath; string DelayTestUrl; string? LastSubscription; string? CoreVersion; }`（record：路由与更新器要用 `with` 做局部改动）
+  - `sealed class AppPaths { string Root; string RuntimeDir; string ImportsDir; string CoreDir; string SettingsFile; string ConfigFile; string CoreExecutable; string CoreVersionFile; void EnsureCreated(); }`（`AppPaths.Default()` / `AppPaths.ForTest(string dir)` 两个工厂，构造私有；`ForTest` 供测试注入）
+  - `sealed record Settings { string ControllerHost; int ControllerPort; string Secret; int MixedPort; string? CorePath; string DelayTestUrl; string? LastSubscription; string? CoreVersion; }`（record：路由与更新器要用 `with` 做局部改动；磁盘形状是 spec §4.3 的扁平 snake_case 键，每字段显式 `[JsonPropertyName]`）
   - `sealed class SettingsStore { Settings Load(); void Save(Settings s); Settings Update(Func<Settings,Settings> mutate); }`
 
 - [ ] **Step 1: 写失败的测试**
@@ -611,10 +611,28 @@ public class SettingsStoreTests : IDisposable
     {
         var store = Store();
         store.Update(s => s with { MixedPort = 7899 });
+        var settings = AppPaths.ForTest(_dir).SettingsFile;
         var files = Directory.GetFiles(_dir).Select(Path.GetFileName).ToArray();
 
         Assert.Contains("settings.json", files);
         Assert.DoesNotContain(files, f => f!.StartsWith(".tmp"));
+        // 名字里的"备份"必须真被断言：第一次 Write 是 Move（无目标），第二次才 Replace 出 .bak
+        Assert.True(File.Exists(settings + ".bak"), "覆盖写必须留下 .bak（spec §4.3）");
+        Assert.Equal(7899, Store().Load().MixedPort);
+    }
+
+    [Fact]
+    public void PartialFile_UsesDefaultsForAbsentKeys()
+    {
+        // 显式 [JsonPropertyName] + positional record 默认值：老文件缺键不能把 null/0 灌进来，
+        // 也不能因为缺键抛（用户手改 settings.json 是预期通路，spec §4.3）。
+        File.WriteAllText(AppPaths.ForTest(_dir).SettingsFile, """{"mixed_port":7899,"secret":"ab"}""");
+        var s = Store().Load();
+
+        Assert.Equal(7899, s.MixedPort);
+        Assert.Equal("ab", s.Secret);
+        Assert.Equal(9097, s.ControllerPort);
+        Assert.Equal("127.0.0.1", s.ControllerHost);
     }
 
     [Fact]
@@ -665,17 +683,23 @@ public sealed class AppPaths
 }
 
 // Settings.cs
+using System.Text.Json.Serialization;
 namespace ClashAcry.Core;
 
+/// 线格式 = spec §4.3 的 settings.json。键名逐字段显式标注，不靠命名策略推断（与 Task 3 对
+/// `Frame`/`HandshakeReply` 的裁定同源）。形状取**扁平 snake_case**（`controller_host`/`controller_port`），
+/// 不嵌套 `controller:{host,port}`：Task 8/10/11 全靠 `with` 改单个端口字段，嵌套会让每个改动点变成
+/// `s with { Controller = s.Controller with { Port = p } }`；而 Task 10 的 `SettingsPatch` 本来就是扁平
+/// `controller_port`，两处对齐才不留翻译层。spec §4.3 已按此回写。
 public sealed record Settings(
-    string ControllerHost = "127.0.0.1",
-    int ControllerPort = 9097,
-    string Secret = "",
-    int MixedPort = 7897,
-    string? CorePath = null,
-    string DelayTestUrl = "http://www.gstatic.com/generate_204",
-    string? LastSubscription = null,
-    string? CoreVersion = null);
+    [property: JsonPropertyName("controller_host")] string ControllerHost = "127.0.0.1",
+    [property: JsonPropertyName("controller_port")] int ControllerPort = 9097,
+    [property: JsonPropertyName("secret")] string Secret = "",
+    [property: JsonPropertyName("mixed_port")] int MixedPort = 7897,
+    [property: JsonPropertyName("core_path")] string? CorePath = null,
+    [property: JsonPropertyName("delay_test_url")] string DelayTestUrl = "http://www.gstatic.com/generate_204",
+    [property: JsonPropertyName("last_subscription")] string? LastSubscription = null,
+    [property: JsonPropertyName("core_version")] string? CoreVersion = null);
 
 // SettingsStore.cs
 using System.Security.Cryptography;
@@ -731,10 +755,12 @@ public sealed class SettingsStore
 
 注：`Settings` 是 positional record，默认值即上表；`New()` 只负责补随机 secret。测试里断言 `.tmp` 不残留时，实现必须用 `Path.Combine(_paths.Root, ".tmp-...")` 的同目录临时文件（跨目录 `File.Replace` 会失败）。
 
+> **缺键行为要先实测（`PartialFile_UsesDefaultsForAbsentKeys` 的实现路径）**：System.Text.Json 历史上**不会**为 positional record 里"JSON 中缺失的可选构造参数"套用 C# 默认值——先跑一条最小复现确认本机 .NET 10 的归属。若确实套用默认值，样例代码原样即可；若填的是 `default(T)`（`0` / `null`），**不许删测试断言迁就实现**，改为在 `Settings` 之外加一个全 nullable 的读盘形状（`SettingsOnDisk`）反序列化，再逐字段 `?? 默认值` 合并成 `Settings`。这条行为是 spec §4.3 的前提（用户会手改 settings.json，也可能被更早版本写坏），测试是它的可执行化；无论走哪条，最终磁盘形状都只有 `Settings` 的扁平 snake_case 键，读盘形状不得写成第二个 `settings.json` 格式。
+
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter SettingsStoreTests`
-Expected: PASS，4/4。
+Expected: PASS，5/5。
 
 - [ ] **Step 5: 提交**
 

@@ -57,7 +57,7 @@ mihomo.exe                原版 Go 内核，external-controller 127.0.0.1:9097
 
 ### 4.1 命名管道 `clashacry.tray.v1`
 
-管道 ACL 限当前用户 SID（`FileSecurity` 显式授权，拒绝 Everyone）。一帧一条 UTF-8 JSON 行：`{"id","kind":"command|event|reply","type","payload","seq","reply_to","error"}`。线键名一律小写/snake_case，且由 `ClashAcry.Contracts` 里每个跨进程结构体的显式 `[JsonPropertyName]` 钉死——**不靠序列化命名策略推断**（Task 3 落地：`Frame`、`HandshakeReply` 与三个事件 payload 全量标注，`FrameCodec` 不设命名策略）。
+管道 ACL 限当前用户 SID（`FileSecurity` 显式授权，拒绝 Everyone）。**落地形态已实测修正（Task 9 派发前探针，.NET 10 / `net10.0-windows10.0.19041.0`）**：`NamedPipeServerStream` 在 .NET 10 **没有**带 `PipeSecurity` 的构造函数，且对已建实例调 `SetAccessControl` 抛 `UnauthorizedAccessException`，读回仍是默认 5 条 Allow（含 `S-1-1-0` Everyone）——即"先建后设"这条路等于没设；唯一可行入口是 `NamedPipeServerStreamAcl.Create(...)`（建实例时落 DACL，读回恰好 1 条 Allow = 当前用户 SID）。另外 `maxNumberOfServerInstances` 传 255 会抛 `ArgumentOutOfRangeException`，合法是 1–254 或 `MaxAllowedServerInstances`。一帧一条 UTF-8 JSON 行：`{"id","kind":"command|event|reply","type","payload","seq","reply_to","error"}`。线键名一律小写/snake_case，且由 `ClashAcry.Contracts` 里每个跨进程结构体的显式 `[JsonPropertyName]` 钉死——**不靠序列化命名策略推断**（Task 3 落地：`Frame`、`HandshakeReply` 与三个事件 payload 全量标注，`FrameCodec` 不设命名策略）。
 
 握手回包 `handshake` 的形状（UI 起 REST 客户端所需的全部参数，一次给齐）：`{state,host,port,secret,mixed_port,core_version?,delay_test_url}`——`delay_test_url` 走握手而非另开一条读设置的通路，UI 测速与设置页的测速地址下拉都用它。**secret 只在 `handshake` 的回包里下发，UI 不持久化、不展示。**
 
@@ -172,6 +172,8 @@ docs/superpowers/{specs,plans,checklists}/
 | 内核更新失败 | 下载中断、zip 解不出 exe、目标文件被占用 | 缓存已下载 zip 供重试跳过网络；替换失败退回原 `.exe` 并保持内核运行；全程不阻塞 UI（进度事件推 `core.update.progress`），拒绝阻塞式弹窗 |
 
 **已知限制（Task 7 回写）**：`CleanupIfStale` 比对的是**当前**设置里的 `mixed_port`，若用户在系统代理还指向旧端口时改了 `mixed_port`，那份指向旧端口的悬挂值 v1 不会清掉（换端口后重新开启一次系统代理即覆盖）。
+
+**取消语义（Task 8 回写）**：`StartAsync` 的 `CancellationToken` 一旦被调用方触发，**不算启动失败**——不落 `Crashed`、不进"自动重试一次"的循环。行为固定为三步，顺序不可换：① 杀掉本已 spawn 的 mihomo 进程（绝不留孤儿内核）；② `Transition(Stopped)` 并保留"启动被取消"作为原因；③ 原样抛 `OperationCanceledException`（吞掉就等于伪造业务结论，让调用方以为还能重试）。实现上这条 catch 必须在通用 `catch (Exception)` **之前**，否则取消会被归类成启动异常。
 
 ## 10. 常驻开销目标（验收判据）
 

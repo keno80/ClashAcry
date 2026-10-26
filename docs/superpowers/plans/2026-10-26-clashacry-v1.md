@@ -1893,6 +1893,12 @@ git commit -m "feat(core): 系统代理 HKCU 开关与悬挂清理（只清指�
 - **R-8e：重试叙述不许被抹掉。** 样例在 `AttemptStart` 顶部 `_lastReason = null`，而 `StartLockedAsync` 是在两次尝试**之间**写入「首次启动失败（…），自动重试第 2 次」的——下一行就被自己清掉，`Transition(Starting, _lastReason)` 永远带 `null`，UI 上看不出发生过重试（spec §9 第 1 行要求"仅启动时自动重试一次"，重试本身是要显示的事实）。改成：清 `_lastReason` 只在 `attempt == 1` 时做（把 `_stderr.Clear()` 留在原位，它确实该每attempt重开），并在 `Start_ExitsImmediately_...` 里加一条断言：**第二个 `Starting` 事件**的 `Reason` 含"重试"。
 - **R-8f（从 Task 6 带过来的债）：本任务顺手在 `MihomoClientTests` 补一条「`GET /proxies/{name}/delay` 回 **404** 时 `GetDelayAsync` 必须抛 `ApiException`、不许折成 `-1`」**。spec §4.2 把这条写成既定实现要求（provider 成员调 delay 就是 404），但 Task 6 交付时它没有任何回归锁——现在把 `catch` 的条件手改成 `409 or 404`，全套测试仍然绿。这条是本任务唯一允许动 `MihomoClient.cs` 的理由，且只加测试、不改实现。
 - **R-8g：`CoreManagerTests` 必须挂 `[Collection("RegistryGuard")]`。** R-8b 把 `Stop` 改成真调 `SystemProxy.CleanupIfStale`，两条 `Stop_*` 用例还会真写 HKCU 的 `ProxyEnable/ProxyServer`。Task 7 的 `RegistrySnapshot` 只在「同类测试串行」的前提下成立——它读快照、改值、还原，两个类并发就是互相覆盖备份，最坏把用户代理留在开着的态。这个集合已经存在（`SystemProxyTests.cs:9`），复用即可，不要新造。
+- **R-8h（评审回来的 Important，plan-mandated：样例自己吞了取消）：调用方取消 `StartAsync` 不许被折成「启动失败」。** 样例里 `AttemptStart` 末尾是裸 `catch (Exception ex) { _lastReason = ex.Message; await KillProcess(); return false; }`，`Task.Delay(250, ct)` 抛的 `OperationCanceledException` 正好掉进去。后果是可静态追出的三件事：① `StartAsync` 返回 `false` 而不是把取消交还给调用方，UI 分不清「用户取消了这次重启」和「内核坏了」；② 重试循环拿着**已取消的令牌**再跑一遍，于是 spawn 第二个注定失败的进程（虽然毫秒级就被 kill，但那是一次多余 spawn，正撞 spec §3 禁令 1 的精神）；③ 终态落 `Crashed`，而真实情况是「没人在跑」。
+  裁定：`AttemptStart` 在通用 catch **之前**加 `catch (OperationCanceledException) when (ct.IsCancellationRequested) { await KillProcess(); Transition(CoreState.Stopped, "启动被取消"); throw; }`。三点都不是可选项：
+  ① `KillProcess()` 先跑——被取消的进程绝不能变成孤儿内核（那正是 R-8a 花力气防的那类东西）；② 必须 `Transition(Stopped)`——状态机不许停留在没有对应现实的状态里，留在 `Starting` 就是 spec §9「状态失真」的另一种形态；③ 必须 `throw` 原样传播——与 Task 6 的 R-6b 同源（取消是调用方的意图，吞掉它就等于伪造了一个业务结论）。
+  这条同样要回写 **spec §9**：`StartAsync` 的取消语义（杀掉已 spawn 的进程 + `Stopped` + 抛 `OperationCanceledException`，且不进重试）。
+  **回归锁（必做，否则这条裁定随时会被下一次重构抹掉）**：`StartCancelled_KillsCore_TransitionsStopped_AndThrowsWithoutRetrying`。不能用「进函数前就取消好的令牌」——那会在 `InLifecycle` 的 `_lifecycle.WaitAsync(ct)` 就抛，压根没 spawn，测试空转。要卡在循环中间：夹具的 `FakeProbe.ControllerAlive` 改成 `await _gate.Task`（**不带 ct**，让测试掌控时机）→ 复用现成的假内核夹具（`cmd.exe /c ping -n 60 127.0.0.1`，别用 `timeout /t`，它拒绝非交互控制台）。步骤：`var start = mgr.StartAsync(cts.Token);`（不 await）→ 轮询等 `mgr.SpawnCount == 1 && mgr.State == Starting` → `cts.Cancel(); gate.SetResult(false);` → `await Assert.ThrowsAnyAsync<OperationCanceledException>(() => start);`。断言四件：抛的是 OCE（`when (ct.IsCancellationRequested)` 命中，不是别的异常）；`State == Stopped`（不是 `Crashed`，也不是卡在 `Starting`）；`SpawnCount == 1`（重试循环没拿着已取消的令牌再 spawn 第二个进程）；`StartAttemptCount == 1`。取消后 `Task.Delay(250, ct)` 立即抛，整条用例不超过 1 s。同样挂 `[Collection("RegistryGuard")]` + `RegistrySnapshot` 与同类用例保持一致（取消路径其实不经 `StopLockedAsync`、不写注册表，挂上只是防并发还原互相覆盖）。
+- **评审带出的四条小钉（同一轮修复里一起办，都是本任务自己的面积）**：① `RunningProcessId` 在锁外读 `_proc.HasExited`，而 `KillProcess` 可能并发 `_proc.Dispose()` → Task 11 的管道线程读它会拿 `ObjectDisposedException`，改成 try/catch 返回 null；② `StateChangedEvents` 现在把活的 `_events` 直接交出去，`Transition` 还在往里 `Add` → 读时返回快照；③ `Start_ControllerPortAlreadyOwned...` 缺 `Assert.Equal(2, mgr.StartAttemptCount)`——R-8a 明写过「占用被拒也吃一次重试」，这句副作用目前没有回归锁；④ **R-8c 目前没有任何回归锁**（全套没一处调用 `DisposeAsync`）→ 补一条 `DisposeAsync_KillsCoreAndLeavesStopped`（Running 后释放 → 进程消失、`State == Stopped`、二次释放是 no-op；它同样会走 `CleanupIfStale`，所以必须 `RegistrySnapshot` + `RegistryGuard`）。
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -2332,6 +2338,14 @@ public sealed class CoreManager : IAsyncDisposable
             await KillProcess();
             return false;
         }
+        // 裁定 R-8h：调用方的取消不是「启动失败」。顺序不能变——先杀进程（绝不能留孤儿内核），
+        // 再 Transition(Stopped)（状态机不许停留在没有对应现实的状态里），最后原样抛（吞掉就等于伪造业务结论）。
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            await KillProcess();
+            Transition(CoreState.Stopped, "启动被取消");
+            throw;
+        }
         catch (Exception ex) { _lastReason = ex.Message; await KillProcess(); return false; }
     }
 
@@ -2383,7 +2397,9 @@ public readonly record struct SwapOutcome(bool CoreRunningAfter, bool RolledBack
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter "CoreManagerTests|StderrRingTests|MihomoClientTests"`
-Expected: PASS，**12/12**（`CoreManagerTests` 9 条 + `StderrRingTests` 2 条 + R-8f 那条新的 `MihomoClientTests` 用例，该套件从 7 条变 8 条）。全套 `dotnet test tests/ClashAcry.Core.Tests` 应为 **57/57**（Task 7 后基线 45 + 本任务 12）。三条测试就是 spec 禁令的可执行化：`EveryTransition_EmitsEvent_AndNoStateIsSilent` —— 实现里出现任何绕过 `Transition` 的 `State =` 赋值它就红（禁令 3）；`ConcurrentStart_GuardHitsSecondRequest_AndSpawnHappensOnce` —— `SpawnCount` 必须为 1（禁令 1 的进程侧保证）；`Start_DoesNotReachRunning_WhenControllerAliveButMixedPortDead` 锁住 spec §9 的状态失真判据。
+Expected: PASS。过滤 `CoreManagerTests|StderrRingTests|MihomoClientTests` 跑出**总数 19**（`CoreManagerTests` 9 + `StderrRingTests` 2 + `MihomoClientTests` 8——前两个文件是本任务新建，MihomoClient 那 8 条里有 7 条是 Task 6 的存量）。全套 `dotnet test tests/ClashAcry.Core.Tests` 应为 **57/57**（Task 7 后基线 45 + 新增 12：CoreManager 9 + StderrRing 2 + MihomoClient 1）。三条测试就是 spec 禁令的可执行化：`EveryTransition_EmitsEvent_AndNoStateIsSilent` —— 实现里出现任何绕过 `Transition` 的 `State =` 赋值它就红（禁令 3）；`ConcurrentStart_GuardHitsSecondRequest_AndSpawnHappensOnce` —— `SpawnCount` 必须为 1（禁令 1 的进程侧保证）；`Start_DoesNotReachRunning_WhenControllerAliveButMixedPortDead` 锁住 spec §9 的状态失真判据。
+
+**修复轮（R-8h + 四条小钉）后的计数**：`CoreManagerTests` 由 9 条变 **11** 条（新增 R-8h 的取消用例与 R-8c 的 `DisposeAsync_KillsCoreAndLeavesStopped`），过滤总数 **21**，全套 **59/59**。
 
 **耗时预期（不是卡死）**：`StartAsync` 的探活循环按 spec 写死 20×250 ms，失败路径要跑满两次尝试，所以 `Start_DoesNotReachRunning_...` 与 `Start_FailsWhenVersionNeverResponds_...` 各约 10 s，本套件单跑约 25~30 s。不许为了跑得快把 5 s 缩成 1 s——那是 spec §9 的判据，缩了等于把"内核慢启动被误判 Crashed"这个真实故障放回代码里。
 
@@ -2400,7 +2416,9 @@ git commit -m "feat(core): 内核状态机（双探活判 Running、启动一次
 
 **Files:**
 - Create: `src/ClashAcry.Core/PipeServer.cs` `PipeClient.cs`
-- Test: `tests/ClashAcry.Core.Tests/PipeRoundTripTests.cs`
+- Create: `tests/ClashAcry.Core.Tests/PipeRoundTripTests.cs` `AssemblySerial.cs`
+- Modify: `src/ClashAcry.Core/ClashAcry.Core.csproj`（加 `InternalsVisibleTo`，见裁定 R-9f）
+- Modify: `src/ClashAcry.Contracts/FrameCodec.cs:38-39`（一行注释订正，见 R-9c；行为不动）
 
 **Interfaces:**
 - Consumes: `Frame`/`FrameCodec`/`CmdTypes`/`EventTypes`（Task 3）、`CoreManager`（Task 8）、`SettingsStore`（Task 4）
@@ -2408,26 +2426,59 @@ git commit -m "feat(core): 内核状态机（双探活判 Running、启动一次
   - `sealed class PipeServer { public PipeServer(Func<Frame,Task<Frame?>> onCommand); Task StartAsync(CancellationToken ct); void Broadcast(string type, object? payload); int ClientCount; }`
   - `sealed class PipeClient { Task<bool> WaitUpAsync(TimeSpan timeout); Task<Frame?> RequestAsync(string type, object? payload, CancellationToken ct); event Action<Frame>? Event; Task<bool> IsServerUp(); }`
 
+派发前控制器裁定（这条管道是 UI↔Tray 的唯一通路，样例里 **`await server.StartAsync(...)` 三处全部会挂死**，不先裁掉实现者只能在本任务循环里撞满超时）：
+
+- **R-9a（阻断级）：`StartAsync` 不许把 accept 循环的 Task 直接返回。** 样例 `public Task StartAsync(CancellationToken ct) => _accept ??= AcceptLoop(ct);`，而 `AcceptLoop` 是 `while(true)`——三条测试里每一句 `await server.StartAsync(cts.Token)` 都会一直等到 10 s 的 CTS 触发才带失败返回，`Expected: PASS 3/3` 永不可达。裁定：`StartAsync` 等「第一台管道实例已挂到命名空间、可以接受连接」这个就绪信号，然后返回；accept 循环本身存进 `_accept` 只在 `DisposeAsync` 里 await。
+  就绪点在 `AcceptLoop` 里 `CreateServerPipe()` 成功之后、`WaitForConnectionAsync` 之前 `TaskCompletionSource` 置位（`SetResult` 幂等用 `TrySetResult`），这样 UI 侧的首次 `WaitUpAsync` 不会撞空。补一条 `StartAsync_ReturnsBeforeItsFirstClientConnects`：`Stopwatch` 断言 `StartAsync` 在 2 s 内返回，且紧接着 `new PipeClient().WaitUpAsync(2s)` 为真。
+- **R-9b：广播与回复的写必须串行且不阻塞 Tray。** 样例两处叠加会卡死宿主：① `Broadcast` 在 `lock (_clients)` 里调 `TrySend`，而 `TrySend` 用 `_gate.Wait()` **同步**等待；② `StreamWriter.Write` 在管道缓冲写满时同步阻塞（客户端读得慢就直接把 Tray 的广播线程挂住——spec §9 明令长耗时/背压不许变成卡顿，且 Task 15 的轮询会以每秒若干帧的速率往同一条流里压）。裁定：每个 `ConnectedClient` 一条**有界** `Channel<Frame>`（容量 1024，`FullMode = DropWrite`）+ 一个专属写任务 `await _w.WriteAsync(...); await _w.FlushAsync();`；`Broadcast` 与 `Pump` 的回复只做 `TryWrite` 入队，**一个字节都不在锁里写**。丢帧只发生在客户端彻底卡死时，方向是把慢客户端甩在身后、而不是拖死 Tray，须在注释里写明。
+  补一条 `ManyBroadcasts_ReachBothClients_InOrder_AndLinesNeverTear`：连发 50 个事件，两个客户端各收满 50、顺序一致（顺带证明「一帧一行」在并发写下没被撕开——`TryWrite` 无闸门时这里必红）。
+- **R-9c：坏帧只许弄死那一条连接。** 样例 `_ = Pump(client, ct)` 是 fire-and-forget，`FrameCodec.ReadLineAsync` 抛出的异常逃出去就是未观察任务异常：客户端被摘除、Tray 侧一句痕迹都没有，而 Task 10 的日志全靠这条。裁定：`Pump` 自己 `catch (IOException or InvalidDataException or JsonException)`，**不重新 spawn 任何东西**，只断开该客户端并在退出前把原因留在帧里（回复一帧 `Error="bad frame"` 可选，不做也不扣分）。
+  顺带纠正一处**既有注释不实**：`FrameCodec.cs:38-39` 写「两类分帧错误（过长/空帧）仍同属 IOException 家族」，但空帧那条抛的是 `InvalidDataException`，它派生自 `SystemException` 不是 `IOException`——所以 catch 必须三型并列。本任务允许对这两行注释做**一行**订正（行为不动），并在报告里写明。
+  补一条 `GarbageLine_DisconnectsOnlyThatClient_AndServerKeepsServing`：客户端 A 裸写一行 `"{ not json\n"`，A 随后收不到东西；另起客户端 B 仍能完成一次 handshake 往返。
+- **R-9d：客户端侧同样要串行，且服务端消失时 pending 请求必须立刻失败。** ① `RequestAsync` 裸调 `_w!.WriteAsync`，Task 12 的 UI 会**并发**发请求（轮询 + 用户点击），两帧交错就是服务端读到非法 JSON（被 R-9c 吃掉，等于 UI 自己把连接搞死）；裁定：客户端一个 `SemaphoreSlim(1,1)` 只包「写一行」。② 样例的 `ReadLoop` 遇 EOF/异常 `return`，`_pending` 里的 TCS 从此无人问——服务端崩了，UI 那次 `RequestAsync` 会挂到自己 `ct` 的超时才动，正是 spec §9「无反馈卡死」。裁定：`ReadLoop` 退出时把 `_pending` 全部 `TrySetException(new IOException("pipe closed"))`。③ 未连接就 `RequestAsync` 是 `_w!` 的 NRE；裁定抛 `InvalidOperationException("pipe is not connected")`。
+  补两条：`Request_FailsFast_WhenServerGoesAwayMidFlight`（handler 故意永不回包的命令 → `DisposeAsync` 服务端 → 断言 2 s 内抛 `IOException`，而不是挂到 10 s）和 `Request_WithoutConnect_ThrowsMeaningfulError`。
+- **R-9e：`Dispose` 必须真能打断 `WaitForConnectionAsync`。** 样例的 accept 循环只在 `ct`（调用方传进来的那个）上等待，`_cts` 取消了它也不理；而 `WaitForConnectionAsync` 在没人连接时**并不观察取消**（.NET 已知行为：阻塞在 IO 上，令牌要等 I/O 完成才生效），于是 `DisposeAsync` 里 `await _accept` 直接挂住测试。裁定：① 循环内用 `CreateLinkedTokenSource(ct, _cts.Token)`；② 把「正在等待连接的那台实例」存字段，取消时 **`Dispose()` 掉它**（句柄一关，等待以异常结束），异常按正常关闭吞掉。
+  补一条 `DisposeWhileIdle_StopsAccepting_AndCompletesFast`：起服务、不做任何请求立刻 `await using` 释放，断言 2 s 内返回且之后 `WaitUpAsync(500ms)` 为假。
+- **R-9f（阻断级，已实测）：ACL 只能在创建实例时给，`SetAccessControl` 这条路在我们这台 .NET 10 上直接抛异常。** 派发前我用一次性探针工程（`net10.0-windows10.0.19041.0`）真跑过，四条结论都是量出来的，不是查文档查来的：
+  ① 样例的「先 `new NamedPipeServerStream(...)` 再 `pipe.SetAccessControl(sec)`」→ **`UnauthorizedAccessException: Attempted to perform an unauthorized operation`**，且紧接着 `GetAccessControl()` 读回的是**默认的 5 条 Allow**：`S-1-1-0`（Everyone）、`S-1-5-7`、`S-1-5-18`、`S-1-5-32-544`、当前用户。也就是说照样例写，Tray 第一次建管道就炸；即使不炸，本机任意用户都能连上这条管道并 `handshake` 把 **controller secret 读走**（spec §4.1 的红线）。
+  ② 正确 API 是 **`System.IO.Pipes.NamedPipeServerStreamAcl.Create(name, PipeDirection.InOut, NamedPipeServerStream.MaxAllowedServerInstances, PipeTransmissionMode.Byte, PipeOptions.Asynchronous, inBufferSize, outBufferSize, pipeSecurity)`**（`HandleInheritability`/`PipeAccessRights` 有默认值，8 参重载编译通过）→ 建实例成功、同用户客户端照常连上并读到数据、`GetAccessControl()` 读回**恰好 1 条 Allow 且 SID == 当前用户**。裁定：`CreateServerPipe()` 用它，`SetAccessControl` 那条路整个删掉。
+  ③ `NamedPipeServerStream` 在 .NET 10 **没有**带 `PipeSecurity` 的构造函数（探针枚举 7 个构造函数，最长 7 参；传 8 参得 CS1729），所以 `NamedPipeServerStreamAcl` 是唯一入口，不是可替代的写法之一。
+  ④ 两个会咬人的细节：`maxNumberOfServerInstances` 传 `255` 抛 `ArgumentOutOfRangeException`（合法是 1–254 或 `MaxAllowedServerInstances`）；`PipeAccessRule` **没有** `ObjectSid` 属性，读回要比 `IdentityReference`（`GetAccessRules(true, true, typeof(SecurityIdentifier))` 给的就是 `SecurityIdentifier`，用 `.Equals`）。
+  因为读回断言要碰 `internal`，本任务**授权**一处 csproj 改动：`src/ClashAcry.Core/ClashAcry.Core.csproj` 加 `<ItemGroup><InternalsVisibleTo Include="ClashAcry.Core.Tests" /></ItemGroup>`，`CreateServerPipe()` 声明为 `internal static`。补一条 `ServerPipe_AclGrantsCurrentUser_AndNothingElse`：断言规则数 `== 1`、`AccessControlType.Allow`、`IdentityReference` 等于当前用户 SID——这条就是「没有 Everyone」的唯一回归锁，跨用户拒绝连接本机测不了，也不许写假测试。探针是临时的，用完删掉，不要留在仓库里。
+- **R-9g：测试串行化写在哪要定死。** 命名管道名固定（`ContractConstants.PipeName`），同进程两个 `PipeServer` 会互相撞车。裁定：新建 `tests/ClashAcry.Core.Tests/AssemblySerial.cs` 放 `[assembly: CollectionBehavior(DisableTestParallelization = true)]`（只此一个文件、一行属性），**不要**塞进某个测试类文件里；已有的 `RegistryGuard` 集合定义保留（它表达的是「代理全局态独占」的意图，与本条不冲突）。全套因此是串行跑，Task 8 的约 30 s 也计入——报告里给出全套 wall clock，评审若拿「测试慢」开条，答案是 spec §9 的 5 s 探活判据 + 真管道往返，不是实现缺陷。
+
 - [ ] **Step 1: 写失败的测试（同进程起服务端，真命名管道往返）**
 
 ```csharp
+using System.Diagnostics;
+using System.IO;
+using System.IO.Pipes;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using System.Text;
+using ClashAcry.Contracts;
+
 public class PipeRoundTripTests
 {
+    // 假内核路由在这里不需要，测试用一个可配置的 handler；f.Type == "hang" 时**永不回包**，
+    // 专门用来验 R-9d（服务端消失时 pending 请求必须失败，而不是挂到调用方超时）。
+    private static Func<Frame, Task<Frame?>> EchoHandler => f =>
+    {
+        if (f.Type == "hang") return new TaskCompletionSource<Frame?>().Task;   // 永不回包
+        if (f.Type != CmdTypes.Handshake) return Task.FromResult<Frame?>(null);
+        return Task.FromResult<Frame?>(new Frame("reply", f.Type, JsonUtil.Element(new HandshakeReply(
+            CoreState.Running, "127.0.0.1", 9097, "sec", 7897, "v1", "http://www.gstatic.com/generate_204")),
+            1, f.Id, f.Id, null));
+    };
+
     [Fact]
     public async Task Request_AwaitsReply_WithSameReplyToId()
     {
-        var server = new PipeServer(async f =>
-        {
-            if (f.Type == CmdTypes.Handshake)
-                return new Frame("reply", f.Type, JsonUtil.Element(new HandshakeReply(
-                    CoreState.Running, "127.0.0.1", 9097, "sec", 7897, "v1", "http://www.gstatic.com/generate_204")), 1, f.Id, f.Id, null);
-            return await Task.FromResult<Frame?>(null);
-        });
+        await using var server = new PipeServer(EchoHandler);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        await server.StartAsync(cts.Token);
-        await Task.Delay(150);
+        await server.StartAsync(cts.Token);          // 就绪即返回（R-9a），不需要再 Task.Delay 等监听
 
-        var client = new PipeClient();
+        await using var client = new PipeClient();
         Assert.True(await client.WaitUpAsync(TimeSpan.FromSeconds(5)));
 
         var reply = await client.RequestAsync(CmdTypes.Handshake, null, cts.Token);
@@ -2441,35 +2492,167 @@ public class PipeRoundTripTests
     [Fact]
     public async Task Broadcast_ReachesEveryConnectedClient()
     {
-        var server = new PipeServer(_ => Task.FromResult<Frame?>(null));
+        await using var server = new PipeServer(_ => Task.FromResult<Frame?>(null));
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         await server.StartAsync(cts.Token);
-        await Task.Delay(150);
 
-        var a = new PipeClient(); var b = new PipeClient();
-        var gotA = new TaskCompletionSource<Frame>(); var gotB = new TaskCompletionSource<Frame>();
-        a.Event += gotA.SetResult; b.Event += gotB.SetResult;
+        await using var a = new PipeClient(); await using var b = new PipeClient();
+        var gotA = new TaskCompletionSource<Frame>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var gotB = new TaskCompletionSource<Frame>(TaskCreationOptions.RunContinuationsAsynchronously);
+        a.Event += gotA.TrySetResult; b.Event += gotB.TrySetResult;
         Assert.True(await a.WaitUpAsync(TimeSpan.FromSeconds(5)));
         Assert.True(await b.WaitUpAsync(TimeSpan.FromSeconds(5)));
-        await Task.Delay(200);
 
-        server.Broadcast(EventTypes.CoreStateChanged, new { state = CoreState.Running });
+        server.Broadcast(EventTypes.CoreStateChanged, new CoreStateChanged(CoreState.Running, null, new[] { "l1" }));
 
         var fromA = await gotA.Task; var fromB = await gotB.Task;
         Assert.Equal(EventTypes.CoreStateChanged, fromA.Type);
         Assert.Equal(EventTypes.CoreStateChanged, fromB.Type);
         Assert.Equal(fromA.Seq, fromB.Seq);   // 同一次广播，两个客户端各得一份
+        Assert.Equal(CoreState.Running, JsonUtil.Read<CoreStateChanged>(fromA.Payload).State);
     }
 
     [Fact]
     public async Task Client_WaitsUp_ReturnsFalseWhenServerAbsent()
     {
+        // 这条断言的是「没有服务端」，所以它跑的时候**任何** server 都不许活着：
+        // 上面的用例必须 await using 释放自己的服务端，漏一个就把这条变成随机红。
         Assert.False(await new PipeClient().WaitUpAsync(TimeSpan.FromMilliseconds(300)));
+    }
+
+    [Fact]
+    public async Task StartAsync_ReturnsBeforeItsFirstClientConnects()
+    {
+        // 裁定 R-9a：样例把 accept 循环的 Task 直接当 StartAsync 的结果返回，
+        // 于是每一句 await server.StartAsync(...) 都会挂到 CTS 超时——三条用例全红不是实现者的错。
+        await using var server = new PipeServer(EchoHandler);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var sw = Stopwatch.StartNew();
+
+        await server.StartAsync(cts.Token);
+
+        Assert.True(sw.ElapsedMilliseconds < 2000, $"StartAsync 没有及时返回（{sw.ElapsedMilliseconds} ms）");
+        await using var client = new PipeClient();
+        Assert.True(await client.WaitUpAsync(TimeSpan.FromSeconds(2)));   // 返回即已在监听
+    }
+
+    [Fact]
+    public async Task ManyBroadcasts_ReachBothClients_InOrder_AndLinesNeverTear()
+    {
+        // 裁定 R-9b：广播与回复共用一条流。没有每客户端一条队列 + 单写任务时，
+        // 并发写会把「一帧一行」撕开（半个 JSON 行），或让慢客户端把 Tray 的广播线程挂死。
+        await using var server = new PipeServer(_ => Task.FromResult<Frame?>(null));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await server.StartAsync(cts.Token);
+
+        await using var a = new PipeClient(); await using var b = new PipeClient();
+        var qa = new System.Collections.Concurrent.ConcurrentQueue<long>();
+        var qb = new System.Collections.Concurrent.ConcurrentQueue<long>();
+        a.Event += f => qa.Enqueue(f.Seq); b.Event += f => qb.Enqueue(f.Seq);
+        Assert.True(await a.WaitUpAsync(TimeSpan.FromSeconds(5)));
+        Assert.True(await b.WaitUpAsync(TimeSpan.FromSeconds(5)));
+
+        for (long i = 1; i <= 50; i++)
+            server.Broadcast(EventTypes.SettingsChanged, new { seq = i });
+
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while ((qa.Count < 50 || qb.Count < 50) && DateTime.UtcNow < deadline) await Task.Delay(50);
+        Assert.Equal(50, qa.Count); Assert.Equal(50, qb.Count);            // 一帧都没丢、也没半行
+        Assert.Equal(qa.ToArray(), qb.ToArray());                          // 两个客户端看到同一个顺序
+    }
+
+    [Fact]
+    public async Task GarbageLine_DisconnectsOnlyThatClient_AndServerKeepsServing()
+    {
+        // 裁定 R-9c：坏帧抛 JsonException / InvalidDataException（后者不是 IOException 家族，
+        // FrameCodec.cs:38 那句注释是错的）。异常逃出 fire-and-forget 的 Pump 就是无声失败。
+        await using var server = new PipeServer(EchoHandler);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await server.StartAsync(cts.Token);
+
+        using (var raw = new NamedPipeClientStream(".", ContractConstants.PipeName,
+                       PipeDirection.InOut, PipeOptions.Asynchronous))
+        {
+            await raw.ConnectAsync(2000);
+            var w = new StreamWriter(raw, new UTF8Encoding(false)) { AutoFlush = true };
+            await w.WriteAsync("{ not json\n");                            // 非法帧，服务端必须只踢掉这条
+        }
+
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (server.ClientCount > 0 && DateTime.UtcNow < deadline) await Task.Delay(50);
+        Assert.Equal(0, server.ClientCount);
+
+        await using var good = new PipeClient();
+        Assert.True(await good.WaitUpAsync(TimeSpan.FromSeconds(5)));
+        Assert.NotNull(await good.RequestAsync(CmdTypes.Handshake, null, cts.Token));   // accept 循环还活着
+    }
+
+    [Fact]
+    public async Task Request_FailsFast_WhenServerGoesAwayMidFlight()
+    {
+        // 裁定 R-9d ②：ReadLoop 退出时必须把 _pending 全部失败掉。
+        // 不这么做，Tray 崩在 UI 一次轮询中间，那次 await 会挂到自己 ct 的超时——spec §9 禁止无反馈卡死。
+        var server = new PipeServer(EchoHandler);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await server.StartAsync(cts.Token);
+        await using var client = new PipeClient();
+        Assert.True(await client.WaitUpAsync(TimeSpan.FromSeconds(5)));
+
+        var inflight = client.RequestAsync("hang", null, cts.Token);       // handler 永不回包
+        await Task.Delay(200);
+        await server.DisposeAsync();                                       // 服务端凭空消失
+
+        var winner = await Task.WhenAny(inflight, Task.Delay(2000));
+        Assert.Same(inflight, winner);                                     // 2 s 内有结果，不是挂到 10 s
+        await Assert.ThrowsAsync<IOException>(() => inflight);
+    }
+
+    [Fact]
+    public async Task Request_WithoutConnect_ThrowsMeaningfulError()
+    {
+        // 裁定 R-9d ③：未连接就 RequestAsync 在原样例里是 _w! 的 NullReferenceException。
+        await using var client = new PipeClient();
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => client.RequestAsync(CmdTypes.Handshake, null, default));
+        Assert.Contains("not connected", ex.Message);
+    }
+
+    [Fact]
+    public async Task DisposeWhileIdle_StopsAccepting_AndCompletesFast()
+    {
+        // 裁定 R-9e：WaitForConnectionAsync 在没人连接时不观察取消令牌，
+        // 只 _cts.Cancel() 打不断它，DisposeAsync 会挂住；必须顺手 Dispose 掉正在等的实例。
+        var server = new PipeServer(EchoHandler);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await server.StartAsync(cts.Token);
+
+        var stop = Task.Run(() => server.DisposeAsync().AsTask());
+        var finished = await Task.WhenAny(stop, Task.Delay(2000));
+        Assert.Same(stop, finished);
+        await stop;
+
+        await using var late = new PipeClient();
+        Assert.False(await late.WaitUpAsync(TimeSpan.FromMilliseconds(500)));
+    }
+
+    [Fact]
+    public void ServerPipe_AclGrantsCurrentUser_AndNothingElse()
+    {
+        // 裁定 R-9f（实测）：SetAccessControl 在 .NET 10 抛 UnauthorizedAccessException，
+        // 读回会留下默认 5 条 Allow（含 S-1-1-0 Everyone）——那样本机任何用户都能 handshake 把
+        // controller secret 读走。唯一正确入口是 NamedPipeServerStreamAcl.Create，
+        // 这条断言就是「没有 Everyone」的回归锁。
+        using var pipe = PipeServer.CreateServerPipe();
+        var rules = pipe.GetAccessControl().GetAccessRules(true, true, typeof(SecurityIdentifier));
+
+        var rule = Assert.Single(rules);
+        Assert.Equal(AccessControlType.Allow, rule.AccessControlType);
+        Assert.Equal(WindowsIdentity.GetCurrent().User!, Assert.IsType<SecurityIdentifier>(rule.IdentityReference));
     }
 }
 ```
 
-（测试间冲突处理：命名管道名固定，测试类必须串行执行——给测试项目加 `[assembly: CollectionBehavior(DisableTestParallelization = true)]`。）
+夹具约束（不是可选）：`PipeServer.CreateServerPipe()` 必须是 `internal static`（R-9f 的读回断言要直接拿到实例），并为此在 `ClashAcry.Core.csproj` 加 `InternalsVisibleTo`。命名管道名固定，所以**每个用例都要 `await using` 自己的服务端**——漏一个释放，`Client_WaitsUp_ReturnsFalseWhenServerAbsent` 就会因为「上一个用例的服务端还在监听」而随机红。测试串行化用 R-9g 的 `AssemblySerial.cs`。
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -2485,6 +2668,7 @@ using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
+using System.Threading.Channels;
 using ClashAcry.Contracts;
 namespace ClashAcry.Core;
 
@@ -2493,46 +2677,70 @@ public sealed class PipeServer : IAsyncDisposable
     private readonly Func<Frame, Task<Frame?>> _onCommand;
     private readonly CancellationTokenSource _cts = new();
     private readonly List<ConnectedClient> _clients = new();
+    private readonly object _instanceGate = new();
+    private readonly TaskCompletionSource _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private Task? _accept;
+    private NamedPipeServerStream? _waitingInstance;   // R-9e：正在等连接的那台实例，取消时必须关掉它才打得断等待
+    private long _seq;
 
     public PipeServer(Func<Frame, Task<Frame?>> onCommand) => _onCommand = onCommand;
     public int ClientCount { get { lock (_clients) return _clients.Count; } }
 
-    public Task StartAsync(CancellationToken ct) => _accept ??= AcceptLoop(ct);
+    // 裁定 R-9a：返回的是「第一台实例已挂上命名空间」，不是 accept 循环本身。
+    // 循环存进 _accept，只在 DisposeAsync 里 await；原样例把循环 Task 直接返回，await 它就等于等到超时。
+    public async Task StartAsync(CancellationToken ct)
+    {
+        _accept ??= AcceptLoop(ct);
+        await _ready.Task.WaitAsync(ct);
+    }
 
     public void Broadcast(string type, object? payload)
     {
         var frame = new Frame("event", type, payload is null ? null : JsonUtil.Element(payload),
             Interlocked.Increment(ref _seq), Guid.NewGuid().ToString("N"), null, null);
-        lock (_clients) foreach (var c in _clients.ToArray()) c.TrySend(frame);
+        ConnectedClient[] snapshot;
+        lock (_clients) snapshot = _clients.ToArray();
+        foreach (var c in snapshot) c.Enqueue(frame);   // 裁定 R-9b：只入队；一个字节都不在锁里写、也不替慢客户端排队
     }
-
-    private long _seq;
 
     private async Task AcceptLoop(CancellationToken ct)
     {
-        while (!ct.IsCancellationRequested && !_cts.IsCancellationRequested)
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _cts.Token);   // 裁定 R-9e
+        while (!linked.IsCancellationRequested)
         {
             var pipe = CreateServerPipe();
-            try { await pipe.WaitForConnectionAsync(ct); }
-            catch (OperationCanceledException) { pipe.Dispose(); return; }
+            lock (_instanceGate) _waitingInstance = pipe;
+            _ready.TrySetResult();
+            try
+            {
+                await pipe.WaitForConnectionAsync(linked.Token);
+            }
+            catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException
+                                       or IOException)   // Dispose 掉实例时这里以异常结束，正是我们要的退出方式
+            {
+                pipe.Dispose();
+                return;
+            }
+            finally { lock (_instanceGate) if (ReferenceEquals(_waitingInstance, pipe)) _waitingInstance = null; }
 
             var client = new ConnectedClient(pipe);
             lock (_clients) _clients.Add(client);
-            _ = Pump(client, ct);
+            _ = Pump(client, linked.Token);
         }
     }
 
-    private static NamedPipeServerStream CreateServerPipe()
+    /// internal static：R-9f 的读回断言要直接拿到实例（配 csproj 里的 InternalsVisibleTo）。
+    internal static NamedPipeServerStream CreateServerPipe()
     {
         var sec = new PipeSecurity();
         sec.AddAccessRule(new PipeAccessRule(WindowsIdentity.GetCurrent().User!,
             PipeAccessRights.ReadWrite, AccessControlType.Allow));   // 只允许当前用户（spec §4.1）
-        var pipe = new NamedPipeServerStream(ContractConstants.PipeName, PipeDirection.InOut,
+        // 裁定 R-9f（本机实测）：只有 NamedPipeServerStreamAcl.Create 能在建实例时落 DACL。
+        // 先 new 再 SetAccessControl 会抛 UnauthorizedAccessException，且读回仍是默认 5 条 Allow
+        // （含 S-1-1-0 Everyone）——那样本机任意用户都能 handshake 把 controller secret 读走。
+        return NamedPipeServerStreamAcl.Create(ContractConstants.PipeName, PipeDirection.InOut,
             NamedPipeServerStream.MaxAllowedServerInstances, PipeTransmissionMode.Byte,
-            PipeOptions.Asynchronous);
-        pipe.SetAccessControl(sec);
-        return pipe;
+            PipeOptions.Asynchronous, 0, 0, sec);
     }
 
     private async Task Pump(ConnectedClient client, CancellationToken ct)
@@ -2541,12 +2749,23 @@ public sealed class PipeServer : IAsyncDisposable
         {
             while (!ct.IsCancellationRequested)
             {
-                var frame = await FrameCodec.ReadLineAsync(client.Reader, ct);
-                if (frame is null) break;
+                Frame frame;
+                try
+                {
+                    // 裁定 R-9c：这三型都不许逃出 Pump——它是 fire-and-forget，逃出去就是无声失败，
+                    // Task 10 的日志全靠这条连接自己说清楚为什么断。InvalidDataException 派生自
+                    // SystemException，不在 IOException 家族里（FrameCodec.cs:38 那句注释不实）。
+                    frame = await FrameCodec.ReadLineAsync(client.Reader, ct)
+                            ?? throw new InvalidDataException("eof");
+                }
+                catch (OperationCanceledException) { return; }
+                catch (Exception ex) when (ex is IOException or InvalidDataException or JsonException) { return; }
+
                 Frame? reply;
                 try { reply = await _onCommand(frame); }
-                catch (Exception ex) { reply = frame with { Kind = "reply", Error = ex.Message, ReplyTo = frame.Id, Payload = null }; }
-                if (reply is not null) client.TrySend(reply with { Kind = "reply", ReplyTo = frame.Id });
+                catch (Exception ex)
+                { reply = frame with { Payload = null, Error = ex.Message, ReplyTo = frame.Id }; }
+                if (reply is not null) client.Enqueue(reply with { Kind = "reply", ReplyTo = frame.Id });
             }
         }
         finally { lock (_clients) _clients.Remove(client); client.Dispose(); }
@@ -2555,18 +2774,55 @@ public sealed class PipeServer : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         _cts.Cancel();
-        lock (_clients) foreach (var c in _clients.ToArray()) c.Dispose();
+        NamedPipeServerStream? waiting;
+        lock (_instanceGate) { waiting = _waitingInstance; _waitingInstance = null; }
+        waiting?.Dispose();   // 裁定 R-9e：句柄一关，挂在 WaitForConnectionAsync 上的循环立刻返回
+        ConnectedClient[] clients;
+        lock (_clients) { clients = _clients.ToArray(); _clients.Clear(); }
+        foreach (var c in clients) c.Dispose();
         if (_accept is not null) { try { await _accept; } catch { } }
+        _cts.Dispose();
     }
 }
 
-internal sealed class ConnectedClient(NamedPipeServerStream pipe) : IDisposable
+internal sealed class ConnectedClient : IDisposable
 {
-    private readonly StreamWriter _w = new(pipe, new UTF8Encoding(false)) { AutoFlush = true };
-    public StreamReader Reader { get; } = new(pipe, new UTF8Encoding(false));
-    private readonly SemaphoreSlim _gate = new(1, 1);
-    public void TrySend(Frame f) { _gate.Wait(); try { _w.Write(FrameCodec.Encode(f)); } finally { _gate.Release(); } }
-    public void Dispose() { try { _w.Dispose(); Reader.Dispose(); pipe.Dispose(); } catch { } }
+    // 裁定 R-9b：广播与回复共用这一条流。有界通道 + 单写任务 = 生产侧永不阻塞；
+    // 满 1024 帧只可能发生在客户端彻底卡死时，丢的是**新帧**（DropWrite），代价是把甩在身后的
+    // 慢客户端留在身后，而不是让 Tray 的广播线程跟着挂住（spec §9 禁止长耗时变成卡顿）。
+    private readonly Channel<Frame> _out = Channel.CreateBounded<Frame>(
+        new BoundedChannelOptions(1024) { FullMode = BoundedChannelFullMode.DropWrite, SingleReader = true });
+    private readonly CancellationTokenSource _cts = new();
+    private readonly StreamWriter _w;
+    private readonly Task _drain;
+    public StreamReader Reader { get; }
+
+    public ConnectedClient(NamedPipeServerStream pipe)
+    {
+        _w = new StreamWriter(pipe, new UTF8Encoding(false)) { AutoFlush = true };
+        Reader = new StreamReader(pipe, new UTF8Encoding(false));
+        _drain = Task.Run(() => DrainAsync(_cts.Token));   // 一条连接只有一个写者，帧永不互踩
+    }
+
+    public void Enqueue(Frame f) => _out.Writer.TryWrite(f);
+
+    private async Task DrainAsync(CancellationToken ct)
+    {
+        try
+        {
+            await foreach (var f in _out.Reader.ReadAllAsync(ct))
+                await _w.WriteAsync(FrameCodec.Encode(f));
+        }
+        catch { /* 客户端断了或管道被 Dispose：这条连接的写入生命周期到此为止（Dispose 是唯一入口，不静默丢连接） */ }
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        _out.Writer.TryComplete();
+        try { _w.Dispose(); Reader.Dispose(); } catch { }
+        _cts.Dispose();
+    }
 }
 ```
 
@@ -2574,22 +2830,28 @@ internal sealed class ConnectedClient(NamedPipeServerStream pipe) : IDisposable
 // PipeClient.cs
 using System.IO.Pipes;
 using System.Text;
+using System.Text.Json;
 using ClashAcry.Contracts;
 namespace ClashAcry.Core;
 
 public sealed class PipeClient : IAsyncDisposable
 {
     private NamedPipeClientStream? _pipe; private StreamWriter? _w; private CancellationTokenSource? _cts;
+    private readonly SemaphoreSlim _writeGate = new(1, 1);   // 裁定 R-9d①：并发请求不许把两帧交错进同一条流
     private readonly Dictionary<string, TaskCompletionSource<Frame>> _pending = new();
     private readonly object _gate = new();
     public event Action<Frame>? Event;
 
     public async Task<bool> WaitUpAsync(TimeSpan timeout)
     {
+        // 先连上再落字段：原样例把 _pipe 赋在 ConnectAsync 之前，一次失败连接会留下半具尸体的字段，
+        // 下一次 WaitUpAsync 就在往废管道上写。
         try
         {
-            _pipe = new NamedPipeClientStream(".", ContractConstants.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
-            await _pipe.ConnectAsync((int)timeout.TotalMilliseconds);
+            var pipe = new NamedPipeClientStream(".", ContractConstants.PipeName,
+                PipeDirection.InOut, PipeOptions.Asynchronous);
+            await pipe.ConnectAsync((int)timeout.TotalMilliseconds);
+            _pipe = pipe;
             _w = new StreamWriter(_pipe, new UTF8Encoding(false)) { AutoFlush = true };
             _cts = new CancellationTokenSource();
             _ = Task.Run(() => ReadLoop(_cts.Token));
@@ -2602,46 +2864,89 @@ public sealed class PipeClient : IAsyncDisposable
 
     public async Task<Frame?> RequestAsync(string type, object? payload, CancellationToken ct)
     {
+        var w = _w;
+        if (w is null) throw new InvalidOperationException("pipe is not connected");   // 裁定 R-9d③（原来这里是 _w! 的 NRE）
         var id = Guid.NewGuid().ToString("N");
         var tcs = new TaskCompletionSource<Frame>(TaskCreationOptions.RunContinuationsAsynchronously);
         lock (_gate) _pending[id] = tcs;
-        var frame = new Frame("command", type, payload is null ? null : JsonUtil.Element(payload), 0, id, null, null);
-        await _w!.WriteAsync(FrameCodec.Encode(frame), ct);
-        using var reg = ct.Register(() => tcs.TrySetCanceled(ct));
-        try { return await tcs.Task; } finally { lock (_gate) _pending.Remove(id); }
+        try
+        {
+            var frame = new Frame("command", type, payload is null ? null : JsonUtil.Element(payload), 0, id, null, null);
+            await _writeGate.WaitAsync(ct);
+            try { await w.WriteAsync(FrameCodec.Encode(frame)); } finally { _writeGate.Release(); }
+
+            using var reg = ct.Register(() => tcs.TrySetCanceled(ct));
+            return await tcs.Task;
+        }
+        finally { lock (_gate) _pending.Remove(id); }
     }
 
     private async Task ReadLoop(CancellationToken ct)
     {
         var reader = new StreamReader(_pipe!, new UTF8Encoding(false));
-        while (!ct.IsCancellationRequested)
+        try
         {
-            Frame? f;
-            try { f = await FrameCodec.ReadLineAsync(reader, ct); } catch { return; }
-            if (f is null) return;
-            if (f.Kind == "reply" && f.ReplyTo is not null)
+            while (!ct.IsCancellationRequested)
             {
-                TaskCompletionSource<Frame>? tcs;
-                lock (_gate) { _pending.TryGetValue(f.ReplyTo, out tcs); if (tcs is not null) _pending.Remove(f.ReplyTo); }
-                tcs?.TrySetResult(f);
+                Frame? f;
+                try { f = await FrameCodec.ReadLineAsync(reader, ct); }
+                catch (Exception ex) when (ex is IOException or InvalidDataException
+                                           or JsonException or OperationCanceledException) { break; }
+                if (f is null) break;   // 干净 EOF：服务端走了
+                if (f.Kind == "reply" && f.ReplyTo is not null)
+                {
+                    TaskCompletionSource<Frame>? tcs;
+                    lock (_gate) { _pending.TryGetValue(f.ReplyTo, out tcs); if (tcs is not null) _pending.Remove(f.ReplyTo); }
+                    tcs?.TrySetResult(f);
+                }
+                else Event?.Invoke(f);   // 订阅者异常会掀掉这条连接（有意不吞）：Task 12 的 TrayLink 要在自己那侧吃掉渲染异常
             }
-            else Event?.Invoke(f);
+        }
+        finally
+        {
+            // 裁定 R-9d②：流一断，在飞的请求立刻失败。留着不办等于 UI 挂到自己 ct 的超时——
+            // spec §9 明令长耗时/异常必须有反馈，静默卡死最糟。
+            TaskCompletionSource<Frame>[] inflight;
+            lock (_gate) { inflight = _pending.Values.ToArray(); _pending.Clear(); }
+            foreach (var tcs in inflight) tcs.TrySetException(new IOException("pipe closed"));
         }
     }
-    public async ValueTask DisposeAsync() { _cts?.Cancel(); _w?.Dispose(); _pipe?.Dispose(); await Task.CompletedTask; }
+
+    public async ValueTask DisposeAsync()
+    {
+        _cts?.Cancel();
+        _w?.Dispose();          // 连带关掉底层管道句柄，ReadLoop 因此以 EOF/异常退出并办完上面那段 finally
+        _pipe?.Dispose();
+        _cts?.Dispose();
+        _writeGate.Dispose();
+        await Task.CompletedTask;
+    }
 }
 ```
 
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter PipeRoundTripTests`
-Expected: PASS，3/3
+Expected: PASS，**10/10**（原有 3 条 + R-9a/9b/9c/9d×2/9e/9f 各一条）。全套 `dotnet test tests/ClashAcry.Core.Tests` 应为 **69/69**（Task 8 修复轮后基线 59 + 本任务 10）。报告里给出全套 wall clock。
+
+补上 R-9g 的那一行（新建文件，只放这一个属性）：
+
+```csharp
+// tests/ClashAcry.Core.Tests/AssemblySerial.cs
+using Xunit;
+
+// 命名管道名固定（ContractConstants.PipeName），同进程两个 PipeServer 会互相撞车；
+// Task 8 的注册表用例同理要求独占。整套串行是这个项目的既有代价，不是本任务的缺陷。
+[assembly: CollectionBehavior(DisableTestParallelization = true)]
+```
+
+以及 R-9c 要求的一行注释订正：`src/ClashAcry.Contracts/FrameCodec.cs:38-39` 说「两类分帧错误（过长/空帧）仍同属 IOException 家族」，实测 `InvalidDataException` 派生自 `SystemException`，不在该家族——把这句话改对（行为不动，catch 侧已在 `PipeServer.Pump` 里三型并列）。
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/ClashAcry.Core tests/ClashAcry.Core.Tests
-git commit -m "feat(core): 命名管道服务端/客户端（当前用户 ACL、请求-回复与广播）"
+git add src/ClashAcry.Core src/ClashAcry.Contracts tests/ClashAcry.Core.Tests
+git commit -m "feat(core): 命名管道服务端/客户端（创建期 ACL、请求-回复与广播）"
 ```
 
 ---

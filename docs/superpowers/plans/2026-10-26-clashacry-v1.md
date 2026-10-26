@@ -630,7 +630,9 @@ public class SettingsStoreTests : IDisposable
         var s = Store().Load();
 
         Assert.Equal(7899, s.MixedPort);
-        Assert.Equal("ab", s.Secret);
+        // "ab" 不是合法的 32hex secret，Heal 会换成新随机值（I-1 的裁定）；
+        // 「合法 secret 不被轮换」由 Secret_StableAcrossReloads 覆盖，这里只验缺键回落。
+        Assert.Matches("^[0-9a-f]{32}$", s.Secret);
         Assert.Equal(9097, s.ControllerPort);
         Assert.Equal("127.0.0.1", s.ControllerHost);
     }

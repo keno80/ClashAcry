@@ -235,6 +235,10 @@ dotnet add tests/ClashAcry.UI.Tests package System.Drawing.Common    # 只给 Ta
 
 `ClashAcry.Contracts` 的 csproj 里覆写 `<TargetFramework>net10.0</TargetFramework>`（不碰 Win32）。`Core` 加包：`YamlDotNet`、`Microsoft.Win32.Registry`、`System.IO.Pipes.AccessControl`（后者在 Windows 打包内，若还原不到则不引，`PipeSecurity` 已随 `System.IO.Pipes` 提供）。
 
+> **本机模板实测（2026-10-26，用装好的 10.0.203 SDK 跑 `dotnet new list`）**：
+> ① `dotnet new app` **不存在**，SDK 也不带任何 WinUI 模板（只有 `winforms*` 与 `xunit` 等）——UI 工程按 Step 3 **手写 csproj**，这条路我已用 probe 工程验证过：`UseWinUI=true` + `WindowsPackageType=None` + `WindowsAppSDKSelfContained=true` 的空壳（只有一个空 `Main`）`dotnet build -c Release` **0 警告 0 错误**。
+> ② `dotnet new classlib` / `console` 生成的 csproj 里**自带 `<TargetFramework>net10.0</TargetFramework>`**，而 csproj 的 PropertyGroup 比 `Directory.Build.props` 后求值、会**覆盖**全局值。所以模板建完后必须把每个 csproj 里那一行删掉（让全局的 `net10.0-windows10.0.19041.0` 生效），只有 Contracts 保留显式 `net10.0`。留着不删的后果是 Core/Tray 变成 `net10.0`，`Microsoft.Win32.Registry` 与 WinRT 投影一路爆到 Task 7/9。
+
 - [ ] **Step 3: UI 壳 csproj（unpackaged self-contained）**
 
 ```xml
@@ -251,10 +255,14 @@ dotnet add tests/ClashAcry.UI.Tests package System.Drawing.Common    # 只给 Ta
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.5.1" />
-    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.1" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.4654" />
   </ItemGroup>
 </Project>
 ```
+
+> **版本已在本机 probe 工程实测（2026-10-26）**：BuildTools 原计划钉 `10.0.26100.1`，`dotnet restore` 直接
+> **NU1605 包降级报错**——`Microsoft.WindowsAppSDK 2.5.1 → WindowsAppSDK.Base 2.0.4 → Microsoft.Windows.SDK.BuildTools (>= 10.0.26100.4654)`。
+> 改成 `10.0.26100.4654` 后还原通过（3.1 秒）。**不要**再把它改回 `.1`；要彻底免坑也可以整条删掉 BuildTools 引用，让 WindowsAppSDK 自己带。
 
 - [ ] **Step 4: Tray 壳 csproj（禁止 XAML/WinForms）**
 

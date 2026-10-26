@@ -862,7 +862,7 @@ git commit -m "feat(core): 设置模型与原子写存储（损坏留 .corrupt�
   - `sealed class SubscriptionImport { ImportResult ImportFromUrl(string url, HttpClient http, CancellationToken ct); ImportResult ImportFromFile(string path); ImportResult ImportFromText(string raw); }`（前两个只负责取字节，嗅探/存档/注入统一落在 `ImportFromText`）
   - `sealed record ImportResult(string OriginalFile, string ConfigFile, string ReasonIfFailed)`；`OriginalFile` 是 **`imports\` 里的原文副本**（不是用户手写的原件路径），`ReasonIfFailed == ""` 即成功；失败时 `ConfigFile` 指向旧配置且**不删除任何东西**。
 
-- [ ] **Step 1: 写失败的测试（断言"其余字段一字不改"）**
+- [x] **Step 1: 写失败的测试（断言"其余字段一字不改"）**
 
 ```csharp
 public class ConfigInjectorTests
@@ -957,12 +957,12 @@ public class ConfigInjectorTests
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter ConfigInjectorTests`
 Expected: FAIL（类型不存在）
 
-- [ ] **Step 3: 实现（用 YamlDotNet 的 DOM，避免序列化模型丢字段）**
+- [x] **Step 3: 实现（用 YamlDotNet 的 DOM，避免序列化模型丢字段）**
 
 ```csharp
 using System.Text;
@@ -1023,7 +1023,7 @@ public sealed class ConfigShapeException : Exception
 
 `YamlMappingNode` 的构造重载若不接受 `IEnumerable<KeyValuePair<YamlNode, YamlNode>>`，用 `var m = new YamlMappingNode(); foreach (var p in pairs) m.Add(p.Key, p.Value);` 等价替代。**不许退回字符串替换来实现注入。**
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter ConfigInjectorTests`
 Expected: PASS，6/6。**同时肉眼比对一次输出**：把 Task 1 的 `minimal.yaml` 喂进去，确认 `proxy-groups` 与 `proxies` 的嵌套结构仍是 block 风格；若变成 flow 风格，记录为已知限制写进 spec §12（内核仍能读，但人类难读）。同一趟比对确认**注释是否保留**（YamlDotNet 的 RepresentationModel 不承载注释，预期是丢）——丢了就一并写进 spec §12，并且 UI 导入结果文案（Task 14）不得出现「保留原注释」这类承诺。
@@ -1034,7 +1034,7 @@ Task 1 实测带来的两条硬约束（改注入器时不许破）：
 - **`proxy-groups` 整棵子树原样透传**，尤其 `use:` 列表。v1.19.33 里把 provider 名当节点名写进 `proxies:` 是**启动 fatal**（`proxy group[1]: PROBE-SELECT: 'PROBE-PROV' not found`），聚合订阅的唯一正确写法是 `use:`。注入器若"顺手"把 `use:` 展平、丢弃或改名，用户订阅会直接起不来。
 - **`proxy-providers` 整棵子树同样原样透传**，不得补 `url`、不得改 `type`/`path`/`interval`。实测 file 型 provider 只写 `type/path/interval` 就能加载（`url` 可省略），擅自补一个不可达 URL 虽被接受但会误导用户。
 
-- [ ] **Step 5: SubscriptionImport 与它的测试**
+- [x] **Step 5: SubscriptionImport 与它的测试**
 
 `SubscriptionImport` 的行为契约（测试必须逐条覆盖）：
 1. 下载或读入的原文**先原样落盘** `imports\<kind>-<sha8>.yaml`，之后才注入产物 `runtime\config.yaml`；
@@ -1235,12 +1235,49 @@ private static string Pad(string compact)
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter SubscriptionImportTests`
 Expected: PASS，7/7（七条行为契约：下载失败不动旧配置 / 原文先存档再注入 / 明文节点行拒绝且零落盘 / base64 里的 Clash yaml / base64 里的节点行仍拒绝 / url-safe 无填充也能解 / `ImportFromFile` 不动用户原件）。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add src/ClashAcry.Core tests/ClashAcry.Core.Tests
 git commit -m "feat(core): yaml 最小键注入与订阅导入（失败保留旧配置）"
 ```
+
+> **Task 5 实现注记（Step 4 肉眼比对的实测结论，2026-10-26 落码后回写）**
+>
+> 1. **注释：确认丢失。** YamlDotNet 的 `RepresentationModel`（DOM）在 `stream.Load()` 时不保留
+>    comment token，`Save()` 出来的产物里一条用户注释都不剩。实测样本输入
+>    `# 顶部注释\nmixed-port: 7890 # 行尾注释` → 输出只有 `mixed-port: 7890`。
+>    **不做“保留原注释”的承诺**，spec §12 已按实测回写；Task 14 的 UI 文案与「导入说明」
+>    不得出现「保留你的注释/原格式」字样，只能说「保留你认识的与不认识的字段值」。
+> 2. **block / flow 风格：保留。** 原样是 `{}` / `[]` 的 flow 节点仍是 flow（仅内部空白被
+>    归一为 `,` 后一个空格），原样是 block 的仍是 block；键序完全跟随原文，我们只在
+>    缺失时把必需键追加到末尾，不排序、不搬移。
+> 3. **可见的格式漂移（都在“不做字节级保真”的裁定范围内）：**
+>    - block 序列的对齐方式改为与父键同列（原 `- name: a` 前若有额外缩进会被压平）。
+>    - 文档尾部会多出一行 `...`（`YamlStream.Save` 对单文档流的默认行为）。
+>    - 引号风格按 emitter 重新决定（`'direct'` 这类无必要引号会被去掉）。
+>      以上都不影响 3 条字符串断言：本次 6/6 全部按简报原断言通过，**没有放宽任何断言**。
+> 4. **用户锚点/别名（`&base` / `*base` / `<<:`）保留**，但必须 `Save(writer, assignAnchors: false)`：
+>    默认 `assignAnchors: true` 会给“内容重复”的节点自动发随机锚点，产物里会长出用户
+>    没写过的 `&203281033 type: select` —— 这正是 Step 4 肉眼比对时发现的、也是唯一的
+>    一条格式相关失败。Task 6+ 任何再写 `YamlStream.Save` 的地方都要带上这个参数。
+> 5. **YamlDotNet 18.1.0 的 `YamlDocument.RootNode` 是只读的**，简报里
+>    `stream.Documents[0].RootNode = newRoot` 编不过（CS0200）。实现改为用新的根节点重建
+>    单文档流再 `Save`：`new YamlStream(new YamlDocument(new YamlMappingNode(pairs)))`。
+> 6. **嗅探正则按 spec §6 收紧**（对简报的一处偏离）：`^\s*[A-Za-z_-]+.*:\s` 里的 `.*`
+>    会让 `ss://AAA@1.2.3.4:8389#name: hk` 这种节点行冒充顶层键，实测整份节点行列表被
+>    当 Clash yaml 存档并写进产物。改成 `^[A-Za-z_-][A-Za-z0-9_-]*:(?=\s|$)` 后复测：
+>    明文与 base64 两种节点行列表都得到 `Reason = "v1 不支持节点行导入（spec §6）"`，
+>    存档数 0、旧 `config.yaml` 逐字节不变。
+> 7. **失败语义实测矩阵**（均保留旧配置、零写入）：`text/html` → “既不是 Clash yaml…”；
+>    单行节点行 → 同上（判定要求 ≥2 行）；非映射根的 yaml → 同上；空文本 → 同上；
+>    映射根但非 Clash 配置（如 `foo: bar`）→ 接受并注入（v1 裁定：只覆盖必需键，
+>    不校验内容，交叉验证交给 Task 10 的启动失败回退）。
+> 8. **写产物用 temp + `File.Replace`/`Move` 原子落盘**，注入/解析失败发生在存档之后，
+>    因此 `imports\` 里可能留下原件而 `runtime\config.yaml` 一动不动 —— 这是设计意图。
+>    存档文件名 `<kind>-<sha8>.yaml`，`kind` 为 `sub`（URL/文本通路）或 `file`（本地文件通路）。
+> 9. `ImportFromUrl` 同步等待响应（`GetAwaiter().GetResult()`）：简报签名是同步的，
+>    UI 侧调用请放后台线程（Task 14）。
 
 ---
 

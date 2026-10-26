@@ -337,12 +337,12 @@ git add . && git commit -m "chore: 四项目解决方案脚手架与常驻开销
 **Interfaces:**
 - Consumes: 无
 - Produces:
-  - `sealed record Frame(string Kind, string Type, JsonElement? Payload, long Seq, string? Id, string? ReplyTo, string? Error)`
+  - `sealed record Frame(string Kind, string Type, JsonElement? Payload, long Seq, string? Id, string? ReplyTo, string? Error)` —— 线格式键固定为 spec §3 的 `{"id","kind","type","payload","seq","reply_to","error"}`（小写/snake_case，每字段显式 `[JsonPropertyName]`）
   - `static class FrameCodec { const int MaxFrameBytes = 1 << 20; string Encode(Frame f); Frame Decode(string line); Task<Frame?> ReadLineAsync(StreamReader r, CancellationToken ct); }`
   - `enum CoreState { Stopped, Starting, Running, Crashed, Updating }`
   - `static class CmdTypes { const string Handshake="handshake"; CoreStart="core.start"; CoreStop="core.stop"; CoreReload="core.reload"; ModeSet="mode.set"; SysProxySet="sysproxy.set"; CoreUpdate="core.update"; SubImport="sub.import"; SettingsUpdate="settings.update"; UiFocus="ui.focus"; }`
   - `static class EventTypes { CoreStateChanged="core.state"; UpdateProgress="core.update.progress"; UpdateResult="core.update.result"; SettingsChanged="settings.changed"; }`（四个事件名即全部事件；日志文本不单独成事件，随 `CoreStateChanged.StderrTail` 下发）
-  - `sealed record HandshakeReply(CoreState State, string Host, int Port, string Secret, int MixedPort, string? CoreVersion, string DelayTestUrl)` —— 一次握手把「连内核所需的全部参数」交给 UI，`DelayTestUrl` 必须在这里：UI 的测速要用它，不该为它再开一条读设置的通路
+  - `sealed record HandshakeReply(CoreState State, string Host, int Port, string Secret, int MixedPort, string? CoreVersion, string DelayTestUrl)` —— 一次握手把「连内核所需的全部参数」交给 UI，`DelayTestUrl` 必须在这里：UI 的测速要用它，不该为它再开一条读设置的通路。线格式键 `{"state","host","port","secret","mixed_port","core_version","delay_test_url"}`，每字段显式 `[JsonPropertyName]`（硬规则 ②：跨进程结构体不靠命名策略推断）
   - `sealed record ImportRequest(string? Url = null, string? Path = null)` —— `sub.import` 的请求体；二者取其一，`Path` 非空走本地 yaml 通路（spec §6）
   - `sealed record ImportReply(string? ConfigFile, string? Reason = null)` —— `sub.import` 的回包，`Reason == null` 即成功
   - `sealed record CoreStateChanged(CoreState State, string? Reason, IReadOnlyList<string> StderrTail)` / `sealed record UpdateProgress(long Received, long Total, int Pct)` / `enum UpdateResult { Updated, AlreadyLatest, DownloadFailed, ExtractFailed, InUseRolledBack }` —— 三个跨进程 payload 类型在本任务一次建齐，Task 8/11 只 import 不重复定义（Global Constraint：payload 全住 Contracts）
@@ -391,6 +391,27 @@ public class FrameCodecTests
         var tooLong = new string('x', FrameCodec.MaxFrameBytes + 1);
         Assert.Throws<FrameTooLongException>(() => FrameCodec.Decode(tooLong));
     }
+
+    [Fact]
+    public void Encode_UsesSpecWireKeys_WhenSerializingEnvelopeAndHandshake()
+    {
+        // 硬规则 ②：跨进程键名由显式 [JsonPropertyName] 锁定，不靠命名策略推断。
+        // spec §3 定的帧键是 {"id","kind","type","payload","seq","reply_to","error"}。
+        var envelope = FrameCodec.Encode(new Frame("reply", CmdTypes.Handshake, null, 1,
+            "c-1", "c-1", null)).TrimEnd('\n');
+        Assert.Contains("\"kind\":\"reply\"", envelope);
+        Assert.Contains("\"id\":\"c-1\"", envelope);
+        Assert.Contains("\"reply_to\":\"c-1\"", envelope);
+        Assert.DoesNotContain("\"ReplyTo\"", envelope);
+
+        var payload = JsonUtil.Element(new HandshakeReply(CoreState.Running, "127.0.0.1", 9090,
+            "sec", 7897, "v1.19.33", "http://www.gstatic.com/generate_204"));
+        var body = FrameCodec.Encode(new Frame("reply", CmdTypes.Handshake, payload, 2,
+            "c-2", "c-2", null));
+        Assert.Contains("\"mixed_port\":7897", body);
+        Assert.Contains("\"delay_test_url\":\"http://www.gstatic.com/generate_204\"", body);
+        Assert.DoesNotContain("\"DelayTestUrl\"", body);
+    }
 }
 ```
 
@@ -434,10 +455,20 @@ public static class EventTypes
 using System.Text.Json;
 using System.Text.Json.Serialization;
 namespace ClashAcry.Contracts;
-public sealed record Frame(string Kind, string Type, JsonElement? Payload, long Seq,
-                            string? Id, string? ReplyTo, string? Error);
-public sealed record HandshakeReply(CoreState State, string Host, int Port, string Secret,
-                                     int MixedPort, string? CoreVersion, string DelayTestUrl);
+public sealed record Frame([property: JsonPropertyName("kind")] string Kind,
+                           [property: JsonPropertyName("type")] string Type,
+                           [property: JsonPropertyName("payload")] JsonElement? Payload,
+                           [property: JsonPropertyName("seq")] long Seq,
+                           [property: JsonPropertyName("id")] string? Id,
+                           [property: JsonPropertyName("reply_to")] string? ReplyTo,
+                           [property: JsonPropertyName("error")] string? Error);
+public sealed record HandshakeReply([property: JsonPropertyName("state")] CoreState State,
+                                    [property: JsonPropertyName("host")] string Host,
+                                    [property: JsonPropertyName("port")] int Port,
+                                    [property: JsonPropertyName("secret")] string Secret,
+                                    [property: JsonPropertyName("mixed_port")] int MixedPort,
+                                    [property: JsonPropertyName("core_version")] string? CoreVersion,
+                                    [property: JsonPropertyName("delay_test_url")] string DelayTestUrl);
 /// sub.import 的请求体 / 回包：Reason 为空即成功；UI 直接把它当"行内结果"文案的数据源（spec §6 失败保留旧配置）。
 public sealed record ImportRequest([property: JsonPropertyName("url")] string? Url = null,
                                    [property: JsonPropertyName("path")] string? Path = null);
@@ -515,7 +546,7 @@ public static class JsonUtil
 - [x] **Step 4: 跑测试确认通过**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter FrameCodecTests -v minimal`
-Expected: PASS，3/3。
+Expected: PASS，7/7（样例 3 条线格式 + 补的 3 条硬规矩断言 + Task 3 修复轮为 `Frame`/`HandshakeReply` 显式线键补的 1 条）。
 
 - [x] **Step 5: 提交**
 
@@ -529,6 +560,7 @@ git commit -m "feat(contracts): 命名管道行分帧协议与命令/事件类�
 > 2. .NET 10 里 `System.IO.InvalidDataException` 已 `sealed`，`FrameTooLongException` 无法派生它——改基 `IOException`（正是 `InvalidDataException` 的基类），两类分帧错误仍同属 `IOException` 家族，Task 9 一个 `catch` 全兜住。
 > 3. 样例的 `System.Text.Json.Encodings.Default.JavaScriptEncoder` 在 .NET 10 不存在，用等价的 BCL 默认编码器 `System.Text.Encodings.Web.JavaScriptEncoder.Default`（同样转义换行，保证一帧一行）。
 > 4. 除样例的 3 条线格式测试外，另补 3 条断言"三条硬规矩"的测试：枚举走字符串、payload 键名 snake_case、`CoreStateChanged` 经 `JsonUtil` 往返——否则 `JsonUtil` 与 DTO 的线拼写无人消费。
+> 5. （修复轮裁定）`Frame` 与 `HandshakeReply` 的每个字段都加显式 `[JsonPropertyName]`：spec §3 把帧键定成 `{"id","kind","type","payload","seq","reply_to","error"}`，而 `FrameCodec` 从不设命名策略——不写属性就会序列化成 PascalCase，正是硬规则 ②「不靠命名策略推断」禁止的。现在没有任何一方手写 handshake JSON（Task 9/10/15 全走类型化构造），所以改名是免费的；等 Task 9 把线格式用起来再改就是跨进程事故。
 
 ---
 

@@ -102,6 +102,37 @@ public class SubscriptionImportTests : IDisposable
         Assert.Empty(Directory.GetFiles(p.ImportsDir));
     }
 
+    [Fact]
+    public void Import_NodeLinesWithColonInRemark_StillRejected_WritesNothing()
+    {
+        // 顶层键嗅探的回归锁（Task 5 评审提出）：真实节点行的备注常写成 `#name: hk`，含冒号+空格。
+        // 正则若退回宽松的 `[A-Za-z_-]+.*:\s`，这串会被当 Clash yaml 的顶层键，整份列表被存档并写进产物
+        // ——spec §6 的「节点行导入不做」红线重新洞开且无声。
+        var body = "ss://AAA@1.2.3.4:8389#name: hk1\nvmess://BBB#name: jp2\n";
+        var (p, s) = Fixture("mode: old\n");
+
+        var r = new SubscriptionImport(p, s).ImportFromText(body);
+
+        Assert.Contains("不支持节点行导入", r.ReasonIfFailed);
+        Assert.Equal("mode: old\n", File.ReadAllText(p.ConfigFile));
+        Assert.Empty(Directory.GetFiles(p.ImportsDir));
+    }
+
+    [Fact]
+    public void Import_Base64OfNodeLinesWithColon_StillRejected_WritesNothing()
+    {
+        // 同上，但走 base64 剥壳通路：解码后的判定必须与明文走同一条拒绝分支。
+        var b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(
+            "ss://AAA@1.2.3.4:8389#name: hk1\ntrojan://pw@1.2.3.4:443#name: us2\n"));
+        var (p, s) = Fixture("mode: old\n");
+
+        var r = new SubscriptionImport(p, s).ImportFromText(b64);
+
+        Assert.Contains("不支持节点行导入", r.ReasonIfFailed);
+        Assert.Equal("mode: old\n", File.ReadAllText(p.ConfigFile));
+        Assert.Empty(Directory.GetFiles(p.ImportsDir));
+    }
+
     private string UrlSafeNoPad(string s) =>
         Convert.ToBase64String(Encoding.UTF8.GetBytes(s)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 

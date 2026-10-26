@@ -86,7 +86,9 @@ public class ConfigInjectorTests
     private static string Dump(YamlNode n)
     {
         var s = new StringWriter();
-        new YamlStream(new YamlDocument(n)).Save(s);
+        // assignAnchors:false 是必需的：默认 true 会给**内容重复**的节点发随机锚点（`&1065887375`），
+        // 夹具一旦有重复标量，结构比对就会因随机 ID 偶发红灯。Task 8/10 之后任何写 yaml 的地方同理。
+        new YamlStream(new YamlDocument(n)).Save(s, assignAnchors: false);
         return s.ToString();
     }
     private static string[] Match(string text, string key) =>

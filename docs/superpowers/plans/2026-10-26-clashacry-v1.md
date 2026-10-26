@@ -847,7 +847,9 @@ git commit -m "feat(core): 设置模型与原子写存储（损坏留 .corrupt�
 
 ---
 
-### Task 5: ConfigInjector —— 最小键覆盖，其余字节级不动
+### Task 5: ConfigInjector —— 最小键覆盖，其余结构原样透传
+
+> **措辞纠正（控制器预检裁定）**：本任务不承诺「字节级不动」。YamlDotNet 的 RepresentationModel 不承载注释/锚点，DOM 往返必然丢 `# 注释`，且 flow/block 风格由 emitter 决定。承诺的是：**未被覆盖的键与其整棵子树结构不变**（用重新解析比对来证，不用字符串子串碰运气），用户订阅原件**永不改写**（只读，产物另写 `runtime\config.yaml`）。丢注释这一条若实测确认，写进 spec §12 已知限制，且 UI 导入文案不得出现「保留原注释」。
 
 **Files:**
 - Create: `src/ClashAcry.Core/ConfigInjector.cs` `SubscriptionImport.cs`
@@ -858,7 +860,7 @@ git commit -m "feat(core): 设置模型与原子写存储（损坏留 .corrupt�
 - Produces:
   - `static class ConfigInjector { const string RequiredKeys = ...; string Inject(string yaml, Settings s); }`
   - `sealed class SubscriptionImport { ImportResult ImportFromUrl(string url, HttpClient http, CancellationToken ct); ImportResult ImportFromFile(string path); ImportResult ImportFromText(string raw); }`（前两个只负责取字节，嗅探/存档/注入统一落在 `ImportFromText`）
-  - `sealed record ImportResult(string OriginalFile, string ConfigFile, string ReasonIfFailed)`；失败时 `ConfigFile` 指向旧配置且**不删除任何东西**。
+  - `sealed record ImportResult(string OriginalFile, string ConfigFile, string ReasonIfFailed)`；`OriginalFile` 是 **`imports\` 里的原文副本**（不是用户手写的原件路径），`ReasonIfFailed == ""` 即成功；失败时 `ConfigFile` 指向旧配置且**不删除任何东西**。
 
 - [ ] **Step 1: 写失败的测试（断言"其余字段一字不改"）**
 
@@ -908,6 +910,48 @@ public class ConfigInjectorTests
         Assert.Throws<ConfigShapeException>(() => ConfigInjector.Inject("- just\n- a list\n", S));
     }
 
+    [Fact]
+    public void Inject_OnlyTouchesTopLevelKeys_NestedSameNameSurvives()
+    {
+        // DOM 而不是字符串替换的真正理由：`secret:` 也合法地出现在 proxy-providers 的子项里，
+        // 行替换会把它一起改掉，导致 provider 拉取订阅用的凭据被无声替换。
+        var input = "proxy-providers:\n  p1:\n    type: http\n    secret: nested-keep\n";
+
+        var output = ConfigInjector.Inject(input, S);
+
+        Assert.Contains("secret: nested-keep", output);
+        Assert.Single(Match(output, "secret:"));                       // 只有顶层那一个被覆盖
+        Assert.Equal("secret: abcd", Match(output, "secret:").Single());
+    }
+
+    [Fact]
+    public void Inject_LeavesUncoveredSubtrees_StructurallyIdentical()
+    {
+        // Task 1 实测的两条 fatal 约束在这里可执行化：`use:` 列表与 provider 的 type/path/interval
+        // 一旦被"顺手"展平、丢弃或补 url，用户订阅会起不来或误导用户。
+        var input = "proxy-groups:\n  - name: G\n    type: select\n    use: [P]\n"
+                  + "proxy-providers:\n  P:\n    type: file\n    path: p.yaml\n    interval: 86400\n"
+                  + "dns:\n  enable: true\n  nameserver:\n    - 223.5.5.5\n";
+
+        var output = ConfigInjector.Inject(input, S);
+
+        foreach (var key in new[] { "proxy-groups", "proxy-providers", "dns" })
+            Assert.Equal(Dump(Top(input, key)), Dump(Top(output, key)));
+        Assert.DoesNotContain("url:", Dump(Top(output, "proxy-providers")));   // 不得替 file 型 provider 补 url
+    }
+
+    private static YamlNode Top(string yaml, string key)
+    {
+        var st = new YamlStream(); st.Load(new StringReader(yaml));
+        return ((YamlMappingNode)st.Documents[0].RootNode).Children
+            .First(c => ((YamlScalarNode)c.Key).Value == key).Value;
+    }
+    private static string Dump(YamlNode n)
+    {
+        var s = new StringWriter();
+        new YamlStream(new YamlDocument(n)).Save(s);
+        return s.ToString();
+    }
     private static string[] Match(string text, string key) =>
         text.Split('\n').Select(l => l.TrimEnd('\r')).Where(l => l.StartsWith(key)).ToArray();
 }
@@ -982,7 +1026,9 @@ public sealed class ConfigShapeException : Exception
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter ConfigInjectorTests`
-Expected: PASS，4/4。**同时肉眼比对一次输出**：把 Task 1 的 `minimal.yaml` 喂进去，确认 `proxy-groups` 与 `proxies` 的嵌套结构仍是 block 风格；若变成 flow 风格，记录为已知限制写进 spec §12（内核仍能读，但人类难读）。
+Expected: PASS，6/6。**同时肉眼比对一次输出**：把 Task 1 的 `minimal.yaml` 喂进去，确认 `proxy-groups` 与 `proxies` 的嵌套结构仍是 block 风格；若变成 flow 风格，记录为已知限制写进 spec §12（内核仍能读，但人类难读）。同一趟比对确认**注释是否保留**（YamlDotNet 的 RepresentationModel 不承载注释，预期是丢）——丢了就一并写进 spec §12，并且 UI 导入结果文案（Task 14）不得出现「保留原注释」这类承诺。
+
+> **emitter 空白风格**：YamlDotNet 可能把 block 序列发成 `-   name: a` 而不是 `- name: a`。若断言因此变红，**不许把字符串断言改成更宽松的包含**，改用上面的 `Top()/Dump()` 做重新解析后的结构比对；只有「必需键的线格式」（`external-controller: 127.0.0.1:9097` 这类给 mihomo 读的行）继续用字符串断言。
 
 Task 1 实测带来的两条硬约束（改注入器时不许破）：
 - **`proxy-groups` 整棵子树原样透传**，尤其 `use:` 列表。v1.19.33 里把 provider 名当节点名写进 `proxies:` 是**启动 fatal**（`proxy group[1]: PROBE-SELECT: 'PROBE-PROV' not found`），聚合订阅的唯一正确写法是 `use:`。注入器若"顺手"把 `use:` 展平、丢弃或改名，用户订阅会直接起不来。
@@ -993,6 +1039,7 @@ Task 1 实测带来的两条硬约束（改注入器时不许破）：
 `SubscriptionImport` 的行为契约（测试必须逐条覆盖）：
 1. 下载或读入的原文**先原样落盘** `imports\<kind>-<sha8>.yaml`，之后才注入产物 `runtime\config.yaml`；
 2. 内容嗅探：以 `proxies:`/`proxy-groups:`/`mixed-port` 等顶层键开头视为 Clash yaml；`ss://`/`vmess://`/`trojan://` 行列表 → `Reason = "v1 不支持节点行导入（spec §6）"` 且**不写任何文件**；
+   2'. **机场最常见的 base64 订阅链接**（整份是 base64，解开才是 `ss://…` 行列表）必须**先解再嗅探**：解出来是节点行 → 同样按「v1 不支持节点行导入」拒绝；解出来是 Clash yaml → 正常导入，且**存档存的是解码后的 Clash yaml**（`<kind>` 仍为 `sub`）。不这么做的话 base64 文本会被当非 yaml，用户只会看到一句含糊的「不是 Clash yaml」——而订阅链接就是机场的主要分发形态。**这不是扩 scope**：spec §6 承诺的是「导入订阅 URL（Clash yaml）」，分发时的 base64 外壳属编码层（同 gzip/BOM 一类），剥掉外壳拿到 Clash yaml 正好落在承诺之内；被明确排除的只有节点行列表本身。解 base64 要容忍缺 `=` 填充、把 `-`/`_` 当 `+`/`/`、忽略换行与空白、并先剥 UTF-8 BOM；解出来必须是可打印文本，否则回 `Reason = "订阅内容既不是 Clash yaml 也不是可解的 base64"`。
 3. 任何下载/解析失败：返回 `ImportResult(旧 ConfigFile, 旧 ConfigFile, Reason)`，绝不清空现有配置。
 
 ```csharp
@@ -1057,13 +1104,136 @@ public class SubscriptionImportTests : IDisposable
         Assert.Equal("mode: old\n", File.ReadAllText(p.ConfigFile));                 // 旧配置不动
         Assert.False(Directory.Exists(p.ImportsDir) && Directory.GetFiles(p.ImportsDir).Length > 0);  // 连存档都不写
     }
+
+    [Fact]
+    public void Import_Base64OfClashYaml_ExpandsArchivesAndInjects()
+    {
+        // 机场订阅链接的主流形态：整份 base64，解开才是 Clash yaml。
+        // 断言存档与产物都基于**解码后**的文本——存档存 base64 原文的话，用户下次打开存档是一堆乱码。
+        const string ClashYaml = "mode: rule\nproxy-providers:\n  P:\n    type: file\n    path: p.yaml\nproxies:\n  - { name: n1, type: ss, server: 1.2.3.4 }\n";
+        var b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(ClashYaml));
+        var (p, s) = Fixture("mode: old\n");
+
+        var r = new SubscriptionImport(p, s).ImportFromText(b64);
+
+        Assert.Equal("", r.ReasonIfFailed);
+        var archived = File.ReadAllText(Directory.GetFiles(p.ImportsDir, "*.yaml").Single());
+        Assert.Equal(ClashYaml, archived);                                            // 解码后的原文进存档
+        var cfg = File.ReadAllText(p.ConfigFile);
+        Assert.Contains("external-controller", cfg);
+        Assert.DoesNotContain(Convert.ToBase64String(Encoding.UTF8.GetBytes("mode: rule")), cfg);  // 产物里没有 base64 残片
+    }
+
+    [Fact]
+    public void Import_Base64OfNodeLines_RejectedAsNodeList_WritesNothing()
+    {
+        // 只有 base64 通路、没有解码，用户看到的会是一句含糊的「不是 Clash yaml」；
+        // 解开后必须落到与明文节点行同一条拒绝文案上。
+        var b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(
+            "ss://AAA@1.2.3.4:8389#hk1\nvmess://BBB#jp2\n"));
+        var (p, s) = Fixture("mode: old\n");
+
+        var r = new SubscriptionImport(p, s).ImportFromText(b64);
+
+        Assert.Contains("不支持节点行导入", r.ReasonIfFailed);
+        Assert.Equal("mode: old\n", File.ReadAllText(p.ConfigFile));
+        Assert.Empty(Directory.GetFiles(p.ImportsDir));
+    }
+
+    private string UrlSafeNoPad(string s) =>
+        Convert.ToBase64String(Encoding.UTF8.GetBytes(s)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    [Fact]
+    public void Import_UrlSafeBase64WithoutPadding_StillExpands()
+    {
+        // 站点实际发的是 url-safe 字母表（`-`/`_`）且砍掉 `=` 填充；
+        // Convert.FromBase64String 两种都不接受，不预处理就会把可用订阅误判成「既不是 yaml 也不是 base64」。
+        const string ClashYaml = "mode: rule\nproxies:\n  - { name: n1, type: ss, server: 1.2.3.4 }\n";
+        var (p, s) = Fixture("mode: old\n");
+
+        var r = new SubscriptionImport(p, s).ImportFromText(UrlSafeNoPad(ClashYaml));
+
+        Assert.Equal("", r.ReasonIfFailed);
+        Assert.Equal(ClashYaml, File.ReadAllText(Directory.GetFiles(p.ImportsDir, "*.yaml").Single()));
+    }
+
+    [Fact]
+    public void ImportFromFile_KeepsUserOriginalUntouched()
+    {
+        // 红线：永不回写用户手写的订阅/配置原件。这里用真文件走 ImportFromFile 通路，
+        // 断言原件内容与 mtime 都不变，存档只是副本、产物另写 runtime\config.yaml。
+        var userDir = Directory.CreateTempSubdirectory("ca-user-").FullName;
+        try
+        {
+            var src = Path.Combine(userDir, "sub-original.yaml");
+            var raw = "mode: rule\nmixed-port: 7890\nproxies:\n  - { name: n1, type: ss, server: 1.2.3.4 }\n";
+            File.WriteAllText(src, raw);
+            var before = File.GetLastWriteTimeUtc(src);
+            var (p, s) = Fixture("mode: old\n");
+
+            var r = new SubscriptionImport(p, s).ImportFromFile(src);
+
+            Assert.Equal("", r.ReasonIfFailed);
+            Assert.Equal(raw, File.ReadAllText(src));                                 // 原件一字未动
+            Assert.Equal(before, File.GetLastWriteTimeUtc(src));                       // 也没被打开写过
+            var archived = Directory.GetFiles(p.ImportsDir, "*.yaml").Single();
+            Assert.NotEqual(src, archived);
+            Assert.Equal(archived, r.OriginalFile);                                     // OriginalFile=存档副本，不是用户原件
+            Assert.Equal(raw, File.ReadAllText(archived));                              // 存档是原样副本
+            Assert.Contains("external-controller", File.ReadAllText(p.ConfigFile));    // 注入只进产物
+        }
+        finally { Directory.Delete(userDir, true); }
+    }
 }
 ```
 
 `ImportFromText(string)` 是 `ImportFromUrl`/`ImportFromFile` 共用的内部落点（下载/读文件只做取字节，嗅探与落盘在它里面），测试直接打它，不为了第三个用例再造一个 WireMock。
 
+嗅探与 base64 这两段的实现就照下面抄（`ImportFromText` 的第一步是 `raw = DecodeMaybeBase64(raw)`，之后所有判断与存档都用解码后的文本）：
+
+```csharp
+using System.Text;
+using System.Text.RegularExpressions;
+
+private static readonly Regex NodeLine = new(@"^\s*(ss|ssr|vmess|trojan|vless|hysteria2?)://",
+    RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+/// 节点行列表：没有 `:` 形式的顶层 yaml 键，却有多行 `scheme://`。
+private static bool IsNodeLineList(string text)
+{
+    var lines = text.Split('\n');
+    return !Regex.IsMatch(text, @"^\s*[A-Za-z_-]+.*:\s", RegexOptions.Multiline)
+        && lines.Count(l => NodeLine.IsMatch(l)) >= 2;
+}
+
+/// 整份是 base64（机场订阅的常见分发形态）就解开；解出来必须是可打印文本，否则原样返回交给后续判断。
+private static string DecodeMaybeBase64(string raw)
+{
+    var compact = new string(raw.Where(c => !char.IsWhiteSpace(c)).ToArray());
+    // 长度 %4==1 绝不是 base64；缺 `=` 填充（%4 为 2 或 3）是机场的常态，不能在这里挡掉，交给 Pad 补。
+    // yaml 一定含 `:`，不在字母表里，所以真 yaml 不会被误当 base64。
+    if (compact.Length == 0 || compact.Length % 4 == 1 || !compact.All(IsB64Char)) return raw;
+    try
+    {
+        var text = Encoding.UTF8.GetString(Convert.FromBase64String(Pad(compact)));
+        return text.All(c => char.IsWhiteSpace(c) || !char.IsControl(c)) ? text : raw;
+    }
+    catch (FormatException) { return raw; }
+}
+private static bool IsB64Char(char c) => c is >= 'A' and <= 'Z' or >= 'a' and <= 'z' or >= '0' and <= '9'
+    or '+' or '/' or '-' or '_' or '=';
+/// url-safe 字母表（`-`/`_`）与缺 `=` 填充都在这儿归一。
+private static string Pad(string compact)
+{
+    var s = compact.Replace('-', '+').Replace('_', '/');
+    return s.TrimEnd('=') + new string('=', (4 - s.TrimEnd('=').Length % 4) % 4);
+}
+```
+
+> 这条通路**不需要联网**，所以判定「机场实际发的是不是 base64」不靠记忆：后续任何一次真实订阅链接复测（Task 18 的人工冒烟会用到真链接）若与这里的假设不符——例如某些站点 gzip 后再 base64，或返回 `text/html` 的网页订阅——按实测回写 spec §12 与本任务，不许让用户去手工解码。
+
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter SubscriptionImportTests`
-Expected: PASS，3/3（三条行为契约各一条：失败不动旧配置 / 原文先存档再注入 / 节点行导入拒绝且零落盘）。
+Expected: PASS，7/7（七条行为契约：下载失败不动旧配置 / 原文先存档再注入 / 明文节点行拒绝且零落盘 / base64 里的 Clash yaml / base64 里的节点行仍拒绝 / url-safe 无填充也能解 / `ImportFromFile` 不动用户原件）。
 
 - [ ] **Step 6: 提交**
 

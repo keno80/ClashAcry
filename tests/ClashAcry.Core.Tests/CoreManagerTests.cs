@@ -47,7 +47,7 @@ public class CoreManagerTests : IDisposable
     private static int Port(TcpListener l) => ((IPEndPoint)l.LocalEndpoint).Port;
 
     private CoreManager Build(string script, int mixedPort, int controllerPort, bool portOccupied = false,
-                              TaskCompletionSource<bool>? aliveGate = null)
+                              TaskCompletionSource<bool>? aliveGate = null, Exception? aliveThrows = null)
     {
         var paths = AppPaths.ForTest(_dir); paths.EnsureCreated();
         // 本机实测（Task 8）：cmd.exe 不肯执行「扩展名是 .exe、内容是批处理」的文件（报"不是有效的
@@ -59,14 +59,15 @@ public class CoreManagerTests : IDisposable
         store.Save(store.Load() with { ControllerPort = controllerPort, MixedPort = mixedPort, CorePath = fakeCore });
         var client = new MihomoClient(new HttpClient { Timeout = TimeSpan.FromSeconds(2) },
             "127.0.0.1", controllerPort, store.Load().Secret);
-        return new CoreManager(paths, store, client, new FakeProbe(client, portOccupied, aliveGate), CmdLaunch);
+        return new CoreManager(paths, store, client, new FakeProbe(client, portOccupied, aliveGate, aliveThrows), CmdLaunch);
     }
 
     // 裁定 R-8a：夹具里 WireMock 常驻在 controller 端口上冒充内核的应答面，所以"端口被别的进程占了"
     // 这件事必须由注入点表达，不能靠裸 TcpAlive——否则成功路径会被预检自己拒掉（样例原来就是这样的，
     // 三条测试必红）。生产路径不传这个类，预检退回真实的 TcpAlive。
     private sealed class FakeProbe(MihomoClient client, bool portOccupied,
-                                   TaskCompletionSource<bool>? aliveGate = null) : CoreProbe(client)
+                                   TaskCompletionSource<bool>? aliveGate = null,
+                                   Exception? aliveThrows = null) : CoreProbe(client)
     {
         // 裁定 R-8h 的时序闸门：ControllerAlive 卡在这道闸上（**不带 ct**，时机由测试掌控），
         // 取消才能落在探活循环中间——进函数前就取消好的令牌会在 InLifecycle 的 WaitAsync 就抛，
@@ -74,6 +75,7 @@ public class CoreManagerTests : IDisposable
         public override async Task<bool> ControllerAlive(CancellationToken ct)
         {
             if (aliveGate is not null) await aliveGate.Task;
+            if (aliveThrows is not null) throw aliveThrows;
             return await base.ControllerAlive(ct);
         }
 
@@ -152,8 +154,7 @@ public class CoreManagerTests : IDisposable
     }
 
     [Fact]
-    public async Task StartCancelled_KillsCore_TransitionsStopped_AndThrowsWithoutRetrying()
-    {
+    public async Task StartCancelled_KillsCore_TransitionsStopped_AndThrowsWithoutRetrying()    {
         // 裁定 R-8h + spec §9 取消语义：调用方取消不是「启动失败」。三步顺序不可换——
         // 杀掉已 spawn 的进程（绝不留孤儿内核）→ Transition(Stopped) → 原样抛 OperationCanceledException，
         // 且不许拿着已取消的令牌再跑第二轮重试。
@@ -178,6 +179,24 @@ public class CoreManagerTests : IDisposable
         Assert.Equal(1, mgr.SpawnCount);                   // 重试循环不许再 spawn 第二个
         Assert.Equal(1, mgr.StartAttemptCount);
         Assert.Contains("启动被取消", mgr.StateChangedEvents.Last().Reason);
+    }
+
+    [Fact]
+    public async Task StartProbeThrowsTaskCanceled_WithUncancelledToken_StillFallsToStartFailure()
+    {
+        // R-8h 的另一半：`when (ct.IsCancellationRequested)` 这道闸门必须有回归锁。
+        // HttpClient 超时是以 TaskCanceledException（OperationCanceledException 的子类）冒出来的，
+        // 令牌没取消时它是**真的启动失败**——必须照旧重试后落 Crashed，不许被取消语义那条 catch 接走。
+        using var _ = new RegistrySnapshot();
+        using var mixed = new TcpListener(IPAddress.Loopback, 0); mixed.Start();
+        var mgr = Build(SleepScript(), Port(mixed), _wire.Port,
+            aliveThrows: new TaskCanceledException("simulated controller timeout"));
+
+        Assert.False(await mgr.StartAsync(default));          // 返回 false，不是抛
+        Assert.Equal(CoreState.Crashed, mgr.State);           // 不是 Stopped
+        Assert.Equal(2, mgr.StartAttemptCount);               // 吃的正是 spec §9 那一次自动重试
+        Assert.Equal(2, mgr.SpawnCount);
+        await mgr.DisposeAsync();
     }
 
     [Fact]

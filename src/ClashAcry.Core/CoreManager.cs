@@ -16,9 +16,16 @@ public sealed class CoreManager : IAsyncDisposable
     public int MixedPort { get; private set; }
     // 评审小钉①：这在锁外读 _proc，而 KillProcess 可能并发 _proc.Dispose()（Task 11 的管道线程就读它）
     // → ObjectDisposedException。这里只表达"我们不再知道有活内核"，不许把异常抛给调用方。
+    // 复评补强：必须先把 _proc 取到局部变量再用——`_proc is {...} ? _proc.Id` 读了两次字段，
+    // 中间那一下可能已经被 KillProcess 置 null（窄窗口 NRE，catch 只兜 ObjectDisposedException 兜不住）。
     public int? RunningProcessId
     {
-        get { try { return _proc is { HasExited: false } ? _proc.Id : null; } catch (ObjectDisposedException) { return null; } }
+        get
+        {
+            var p = _proc;
+            if (p is null) return null;
+            try { return p.HasExited ? null : p.Id; } catch (ObjectDisposedException) { return null; }
+        }
     }
     public event Action<CoreStateChanged>? StateChanged;
     // 评审小钉②：不许把活的 _events 交出去（Transition 还在往里 Add）。同 R-8d 的理由：读侧拷贝 + 加锁。

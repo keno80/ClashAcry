@@ -3004,6 +3004,30 @@ Task 9 落地实测回写（2026-10-26 / win-x64 / .NET 10 SDK 10.0.203，一次
 7. 顺带补的两处幂等/护栏（不改变公开签名，Task 10/12 才会踩到）：`PipeServer.DisposeAsync` 与 `PipeClient.DisposeAsync` 加 `Interlocked` 幂等标志
    （第二次调用原本会在已 Dispose 的 CTS/Semaphore 上抛），`PipeClient.WaitUpAsync` 已连接时直接返回真（否则反复探活会叠出第二条 ReadLoop 与旧字段）。
 
+Task 9 修复轮 1 实测回写（2026-10-26 / win-x64 / .NET 10 SDK 10.0.203，评审 I-1、I-2、I-3 + Minor 4/5/6/7/9/10/11/12）：
+
+8. **第 7 条里「已连接时直接返回真」被 I-3 取代其一半**：外层短路保留，但真正的判定挪进了连接闸门内复检
+   （`_connectGate` 与 `_writeGate` 分开）；`ReadLoop` 改为收 `NamedPipeClientStream` **局部参数**，不再读字段。
+   回归锁 `ConcurrentRequests_DoNotInterleaveFrames_AndBothGetTheirOwnReply`（聚焦计数 10→11、全套 70→71）。
+9. **I-3 的并发用例在修复前的红点是「僵尸连接」而不是「每次都撕帧」**：两条并发 `WaitUpAsync` 稳定量到
+   `server.ClientCount == 2`（Expected 1 / Actual 2，两次独立跑一致）。20 个请求的回复在这一轮没有稳定丢失——
+   `_pending` 由两条循环共享，谁读到都能按 id 配对，所以撕帧/丢回复是**概率性**后果；用例因此同时钉
+   连接数、20 行各自独立解析、以及 20 个回复的 `reply_to`/payload 一一对应（丢失或重复都会红）。
+10. **I-1 的触发条件在本机造不出自然失败（实测）**：同名管道的实例额度不构成可用的注入点——连开 **600** 台
+    `PipeServer.CreateServerPipe()` 都不抛（`MaxAllowedServerInstances` 并没有在 254 处设卡，R-9f④ 那句「合法 1–254」
+    只是参数校验区间，不是运行时上限）；而管道对象的 DACL 由首台实例定死，中途翻不过来。所以「已就绪之后建实例失败」
+    这条路径无法从公开面自然触发：本轮用一个临时 internal 开关（`CreateServerPipe` 下一次调用抛 `IOException`）
+    跑了 TDD——修复前 `DisposeAsync` 干净返回、异常无人接收（红），修复后同一条异常从 `DisposeAsync` 抛出（绿），
+    验证完即删除，未留回归锁（brief 把计数钉在 11 条，且留锁需要在公开面上开注入点，得不偿失）。
+    现在 `AcceptLoop` 的死因走 `_acceptFault` → `DisposeAsync` 重抛，**Task 10 的退出钩子必须 `await DisposeAsync`** 才看得见它。
+11. **Minor 7 的掩码断言按评审原话逐字写会永久红（实测）**：`PipeAccessRights.ReadWrite | CreateNewInstance` 传进去，
+    `GetAccessControl()` 读回是 `CreateNewInstance | ReadWrite | Synchronize`（= `0x12019F`，`.NET` 把 AccessRule 打成 ACE 时
+    一律补 `SYNCHRONIZE` 0x100000，与 spec §4.1 记的 `0x12019B`/`0x12019F` 完全吻合）。断言已按**读回形态**精确写死，
+    一个表达式同时钉住放宽（`FullControl`/`WriteDac`/`WriteOwner`）与收窄（缺 `0x4` = R-9h① 的回归）两个方向。
+12. 计数与时长：聚焦 `--filter PipeRoundTripTests` → **11/11，1 s**（连跑三次一致，另把并发用例单跑十次 78–116 ms 无抖动）；
+    全套 → **71/71，runner 26 s，wall clock 29.9 s**；`dotnet build ClashAcry.sln -c Release` 0 警告 0 错误。
+    跑完 HKCU 系统代理两个值不变（`ProxyEnable 0x0` / `ProxyServer 127.0.0.1:8090`）。
+
 ---
 
 ### Task 10: Tray 宿主 —— Win32 托盘、装配、退出钩子

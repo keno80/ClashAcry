@@ -22,7 +22,11 @@ public sealed class PipeServer : IAsyncDisposable
     private readonly object _instanceGate = new();
     private readonly TaskCompletionSource _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private Task? _accept;
-    private NamedPipeServerStream? _waitingInstance;   // R-9e：正在等连接的那台实例，取消时必须关掉它才打得断等待
+    private Exception? _acceptFault;                  // 评审 I-1：就绪后 accept 循环的死因，由 DisposeAsync 重新抛出
+    // 正在等连接的那台实例。DisposeAsync 取消之后关掉它，理由是**把句柄关干净**——句柄还挂在命名空间里，
+    // 「服务端已消失」的断言（DisposeWhileIdle 之后 WaitUpAsync 为假）就不成立。
+    // 不是「不打断就等不死」：.NET 10 的 WaitForConnectionAsync 确实观察取消令牌（裁定 R-9h②，实测 0 ms/304 ms 返回）。
+    private NamedPipeServerStream? _waitingInstance;
     private int _disposed;                              // DisposeAsync 幂等：Task 10 的退出钩子可能连调两次
     private long _seq;
 
@@ -33,6 +37,9 @@ public sealed class PipeServer : IAsyncDisposable
     /// <summary>
     /// 裁定 R-9a：返回的是「第一台实例已挂上命名空间」，不是 accept 循环本身。
     /// 循环存进 _accept，只在 DisposeAsync 里 await；原样例把循环 Task 直接返回，await 它就等于等到超时。
+    /// 契约（评审 Minor 10 / 控制器裁定）：**本方法由宿主在启动时调用一次，退出后不得再调**——
+    /// 下面 `_accept ??=` 不是原子操作，并发或退出后重入会拿到已结束循环的 Task、或一个已完成的 _ready
+    /// 而返回「假的成功」。调用方是 Task 10 的单线程启动路径（TrayHost.RunAsync），所以不加额外锁（YAGNI）。
     /// </summary>
     public async Task StartAsync(CancellationToken ct)
     {
@@ -59,17 +66,24 @@ public sealed class PipeServer : IAsyncDisposable
             try { pipe = CreateServerPipe(); }
             catch (Exception ex)
             {
-                // 首台实例都建不起来时 StartAsync 必须带着真异常立刻返回，而不是挂到调用方的超时
-                // （spec §9「无反馈卡死」）。已就绪过的循环（第二次及以后失败）只能就此收尾：
-                // 本类的公开契约里没有错误回调，Task 10 的宿主日志在 DisposeAsync 那条路上看这个 Task 的异常。
-                _ready.TrySetException(ex);
+                // 评审 I-1：这条异常必须有去处，两种情况两处去处。
+                // ① 还没就绪过（首台实例就建不起来）→ 喂给 _ready，StartAsync 带着真异常立刻返回，
+                //    而不是挂到调用方的超时（spec §9「无反馈卡死」）。
+                // ② 已经就绪过 → _ready 已完成，TrySetException 是 no-op；原来这里直接 return，
+                //    循环「正常完成」、_accept 不 fault、DisposeAsync 什么也观察不到 —— Tray 从此不再
+                //    接受任何新的 UI 连接且零信号。现在把死因存进 _acceptFault，由 DisposeAsync 在
+                //    await _accept 之后重新抛出，宿主退出钩子/日志拿得到。
+                if (!_ready.Task.IsCompleted) { _ready.TrySetException(ex); return; }
+                _acceptFault = ex;
                 return;
             }
 
             lock (_instanceGate)
             {
-                // 关掉「已经 Dispose 过了」的竞态：取消已发生却还把新实例登记进去，就没人负责 Dispose 它，
-                // DisposeAsync 的 await _accept 会挂在 WaitForConnection 上（R-9e 的坑换个姿势复现）。
+                // 复检取消（裁定 R-9h②：可达、便宜、保留）。它的理由**不是**「不打断 WaitForConnection」——
+                // .NET 10 的 WaitForConnectionAsync 观察取消令牌。真实理由是竞态：DisposeAsync 可能在循环
+                // 登记新实例之前就读走了旧的 _waitingInstance，这台新实例于是无人关句柄，
+                // 「服务端已消失」的断言与 await _accept 的收尾都会失真。
                 if (linked.IsCancellationRequested) { pipe.Dispose(); return; }
                 _waitingInstance = pipe;
             }
@@ -80,7 +94,7 @@ public sealed class PipeServer : IAsyncDisposable
                 await pipe.WaitForConnectionAsync(linked.Token);
             }
             catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException
-                                       or IOException)   // Dispose 掉实例时这里以异常结束，正是我们要的退出方式
+                                       or IOException)   // 取消或 Dispose 掉实例时这里以异常结束，正是我们要的退出方式
             {
                 pipe.Dispose();
                 return;
@@ -128,8 +142,9 @@ public sealed class PipeServer : IAsyncDisposable
                 try
                 {
                     // 裁定 R-9c：这三型都不许逃出 Pump——它是 fire-and-forget，逃出去就是无声失败，
-                    // Task 10 的日志全靠这条连接自己说清楚为什么断。InvalidDataException 派生自
-                    // SystemException，不在 IOException 家族里（FrameCodec.cs:38 那句注释不实）。
+                    // Task 10 的日志全靠这条连接自己说清楚为什么断。三型必须并列是因为
+                    // InvalidDataException（空帧）派生自 SystemException，不在 IOException 家族里；
+                    // FrameTooLongException（过长）才是 IOException 的子类，JsonException 是坏 JSON。
                     frame = await FrameCodec.ReadLineAsync(client.Reader, ct)
                             ?? throw new InvalidDataException("eof");
                 }
@@ -154,17 +169,37 @@ public sealed class PipeServer : IAsyncDisposable
     {
         // 幂等：Task 10 的退出钩子与 await using 可能各调一次，第二次会在已 Dispose 的 CTS 上抛
         // ObjectDisposedException，把「干净退出」变成日志里的假故障。
-        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        // 评审 Minor 9：但「已经释放过」不等于「已经关完」——原写法第二次直接 return，而第一次还挂在
+        // await _accept 上，退出钩子会误判管道已经关干净。标志只用来跳过重复的取消/关闭，
+        // 两次调用都必须等 accept 循环真的结束。
+        var firstCall = Interlocked.Exchange(ref _disposed, 1) == 0;
+        if (firstCall)
+        {
+            _cts.Cancel();
+            NamedPipeServerStream? waiting;
+            lock (_instanceGate) { waiting = _waitingInstance; _waitingInstance = null; }
+            // 关掉正在等待的那台实例的**句柄**（裁定 R-9h② 订正后的理由）：_cts.Cancel() 本身就足以让
+            // WaitForConnectionAsync 结束（.NET 10 观察取消），不关句柄的话管道对象还挂在命名空间里，
+            // 「服务端已消失」的断言（DisposeWhileIdle 之后 WaitUpAsync 为假）就不成立。
+            waiting?.Dispose();
+            ConnectedClient[] clients;
+            lock (_clients) { clients = _clients.ToArray(); _clients.Clear(); }
+            foreach (var c in clients) c.Dispose();
+        }
 
-        _cts.Cancel();
-        NamedPipeServerStream? waiting;
-        lock (_instanceGate) { waiting = _waitingInstance; _waitingInstance = null; }
-        waiting?.Dispose();   // 裁定 R-9e：句柄一关，挂在 WaitForConnectionAsync 上的循环立刻返回
-        ConnectedClient[] clients;
-        lock (_clients) { clients = _clients.ToArray(); _clients.Clear(); }
-        foreach (var c in clients) c.Dispose();
-        if (_accept is not null) { try { await _accept; } catch { /* 关闭路径：循环的退出异常在此消化，就绪异常已由 StartAsync 观察过 */ } }
-        _cts.Dispose();
+        if (_accept is { } accept)
+        {
+            try { await accept; }
+            catch (OperationCanceledException) { /* 调用方的 ct 或 _cts 触发的收尾 = 正常退出 */ }
+            catch (Exception ex) { _acceptFault ??= ex; }   // 循环从建实例那道 catch 之外漏出来的异常也归到同一条去处
+        }
+        if (firstCall) _cts.Dispose();
+
+        // 评审 I-1：就绪之后 accept 循环的死因在这里有去处——await DisposeAsync 的一方（Task 10 的退出钩子）
+        // 会拿到这条异常，而不是「不再接受任何新的 UI 连接且零信号」（spec §9）。
+        // 本类的公开面（brief 的 Produces:）没有错误回调，所以这是唯一去处：
+        // 宿主**必须 await DisposeAsync**（而不是 fire-and-forget 它）才看得见这条死因——写进 Task 10 的账上。
+        if (_acceptFault is { } fault) throw fault;
     }
 }
 
@@ -181,7 +216,9 @@ internal sealed class ConnectedClient : IDisposable
         new BoundedChannelOptions(1024) { FullMode = BoundedChannelFullMode.DropWrite, SingleReader = true });
     private readonly CancellationTokenSource _cts = new();
     private readonly StreamWriter _w;
-    private readonly Task _drain;
+    private readonly Task _drain;   // 评审 Minor 12：赋完不再读也不 await，**只为 root 住这个任务**——
+                                    // DrainAsync 自己吞掉一切，字段留着表明「这条连接的写任务由对象生命周期管」，
+                                    // 也避免 Task.Run 的返回值被当成无人认领的 fire-and-forget。
     private int _disposed;
     public StreamReader Reader { get; }
 

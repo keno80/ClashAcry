@@ -35,7 +35,7 @@ public static class FrameCodec
     }
 }
 
-// .NET 10 里 InvalidDataException 已 sealed，无法派生；改基 IOException（正是 InvalidDataException 的基类），
+// .NET 10 里 InvalidDataException 已 sealed，无法派生，所以 FrameTooLongException 直接以 IOException 为基类；
 // 但只有「过长」这一类属于 IOException 家族：「空帧」抛的 InvalidDataException 派生自 SystemException，
 // 所以 Task 9 的 PipeServer.Pump 必须 IOException / InvalidDataException / JsonException 三型并列（裁定 R-9c）。
 public sealed class FrameTooLongException : IOException

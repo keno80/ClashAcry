@@ -13,6 +13,11 @@ public sealed class PipeClient : IAsyncDisposable
 {
     private NamedPipeClientStream? _pipe; private StreamWriter? _w; private CancellationTokenSource? _cts;
     private readonly SemaphoreSlim _writeGate = new(1, 1);   // 裁定 R-9d①：并发请求不许把两帧交错进同一条流
+    // 评审 I-3：连接路径专用闸门，与 _writeGate **分开**——共用一个的话「写一行」和「重连」会互相咬死
+    //（重连要等写、写要等重连）。原写法是先查后改：`IsConnected` 检查与 _pipe/_w/_cts 赋值之间没有同步，
+    // Task 12 的 TrayLink 两条路径（轮询 + 用户操作）同时探活时两次都能连上，后一条覆盖前一条的字段，
+    // 被覆盖的那条在服务端永久存活（ClientCount 虚高、广播重复投递、往没人读的流里写帧）。
+    private readonly SemaphoreSlim _connectGate = new(1, 1);
     private readonly Dictionary<string, TaskCompletionSource<Frame>> _pending = new();
     private readonly object _gate = new();
     private int _disposed;   // DisposeAsync 幂等：与 PipeServer 同理，第二次会在已 Dispose 的 CTS/Semaphore 上抛
@@ -20,24 +25,53 @@ public sealed class PipeClient : IAsyncDisposable
 
     public async Task<bool> WaitUpAsync(TimeSpan timeout)
     {
-        // 已在连着的连接上再等一次是白等：Task 12 的 TrayLink 会反复探活，
-        // 每次重连都会留下上一条 ReadLoop 与旧字段（旧 _cts 再也无人取消）。
+        // 评审 Minor 12：荒谬的 TimeSpan（如 TimeSpan.MaxValue）TotalMilliseconds 转 int 会溢出成负数，
+        // 既不是 -1 也过不了 ConnectAsync，最后被下面的 catch 吃成「静默失败」。先夹到
+        // [-1, int.MaxValue]：-1 是 ConnectAsync 约定的「无限等待」（Timeout.InfiniteTimeSpan 本值，
+        // 其余负数属非法入参，同样落到「无限」——Task 12 的探活给的是正值），上限约 24.9 天。
+        var budgetMs = (int)Math.Clamp(timeout.TotalMilliseconds, Timeout.Infinite, int.MaxValue);
+
+        // 外层短路只为省掉一次闸门排队（反复探活的常态是「已经连着」）；真正的判定在闸门内复检。
         if (_pipe?.IsConnected == true) return true;
 
-        // 先连上再落字段：原样例把 _pipe 赋在 ConnectAsync 之前，一次失败连接会留下半具尸体的字段，
-        // 下一次 WaitUpAsync 就在往废管道上写。
+        var gateTaken = false;
         try
         {
+            await _connectGate.WaitAsync();
+            gateTaken = true;
+            if (_pipe?.IsConnected == true) return true;   // 闸门内复检：并发探活的另一条在这里改口「已经连上了」
+
+            // 先连上再落字段：原样例把 _pipe 赋在 ConnectAsync 之前，一次失败连接会留下半具尸体的字段，
+            // 下一次 WaitUpAsync 就在往废管道上写。
             var pipe = new NamedPipeClientStream(".", ContractConstants.PipeName,
                 PipeDirection.InOut, PipeOptions.Asynchronous);
-            await pipe.ConnectAsync((int)timeout.TotalMilliseconds);
+            var connected = false;
+            try { await pipe.ConnectAsync(budgetMs); connected = true; }
+            finally { if (!connected) pipe.Dispose(); }   // 连不上 = Tray 没在跑，别把句柄留在进程里（spec §4.1）
+
+            var deadPipe = _pipe; var deadWriter = _w; var deadCts = _cts;
             _pipe = pipe;
-            _w = new StreamWriter(_pipe, new UTF8Encoding(false)) { AutoFlush = true };
-            _cts = new CancellationTokenSource();
-            _ = Task.Run(() => ReadLoop(_cts.Token));
+            _w = new StreamWriter(pipe, new UTF8Encoding(false)) { AutoFlush = true };
+            var loopCts = new CancellationTokenSource();
+            _cts = loopCts;
+            // 评审 I-3：管道与它的循环令牌都取**局部**交给 ReadLoop；原来 ReadLoop 读的是字段，
+            // 于是新管道的帧可能被上一条循环读走（同一字节流上两个 StreamReader 互抢 = 撕帧/丢回复）。
+            _ = Task.Run(() => ReadLoop(pipe, loopCts.Token));
+
+            // 走到这里旧字段必是一条**已断开**的连接（还活着的话闸门内复检就返回真了）：不关掉就每次重连
+            // 漏一对句柄 + 一条空转循环。旧 _cts 只 Cancel 不 Dispose——那条循环可能还握着这个令牌，
+            // 中途 Dispose 会让它抛一个 ReadLoop 的 catch 过滤器不认识的 ObjectDisposedException。
+            try { deadCts?.Cancel(); } catch { /* 已取消/已释放 */ }
+            try { deadWriter?.Dispose(); } catch { /* 已断的管道关的时候会抛 */ }
+            try { deadPipe?.Dispose(); } catch { /* 同上 */ }
             return true;
         }
-        catch { return false; }   // 超时/找不到管道 = Tray 没在跑，由调用方决定横幅还是重试（spec §4.1）
+        // 探活不抛，成败只由返回值说（与原实现一致）：连不上是「Tray 没在跑」这种常态，
+        // 由调用方决定横幅还是重试（spec §4.1）；闸门已被 DisposeAsync 释放时的 ObjectDisposedException
+        // 也走这里，不会把一个 bool 契约变成异常。
+        catch { return false; }
+        // 只在真的取到过闸门时归还：拿不到就 Release 会把 SemaphoreSlim 的计数养成 2，闸门自此失效。
+        finally { if (gateTaken) _connectGate.Release(); }
     }
 
     public Task<bool> IsServerUp() => Task.FromResult(_pipe?.IsConnected == true);
@@ -61,9 +95,9 @@ public sealed class PipeClient : IAsyncDisposable
         finally { lock (_gate) _pending.Remove(id); }
     }
 
-    private async Task ReadLoop(CancellationToken ct)
+    private async Task ReadLoop(NamedPipeClientStream pipe, CancellationToken ct)
     {
-        var reader = new StreamReader(_pipe!, new UTF8Encoding(false));
+        var reader = new StreamReader(pipe, new UTF8Encoding(false));   // 参数是局部：本循环只读它自己那条管道
         try
         {
             while (!ct.IsCancellationRequested)
@@ -101,6 +135,7 @@ public sealed class PipeClient : IAsyncDisposable
         _pipe?.Dispose();
         _cts?.Dispose();
         _writeGate.Dispose();
+        _connectGate.Dispose();
         return ValueTask.CompletedTask;
     }
 }

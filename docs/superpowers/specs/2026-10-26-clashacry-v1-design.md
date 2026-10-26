@@ -26,7 +26,7 @@
 
 已否决路线：Rust 后台（见 §1）；MSIX 打包（v1 不做，免安装 zip 够用）；WinForms 托盘（开销）；Web 技术栈界面（本项目目标即原生 Fluent，不在范围内）。
 
-NativeAOT 明确**不承诺**：WinUI 3 XAML 编译绑定依赖 CoreCLR，本项目按 CoreCLR 自包含发布。Tray 进程（不含 XAML）是否可 `PublishTrimmed`，由 §11 前置探针给出实测结论后再定，不预设。
+NativeAOT 明确**不承诺**：WinUI 3 XAML 编译绑定依赖 CoreCLR，本项目按 CoreCLR 自包含发布。Tray 进程 trimming **空壳实测（2026-10-26，Task 2）**：`dotnet publish src/ClashAcry.Tray -c Release -r win-x64 --self-contained -p:PublishTrimmed=true` 删 obj/bin 全新还原后 0 警告 0 错误——**无任何 `IL2xxx`/`IL3xxx`**（全局 `TreatWarningsAsErrors=true`，有警告即构建失败，故"零警告"是构建强保证）；发布产物 20 MB（未 trim 86 MB），空壳常驻 WS 15.9 MB（未 trim 16.4 MB）。**是否最终启用留待 Task 17 复验**：届时 Core 已含 YamlDotNet/反射敏感代码，只要冒出一条 IL2xxx 就按既定策略放弃 trimming。
 
 ## 3. 进程架构与所有权
 
@@ -169,12 +169,21 @@ docs/superpowers/{specs,plans,checklists}/
 
 ## 10. 常驻开销目标（验收判据）
 
-| 形态 | 目标 | 测量 |
-|---|---|---|
-| 日常常驻：Tray + mihomo（UI 已关） | Tray ≤ **40 MB**，合计 ≤ **80 MB** | `scripts/measure-residency.ps1`：`Get-Process` 采 `WorkingSet64` 与 `PrivateMemorySize64` 各 5 次取中位数 |
-| UI 打开（Acrylic 档） | UI 进程 ≤ **220 MB**，Tray+内核+UI 合计 ≤ 260 MB | 同上，另记纯色档差值用于量化整窗 Acrylic 的成本 |
+| 形态 | 目标 | 测量 | 实测（空壳，2026-10-26 / Task 2） |
+|---|---|---|---|
+| 日常常驻：Tray + mihomo（UI 已关） | Tray ≤ **40 MB**，合计 ≤ **80 MB** | `scripts/measure-residency.ps1`：`Get-Process` 采 `WorkingSet64` 与 `PrivateMemorySize64` 各 5 次取中位数 | Tray 空壳（self-contained 未 trim）WS **16.4 MB** / Private **4.6 MB**（三轮各取中位数：17.0 / 16.4 / 16.4）；trim 版 15.9 MB。距 40 MB 线余量充足 |
+| UI 打开（Acrylic 档） | UI 进程 ≤ **220 MB**，Tray+内核+UI 合计 ≤ 260 MB | 同上，另记纯色档差值用于量化整窗 Acrylic 的成本 | 待 Task 12 起窗后实测（Task 2 仅验证 UI 空壳可编译：0 警告 0 错误） |
 
 数字是**待实测校准的初始线**：任务 0 探针先出空壳实测，若 WinUI 3 空壳常态即超线，回到本节改档默认值并记录，而不是悄悄放宽判据。
+
+**Task 2 基线复现命令**（本机 .NET SDK 10.0.203，win-x64，Release）：
+
+```
+dotnet publish src/ClashAcry.Tray -c Release -r win-x64 --self-contained
+Start-Process src\ClashAcry.Tray\bin\Release\net10.0-windows10.0.19041.0\win-x64\publish\ClashAcry.Tray.exe -PassThru
+powershell -File scripts/measure-residency.ps1 -ProcessName ClashAcry.Tray -Json   # → {"name":"ClashAcry.Tray","working_set_mb":16.4,"private_mb":4.6}
+Stop-Process -Name ClashAcry.Tray   # 测完必须杀进程，否则污染后续测量
+```
 
 ## 11. 测试与验收
 

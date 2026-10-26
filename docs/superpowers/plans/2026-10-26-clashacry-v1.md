@@ -193,7 +193,7 @@ git push origin feat/clashacry-v1
 - Consumes: 无
 - Produces: 可编译的四项目 + 测试项目；`scripts/measure-residency.ps1 -ProcessName ClashAcry.Tray` 输出 JSON `{name, working_set_mb, private_mb}`
 
-- [ ] **Step 1: 写 Directory.Build.props**
+- [x] **Step 1: 写 Directory.Build.props**
 
 ```xml
 <Project>
@@ -210,7 +210,7 @@ git push origin feat/clashacry-v1
 </Project>
 ```
 
-- [ ] **Step 2: 建四个项目 + 测试项目**
+- [x] **Step 2: 建四个项目 + 测试项目**
 
 ```bash
 dotnet new classlib   -n ClashAcry.Contracts -o src/ClashAcry.Contracts
@@ -238,8 +238,12 @@ dotnet add tests/ClashAcry.UI.Tests package System.Drawing.Common    # 只给 Ta
 > **本机模板实测（2026-10-26，用装好的 10.0.203 SDK 跑 `dotnet new list`）**：
 > ① `dotnet new app` **不存在**，SDK 也不带任何 WinUI 模板（只有 `winforms*` 与 `xunit` 等）——UI 工程按 Step 3 **手写 csproj**，这条路我已用 probe 工程验证过：`UseWinUI=true` + `WindowsPackageType=None` + `WindowsAppSDKSelfContained=true` 的空壳（只有一个空 `Main`）`dotnet build -c Release` **0 警告 0 错误**。
 > ② `dotnet new classlib` / `console` 生成的 csproj 里**自带 `<TargetFramework>net10.0</TargetFramework>`**，而 csproj 的 PropertyGroup 比 `Directory.Build.props` 后求值、会**覆盖**全局值。所以模板建完后必须把每个 csproj 里那一行删掉（让全局的 `net10.0-windows10.0.19041.0` 生效），只有 Contracts 保留显式 `net10.0`。留着不删的后果是 Core/Tray 变成 `net10.0`，`Microsoft.Win32.Registry` 与 WinRT 投影一路爆到 Task 7/9。
+>
+> **Task 2 落地时的两条补充实测（2026-10-26）**：
+> ③ `dotnet new sln` 在 10.0.203 默认生成 **`.slnx`**；本项目全链路（AGENTS/计划/脚本）按 `ClashAcry.sln` 写，须用 `dotnet new sln -n ClashAcry --format sln`。
+> ④ `Microsoft.Win32.Registry` 与 `System.IO.Pipes.AccessControl` **都不引**（YamlDotNet 18.1.0 正常引入）：`dotnet add package` 对这两个包直接崩（`Value cannot be null. (Parameter 'path1')`）；手写 PackageReference 则还原报 **NU1510**（`TreatWarningsAsErrors` 下即错误）——因为 net10.0-windows TFM 的共享框架**内置**这两个 API。已用临时探针文件编译核实 `Registry.CurrentUser` 与 `new PipeSecurity()` 无需包即可通过（0 警告 0 错误），Task 7/9 直接写代码即可。
 
-- [ ] **Step 3: UI 壳 csproj（unpackaged self-contained）**
+- [x] **Step 3: UI 壳 csproj（unpackaged self-contained）**
 
 ```xml
 <Project Sdk="Microsoft.NET.Sdk">
@@ -264,7 +268,7 @@ dotnet add tests/ClashAcry.UI.Tests package System.Drawing.Common    # 只给 Ta
 > **NU1605 包降级报错**——`Microsoft.WindowsAppSDK 2.5.1 → WindowsAppSDK.Base 2.0.4 → Microsoft.Windows.SDK.BuildTools (>= 10.0.26100.4654)`。
 > 改成 `10.0.26100.4654` 后还原通过（3.1 秒）。**不要**再把它改回 `.1`；要彻底免坑也可以整条删掉 BuildTools 引用，让 WindowsAppSDK 自己带。
 
-- [ ] **Step 4: Tray 壳 csproj（禁止 XAML/WinForms）**
+- [x] **Step 4: Tray 壳 csproj（禁止 XAML/WinForms）**
 
 ```xml
 <Project Sdk="Microsoft.NET.Sdk">
@@ -284,7 +288,7 @@ dotnet add tests/ClashAcry.UI.Tests package System.Drawing.Common    # 只给 Ta
 
 `Program.cs` 先只写 `Thread.Sleep(Timeout.Infinite)`，占位用（Task 10 替换）。
 
-- [ ] **Step 5: 写开销测量脚本**
+- [x] **Step 5: 写开销测量脚本**
 
 ```powershell
 param([string]$ProcessName = 'ClashAcry.Tray', [switch]$Json)
@@ -304,7 +308,7 @@ if ($Json) {
 }
 ```
 
-- [ ] **Step 6: 建立基线并回写 spec §10**
+- [x] **Step 6: 建立基线并回写 spec §10**
 
 ```bash
 dotnet build ClashAcry.sln -c Release
@@ -316,7 +320,7 @@ powershell -File scripts/measure-residency.ps1 -ProcessName ClashAcry.Tray -Json
 Expected: 空壳 Tray 的 WS 数值。**把数字写进 spec §10 表格新增的「实测（空壳）」列**。若空壳已 > 40 MB，停下来报告（不要放宽判据），并给出「换更小的发布配置 / 调整判据」两个选项让用户拍板。
 另外验证 trimming：`dotnet publish src/ClashAcry.Tray -c Release -r win-x64 --self-contained -p:PublishTrimmed=true` —— 出现任何 `IL2xxx` 警告则记录并放弃 trimming，结论写进 spec §2 的 NativeAOT/trimming 段。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add . && git commit -m "chore: 四项目解决方案脚手架与常驻开销测量脚本" && git push origin feat/clashacry-v1

@@ -3,11 +3,21 @@ using System.Text.Json.Serialization;
 
 namespace ClashAcry.Contracts;
 
-public sealed record Frame(string Kind, string Type, JsonElement? Payload, long Seq,
-                            string? Id, string? ReplyTo, string? Error);
+public sealed record Frame([property: JsonPropertyName("kind")] string Kind,
+                           [property: JsonPropertyName("type")] string Type,
+                           [property: JsonPropertyName("payload")] JsonElement? Payload,
+                           [property: JsonPropertyName("seq")] long Seq,
+                           [property: JsonPropertyName("id")] string? Id,
+                           [property: JsonPropertyName("reply_to")] string? ReplyTo,
+                           [property: JsonPropertyName("error")] string? Error);
 
-public sealed record HandshakeReply(CoreState State, string Host, int Port, string Secret,
-                                     int MixedPort, string? CoreVersion, string DelayTestUrl);
+public sealed record HandshakeReply([property: JsonPropertyName("state")] CoreState State,
+                                    [property: JsonPropertyName("host")] string Host,
+                                    [property: JsonPropertyName("port")] int Port,
+                                    [property: JsonPropertyName("secret")] string Secret,
+                                    [property: JsonPropertyName("mixed_port")] int MixedPort,
+                                    [property: JsonPropertyName("core_version")] string? CoreVersion,
+                                    [property: JsonPropertyName("delay_test_url")] string DelayTestUrl);
 
 /// <summary>
 /// sub.import 的请求体 / 回包：Reason 为空即成功；UI 直接把它当"行内结果"文案的数据源（spec §6 失败保留旧配置）。

@@ -83,4 +83,25 @@ public class FrameCodecTests
         Assert.Null(back.Reason);
         Assert.Equal(new[] { "x" }, back.StderrTail);
     }
+
+    [Fact]
+    public void Encode_UsesSpecWireKeys_WhenSerializingEnvelopeAndHandshake()
+    {
+        // 硬规则 ②：跨进程键名由显式 [JsonPropertyName] 锁定，不靠命名策略推断。
+        // spec §3 定的帧键是 {"id","kind","type","payload","seq","reply_to","error"}。
+        var envelope = FrameCodec.Encode(new Frame("reply", CmdTypes.Handshake, null, 1,
+            "c-1", "c-1", null)).TrimEnd('\n');
+        Assert.Contains("\"kind\":\"reply\"", envelope);
+        Assert.Contains("\"id\":\"c-1\"", envelope);
+        Assert.Contains("\"reply_to\":\"c-1\"", envelope);
+        Assert.DoesNotContain("\"ReplyTo\"", envelope);
+
+        var payload = JsonUtil.Element(new HandshakeReply(CoreState.Running, "127.0.0.1", 9090,
+            "sec", 7897, "v1.19.33", "http://www.gstatic.com/generate_204"));
+        var body = FrameCodec.Encode(new Frame("reply", CmdTypes.Handshake, payload, 2,
+            "c-2", "c-2", null));
+        Assert.Contains("\"mixed_port\":7897", body);
+        Assert.Contains("\"delay_test_url\":\"http://www.gstatic.com/generate_204\"", body);
+        Assert.DoesNotContain("\"DelayTestUrl\"", body);
+    }
 }

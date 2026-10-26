@@ -1617,7 +1617,7 @@ git commit -m "feat(core): mihomo REST 类型化客户端（状态码原样透�
 - **R-7c：`Disable()` 只置 `ProxyEnable=0`，不写 `ProxyServer=""`。** 样例的无条件抹串有两个后果：① 它分不清"这是我们写的"还是"公司代理/别的软件写的"，退出时或 UI 关掉开关时就把别人的服务器地址抹了——用户只能重新手填，且这正是本任务标题「只清自己的」要防的事；② `ProxyEnable=0` 时 WinINET/WinHTTP 根本不读 `ProxyServer`，留着旧串无任何行为影响。`ProxyOverride` 同理不碰。**这不是假想**：派发前 `reg query` 实测本机盘上就是 `ProxyEnable=0x0` + `ProxyServer=127.0.0.1:8090` + `ProxyOverride=localhost;127.*;…;<local>`（另一个本地代理软件留的），按样例实现第一次跑测试就会把用户这条串写空。补一条测试：外部先写 `ProxyServer = "corp.example:8080"` + `ProxyEnable = 1`，调 `Disable()` 后断言代理已关 **且那条串还在**。
 - **已知限制（不许在本任务修，写进报告并回写 spec §9）：** `CleanupIfStale(mixedPort, …)` 用**当前**设置里的端口比对，若用户在系统代理还指着我们旧端口时改了 `mixed_port`，那份悬挂值不会被清掉。v1 接受（换端口后重新开一次系统代理即覆盖），但必须作为明文限制记录，别让它变成 Task 18 验收时的"意外"。
 
-- [ ] **Step 1: 写失败的测试（真实 HKCU + 备份还原夹具）**
+- [x] **Step 1: 写失败的测试（真实 HKCU + 备份还原夹具）**
 
 ```csharp
 [Collection("RegistryGuard")]
@@ -1769,12 +1769,12 @@ internal sealed class RegistrySnapshot : IDisposable
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter SystemProxyTests`
 Expected: FAIL（类型不存在）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```csharp
 // NativeInterop.cs —— 裁定 R-7a：P/Invoke 声明集中在这里，Task 10 还要往同一个文件加 user32 的声明
@@ -1846,12 +1846,12 @@ public static class SystemProxy
 }
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter SystemProxyTests`
 Expected: PASS，**5/5**（样例 3 条 + R-7c 的「关掉但不抹别人的串」+ R-7b 的「夹具把不存在还原成不存在」），且跑完后用户真实代理设置与跑前一致（`RegistrySnapshot` 还原生效——第 5 条用例就是证这件事的）。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/ClashAcry.Core/SystemProxy.cs src/ClashAcry.Core/NativeInterop.cs \

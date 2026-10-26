@@ -88,7 +88,7 @@ public class FrameCodecTests
     public void Encode_UsesSpecWireKeys_WhenSerializingEnvelopeAndHandshake()
     {
         // 硬规则 ②：跨进程键名由显式 [JsonPropertyName] 锁定，不靠命名策略推断。
-        // spec §3 定的帧键是 {"id","kind","type","payload","seq","reply_to","error"}。
+        // spec §4.1 定的帧键是 {"id","kind","type","payload","seq","reply_to","error"}。
         var envelope = FrameCodec.Encode(new Frame("reply", CmdTypes.Handshake, null, 1,
             "c-1", "c-1", null)).TrimEnd('\n');
         Assert.Contains("\"kind\":\"reply\"", envelope);

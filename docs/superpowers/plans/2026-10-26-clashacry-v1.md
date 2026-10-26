@@ -337,7 +337,7 @@ git add . && git commit -m "chore: 四项目解决方案脚手架与常驻开销
 **Interfaces:**
 - Consumes: 无
 - Produces:
-  - `sealed record Frame(string Kind, string Type, JsonElement? Payload, long Seq, string? Id, string? ReplyTo, string? Error)` —— 线格式键固定为 spec §3 的 `{"id","kind","type","payload","seq","reply_to","error"}`（小写/snake_case，每字段显式 `[JsonPropertyName]`）
+  - `sealed record Frame(string Kind, string Type, JsonElement? Payload, long Seq, string? Id, string? ReplyTo, string? Error)` —— 线格式键固定为 spec §4.1 的 `{"id","kind","type","payload","seq","reply_to","error"}`（小写/snake_case，每字段显式 `[JsonPropertyName]`）
   - `static class FrameCodec { const int MaxFrameBytes = 1 << 20; string Encode(Frame f); Frame Decode(string line); Task<Frame?> ReadLineAsync(StreamReader r, CancellationToken ct); }`
   - `enum CoreState { Stopped, Starting, Running, Crashed, Updating }`
   - `static class CmdTypes { const string Handshake="handshake"; CoreStart="core.start"; CoreStop="core.stop"; CoreReload="core.reload"; ModeSet="mode.set"; SysProxySet="sysproxy.set"; CoreUpdate="core.update"; SubImport="sub.import"; SettingsUpdate="settings.update"; UiFocus="ui.focus"; }`
@@ -396,7 +396,7 @@ public class FrameCodecTests
     public void Encode_UsesSpecWireKeys_WhenSerializingEnvelopeAndHandshake()
     {
         // 硬规则 ②：跨进程键名由显式 [JsonPropertyName] 锁定，不靠命名策略推断。
-        // spec §3 定的帧键是 {"id","kind","type","payload","seq","reply_to","error"}。
+        // spec §4.1 定的帧键是 {"id","kind","type","payload","seq","reply_to","error"}。
         var envelope = FrameCodec.Encode(new Frame("reply", CmdTypes.Handshake, null, 1,
             "c-1", "c-1", null)).TrimEnd('\n');
         Assert.Contains("\"kind\":\"reply\"", envelope);
@@ -560,7 +560,7 @@ git commit -m "feat(contracts): 命名管道行分帧协议与命令/事件类�
 > 2. .NET 10 里 `System.IO.InvalidDataException` 已 `sealed`，`FrameTooLongException` 无法派生它——改基 `IOException`（正是 `InvalidDataException` 的基类），两类分帧错误仍同属 `IOException` 家族，Task 9 一个 `catch` 全兜住。
 > 3. 样例的 `System.Text.Json.Encodings.Default.JavaScriptEncoder` 在 .NET 10 不存在，用等价的 BCL 默认编码器 `System.Text.Encodings.Web.JavaScriptEncoder.Default`（同样转义换行，保证一帧一行）。
 > 4. 除样例的 3 条线格式测试外，另补 3 条断言"三条硬规矩"的测试：枚举走字符串、payload 键名 snake_case、`CoreStateChanged` 经 `JsonUtil` 往返——否则 `JsonUtil` 与 DTO 的线拼写无人消费。
-> 5. （修复轮裁定）`Frame` 与 `HandshakeReply` 的每个字段都加显式 `[JsonPropertyName]`：spec §3 把帧键定成 `{"id","kind","type","payload","seq","reply_to","error"}`，而 `FrameCodec` 从不设命名策略——不写属性就会序列化成 PascalCase，正是硬规则 ②「不靠命名策略推断」禁止的。现在没有任何一方手写 handshake JSON（Task 9/10/15 全走类型化构造），所以改名是免费的；等 Task 9 把线格式用起来再改就是跨进程事故。
+> 5. （修复轮裁定）`Frame` 与 `HandshakeReply` 的每个字段都加显式 `[JsonPropertyName]`：spec §4.1 把帧键定成 `{"id","kind","type","payload","seq","reply_to","error"}`，而 `FrameCodec` 从不设命名策略——不写属性就会序列化成 PascalCase，正是硬规则 ②「不靠命名策略推断」禁止的。现在没有任何一方手写 handshake JSON（Task 9/10/15 全走类型化构造），所以改名是免费的；等 Task 9 把线格式用起来再改就是跨进程事故。
 
 ---
 

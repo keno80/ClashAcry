@@ -57,11 +57,13 @@ mihomo.exe                原版 Go 内核，external-controller 127.0.0.1:9097
 
 ### 4.1 命名管道 `clashacry.tray.v1`
 
-管道 ACL 限当前用户 SID（`FileSecurity` 显式授权，拒绝 Everyone）。一帧一条 UTF-8 JSON 行：`{"id","kind":"command|event|reply","type","payload","seq"}`。
+管道 ACL 限当前用户 SID（`FileSecurity` 显式授权，拒绝 Everyone）。一帧一条 UTF-8 JSON 行：`{"id","kind":"command|event|reply","type","payload","seq","reply_to","error"}`。线键名一律小写/snake_case，且由 `ClashAcry.Contracts` 里每个跨进程结构体的显式 `[JsonPropertyName]` 钉死——**不靠序列化命名策略推断**（Task 3 落地：`Frame`、`HandshakeReply` 与三个事件 payload 全量标注，`FrameCodec` 不设命名策略）。
+
+握手回包 `handshake` 的形状（UI 起 REST 客户端所需的全部参数，一次给齐）：`{state,host,port,secret,mixed_port,core_version?,delay_test_url}`——`delay_test_url` 走握手而非另开一条读设置的通路，UI 测速与设置页的测速地址下拉都用它。**secret 只在 `handshake` 的回包里下发，UI 不持久化、不展示。**
 
 命令（UI → Tray）：`core.start`、`core.stop`、`core.reload`、`mode.set{mode}`、`sysproxy.set{enabled}`、`core.update`、`settings.update{patch}`、`ui.focus`、`handshake`（返回 `CoreState` + controller 地址 + secret，供 UI 起 REST 客户端）。
 
-事件（Tray → UI）：`core.state{state,reason?,stderrTail?}`、`core.update.progress{received,total,pct}`、`settings.changed{keys}`、`log{level,msg}`。
+事件（Tray → UI）：`core.state{state,reason?,stderr_tail?}`、`core.update.progress{received,total,pct}`、`core.update.result{result}`、`settings.changed{SettingsSnapshot 全量}`——**四个即全部**。日志文本不单独成事件（`log{level,msg}` 在预检评审中作为无广播方的死契约删除），内核输出随 `core.state` 的 `stderr_tail` 下发；`settings.changed` 恒为完整的 `SettingsSnapshot` 而非键增量，以免"同一个事件两种 payload"。（键名拼写以 `stderr_tail`/`SettingsSnapshot` 为准，Task 3 已实测落码。）
 
 UI 起来发现管道不存在（Tray 未运行或被杀）→ 顶部横幅"托盘宿主未运行" + 一键拉起 Tray 进程。
 

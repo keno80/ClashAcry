@@ -3425,7 +3425,7 @@ public class ProxiesViewModelTests
 }
 ```
 
-（本文件顶部只要 `using ClashAcry.Core;`——`System.Linq`、`System.Collections.Generic`、`System.Threading.Tasks` 由 `Directory.Build.props` 的 `ImplicitUsings` 带进来，xUnit 的 `using Xunit;` 由 `dotnet new xunit` 写进 `GlobalUsings.cs`；`ProxyDetail`/`ProvidersResponse`/`ProviderInfo`/`DelaySample` 与 `ProxiesViewModel`/`ProviderRowVm` 同在 `ClashAcry.Core`（Task 6 的 `MihomoModels.cs` 用的是 `namespace ClashAcry.Core`），本文件不需要 `using ClashAcry.Contracts;`。）
+（本文件顶部只要 `using ClashAcry.Core;`——`System.Linq`、`System.Collections.Generic`、`System.Threading.Tasks` 由 `Directory.Build.props` 的 `ImplicitUsings` 带进来，xUnit 的 `using Xunit;` 若模板的 `GlobalUsings.cs` 没带就自己补一行；`ProxyDetail`/`ProvidersResponse`/`ProviderInfo`/`DelaySample` 与 `ProxiesViewModel`/`ProviderRowVm` 同在 `ClashAcry.Core`（Task 6 的 `MihomoModels.cs` 用的是 `namespace ClashAcry.Core`），本文件不需要 `using ClashAcry.Contracts;`。）
 
 `Group`/`Node` 混在同一个 `Resp(...)` 数组里时，合并逻辑靠 `Type` 区分：`select`/`url-test`/`relay`/`fallback` 当组，其余当节点。`ProxyDetail.Delay`（实时值）优先于 `History` 最新样本，两者皆无才是 `超时`。
 

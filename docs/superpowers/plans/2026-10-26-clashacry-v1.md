@@ -1904,7 +1904,7 @@ git commit -m "feat(core): 系统代理 HKCU 开关与悬挂清理（只清指�
   ② `CoreProbe.TcpAlive` 的单次超时 **250 ms**（loopback 上活监听者 0 ms 应答，250 ms 已是三个数量级的余量）；这同时把 `ControllerPortOccupied` 预检的最坏成本从 1 s 压到 250 ms。
   ③ 理由文案里的「5 s」必须与真实窗口一致，失败文案照旧写「5 s 内未就绪」——改完它就名副其实了。
   净效果：失败路径从 ~50 s 降到 ~5 s/次尝试（约 10 轮 × (250 ms 间隔 + ≤250 ms 探活)），全套测试时间随之下降；`Starting` 期间 UI 仍要显示"正在探活"（AGENTS.md：长耗时操作必须有进行中反馈），但不再有 25 s 的失真窗口。
-  **回归锁**：`Start_DoesNotReachRunning_WhenControllerAliveButMixedPortDead` 加一句 `Assert.True(elapsed < 8 s)`（在测试里用 `Stopwatch` 夹住 `StartAsync`，8 s = 名义 5 s + 一次重试的余量取一半），这样"窗口又悄悄变成轮数制"会被测出来而不是被 1 分钟的等待默默容忍。
+  **回归锁（控制器裁定，落地时按修复轮 2 的实测订正）**：`Start_DoesNotReachRunning_WhenControllerAliveButMixedPortDead` 用 `Stopwatch` 夹住 `StartAsync`，断言 **`elapsed < 12 s`**（不是 8 s——R-8i 原文算错了：`StartAsync` 的失败路径是**两次**尝试 × 5 s 窗口串在同一次调用里，加探针与 kill 的固定开销约 10.3 s，8 s 会把正确实现判红；修复轮 2 实测复现了这一点并改到 12 s = 10 s + 一次重试余量的一半）。这句锁仍然锁得住"窗口悄悄改回轮数制"（~50 s）这类失真，比原来那句有效。
 - **实现者报的「`KillProcess` 的 `catch { }` 可能吞掉一次杀不掉的内核、我们却广播 Stopped」——不单独加代码，裁定为已由 ④ 的用例覆盖。** 新补的 `DisposeAsync_KillsCoreAndLeavesStopped` 真拿 PID 在 `Process.GetProcesses()` 里等它消失，等于把「说 Stopped 就得真没了」钉成了可执行断言；而 `Kill(entireProcessTree)` 对我们自己的子进程返回"拒绝访问"在 v1 里没有可达路径（同一用户、同一安全上下文）。若将来引入提权运行或外部看管进程，这条要重开。
 
 - [x] **Step 1: 写失败的测试**
@@ -2414,9 +2414,9 @@ public readonly record struct SwapOutcome(bool CoreRunningAfter, bool RolledBack
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter "CoreManagerTests|StderrRingTests|MihomoClientTests"`
 Expected: PASS。过滤 `CoreManagerTests|StderrRingTests|MihomoClientTests` 跑出**总数 19**（`CoreManagerTests` 9 + `StderrRingTests` 2 + `MihomoClientTests` 8——前两个文件是本任务新建，MihomoClient 那 8 条里有 7 条是 Task 6 的存量）。全套 `dotnet test tests/ClashAcry.Core.Tests` 应为 **57/57**（Task 7 后基线 45 + 新增 12：CoreManager 9 + StderrRing 2 + MihomoClient 1）。三条测试就是 spec 禁令的可执行化：`EveryTransition_EmitsEvent_AndNoStateIsSilent` —— 实现里出现任何绕过 `Transition` 的 `State =` 赋值它就红（禁令 3）；`ConcurrentStart_GuardHitsSecondRequest_AndSpawnHappensOnce` —— `SpawnCount` 必须为 1（禁令 1 的进程侧保证）；`Start_DoesNotReachRunning_WhenControllerAliveButMixedPortDead` 锁住 spec §9 的状态失真判据。
 
-**修复轮（R-8h + 四条小钉）后的计数**：`CoreManagerTests` 由 9 条变 **11** 条（新增 R-8h 的取消用例与 R-8c 的 `DisposeAsync_KillsCoreAndLeavesStopped`），过滤总数 **21**，全套 **59/59**。
+**修复轮（R-8h + 四条小钉 + R-8i）后的计数**：`CoreManagerTests` 由 9 条变 **12** 条（R-8h 取消用例、R-8c 的 `DisposeAsync_KillsCoreAndLeavesStopped`、R-8h 的"未取消的 `TaskCanceledException` 仍算启动失败"边界锁、`Start_DoesNotReachRunning_...` 内加的时间回归锁），过滤总数 **22**，全套 **60/60**。
 
-**耗时预期（修复轮 2 / 裁定 R-8i 之后）**：探活窗口按墙上时间计（`Stopwatch` + 5 s），`TcpAlive` 单次预算 250 ms。失败路径 `Start_DoesNotReachRunning_...` 与 `Start_FailsWhenVersionNeverResponds_...` 各约 10 s（两次尝试 × 5 s 窗口），本套件单跑约 25~30 s。R-8i 之前的旧写法会把这两条拖到 50 s（名义 5 s 实际 25 s/尝试），原因是"每轮 250 ms"只是间隔不是预算、每次 TCP 探活对无监听 loopback 端口要 2.03 s 才拒绝——实测与推论见 spec §9「探活成本实测」。不许为了跑得快把 5 s 窗口缩成 1 s：那是 spec §9 的判据；但也不许留着 25 s 的失真窗口，它把"内核起不来"渲染成 25 秒假死，违反 AGENTS.md 的进行中反馈要求。`Starting` 期间 UI/Tray 必须持续显示"正在探活"。
+**耗时预期（修复轮 2 / 裁定 R-8i 之后，已实测）**：探活窗口按墙上时间计（`Stopwatch` + 5 s），`TcpAlive` 单次预算 250 ms。一次失败的 `StartAsync` = 自动重试的**两个** 5 s 窗口串在同一调用里，加 spawn/kill 的固定开销约 **10.3 s**，所以 `Start_DoesNotReachRunning_...` 与 `Start_FailsWhenVersionNeverResponds_...` 各约 10 s，本套件单跑约 25 s（修复前是 1 m 5 s）。R-8i 之前的旧写法把这两条拖到 50 s（名义 5 s 实际 25 s/尝试），原因是"每轮 250 ms"只是间隔不是预算、每次 TCP 探活对无监听 loopback 端口要 2.03 s 才拒绝——实测与推论见 spec §9「探活成本实测」。不许为了跑得快把 5 s 窗口缩成 1 s：那是 spec §9 的判据；也不许留着 25 s 的失真窗口，它把"内核起不来"渲染成 25 秒假死，违反 AGENTS.md 的进行中反馈要求。`Starting` 期间 UI/Tray 必须持续显示"正在探活"。时间回归锁的阈值取 **12 s**（不是 8 s——8 s 会把正确实现判红，见 R-8i 回归锁那条的订正）。
 
 - [x] **Step 5: 提交**
 
@@ -2951,7 +2951,7 @@ public sealed class PipeClient : IAsyncDisposable
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter PipeRoundTripTests`
-Expected: PASS，**10/10**（原有 3 条 + R-9a/9b/9c/9d×2/9e/9f 各一条）。全套 `dotnet test tests/ClashAcry.Core.Tests` 应为 **69/69**（Task 8 修复轮后基线 59 + 本任务 10）。报告里给出全套 wall clock。
+Expected: PASS，**10/10**（原有 3 条 + R-9a/9b/9c/9d×2/9e/9f 各一条）。全套 `dotnet test tests/ClashAcry.Core.Tests` 应为 **70/70**（Task 8 收尾后基线 60 + 本任务 10）。报告里给出全套 wall clock（Task 8 的 R-8i 已把全套时长压到 ~25 s，若又涨回 1 m 说明窗口被改回轮数制）。
 
 补上 R-9g 的那一行（新建文件，只放这一个属性）：
 

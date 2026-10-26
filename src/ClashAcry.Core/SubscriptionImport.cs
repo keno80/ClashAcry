@@ -53,7 +53,7 @@ public sealed class SubscriptionImport
     private ImportResult Import(string raw, string kind)
     {
         // BOM 先剥：U+FEFF 不算 whitespace，留着它 base64 判定与 yaml 嗅探都会走眼。
-        raw = DecodeMaybeBase64(raw.TrimStart('﻿'));
+        raw = DecodeMaybeBase64(raw.TrimStart('\uFEFF'));
         if (IsNodeLineList(raw)) return Failed(NodeListRejectReason);
         if (!LooksLikeClashYaml(raw)) return Failed(UnrecognizedReason);
 

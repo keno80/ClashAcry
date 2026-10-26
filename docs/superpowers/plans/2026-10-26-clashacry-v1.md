@@ -1879,7 +1879,20 @@ git commit -m "feat(core): 系统代理 HKCU 开关与悬挂清理（只清指�
   - `sealed class StderrRing(int capacity) { void Add(string line); void Clear(); IReadOnlyList<string> Snapshot(); }`
 
   命名说明（Task 1 实测后的定名裁定）：`StderrRing` / `StderrTail` / 线格式键 `stderr_tail` 是**历史名，实为"内核输出环"**——真内核把日志写在 stdout。名字不改（改名要连带动 Task 3 契约、Task 8、Task 14 显示与 spec §4.1，收益只有好看），但**语义必须在文档与注释里写清"两流进同一个环"**，否则下一个人会以为只看 stderr。
-  - `sealed class CoreProbe(MihomoClient client) { Task<bool> ControllerAlive(CancellationToken ct); static Task<bool> TcpAlive(string host, int port, CancellationToken ct); }`
+  - `sealed class CoreProbe(MihomoClient client) { Task<bool> ControllerAlive(CancellationToken ct); Task<bool> ControllerPortOccupied(string host, int port, CancellationToken ct); static Task<bool> TcpAlive(string host, int port, CancellationToken ct); }`（**非 sealed，两个实例方法 `virtual`** —— 见裁定 R-8a）
+
+派发前控制器裁定（本任务的样例**自相矛盾**：7 条测试里 3 条在样例实现下必红，不先裁掉就是让实现者在任务循环里撞墙）：
+
+- **R-8a（阻断级）：spec §9 第 1 行的「controller 端口占用 → 启动失败」这个预检，样例用 `CoreProbe.TcpAlive(...)` 静态方法做，而测试夹具把 WireMock **常驻**在同一个 controller 端口上冒充内核的 controller——于是成功路径 `Start_TransitionsToRunning_...` 会被预检当场拒掉（断言 `True` 拿到 `False`），`Start_FailsWhenVersionNeverResponds_...` 拿到的原因是"已被占用"而不是它断言的"探活失败"，`Start_ExitsImmediately_...` 同理根本不会 spawn。三条红不是实现者的错，是计划错。**
+  裁定：**预检走注入的 `CoreProbe` 实例方法** `ControllerPortOccupied(host, port, ct)`（默认实现就是 `TcpAlive`），`CoreProbe` 去掉 `sealed`、两个实例方法改 `virtual`。测试用一个 `FakeProbe : CoreProbe` 把"别人占着端口"与"我们的内核会来占"分开表达：成功路径覆盖成 `false`，另设一条用例覆盖成 `true` 断言拒绝启动且 `SpawnCount == 0`。
+  为什么这样收而不是把预检删掉：预检防的是**上一个内核孤儿**（Tray 崩了、mihomo 还活着占 9097/7897），删掉后 `Start` 会 spawn 出第二个内核，而双探活读到的是**旧内核**的应答——UI 报 Running、`Stop` 只杀掉我们自己那个，用户流量还在走一份看不见的旧配置，正是 spec §9「状态失真」要避免的事。为什么不塞进 `launchFactory`：那是进程启动形态的注入点，把网络预检塞进去等于把两条无关的测试缝焊在一起。
+  副作用要如实写：端口占用被拒也吃**一次重试**（`StartAttemptCount` 到 2、`SpawnCount` 保持 0），占用方若已退出第二次就放行——这是可接受的，别为它加"不可重试"分支。
+- **R-8b：`Stop` 不许无条件关系统代理。** 样例在 `StopLockedAsync` 里裸调 `SystemProxy.Disable()`，而 Task 7 已定死红线「指向其他软件的代理绝不触碰」：`Disable()` 只把 `ProxyEnable` 置 0，若用户此刻正用公司代理/别的本地代理（本机实测 `ProxyServer=127.0.0.1:8090`），我们点一次"停止"就把人家的代理关了。spec §9 第 4 行的"停止内核顺带清"本来就带同一句限定，这里按限定实现：`StopLockedAsync` 调 `SystemProxy.CleanupIfStale(MixedPort, coreAlive: () => false)`（刚 kill 完，内核确实死了；命中"指向我们"才清）。`Stop_KillsCoreProcessAndDisablesSystemProxy` 现有断言不变（它自己 `Enable` 了指向我们的地址），**另加一条**：`Enable("127.0.0.1:1234", "")` 后 `StopAsync`，断言代理仍然开着、串仍然是 1234。
+- **R-8c：`DisposeAsync` 是公开入口，必须走 `_lifecycle` 锁。** 样例里它直接调 `StopLockedAsync()`——锁纪律说的是「只有公开入口取锁，内部 `*Locked` 不取」，`DisposeAsync` 恰是公开入口却漏了，于是 Tray 退出与在飞的 `StartAsync` 可以并发，最坏结果是留下一个我们不再持有的孤儿内核（正是 R-8a 要防的那类）。改成 `await InLifecycle(async () => { await StopLockedAsync(); return true; }, CancellationToken.None)`，`_lifecycle.Dispose()` 放在锁之后。
+- **R-8d：`StderrRing` 必然被并发写，样例没写它，别做成裸 `List`。** `OutputDataReceived` 与 `ErrorDataReceived` 由 .NET 在**两个不同的线程池回调**上派发，`Transition()` 又在轮询线程里读 `StderrTail()`；不加锁的话轻则丢行、重则 `InvalidOperationException: Collection was modified` 直接掀翻状态机。要求：`Add`/`Clear`/`Snapshot` 全部 `lock`，`Snapshot()` 返回**拷贝**；Step 1 补一条并发用例（两个线程各写 N 行，`Snapshot().Count` 等于容量且元素全来自写入集合）。
+- **R-8e：重试叙述不许被抹掉。** 样例在 `AttemptStart` 顶部 `_lastReason = null`，而 `StartLockedAsync` 是在两次尝试**之间**写入「首次启动失败（…），自动重试第 2 次」的——下一行就被自己清掉，`Transition(Starting, _lastReason)` 永远带 `null`，UI 上看不出发生过重试（spec §9 第 1 行要求"仅启动时自动重试一次"，重试本身是要显示的事实）。改成：清 `_lastReason` 只在 `attempt == 1` 时做（把 `_stderr.Clear()` 留在原位，它确实该每attempt重开），并在 `Start_ExitsImmediately_...` 里加一条断言：**第二个 `Starting` 事件**的 `Reason` 含"重试"。
+- **R-8f（从 Task 6 带过来的债）：本任务顺手在 `MihomoClientTests` 补一条「`GET /proxies/{name}/delay` 回 **404** 时 `GetDelayAsync` 必须抛 `ApiException`、不许折成 `-1`」**。spec §4.2 把这条写成既定实现要求（provider 成员调 delay 就是 404），但 Task 6 交付时它没有任何回归锁——现在把 `catch` 的条件手改成 `409 or 404`，全套测试仍然绿。这条是本任务唯一允许动 `MihomoClient.cs` 的理由，且只加测试、不改实现。
+- **R-8g：`CoreManagerTests` 必须挂 `[Collection("RegistryGuard")]`。** R-8b 把 `Stop` 改成真调 `SystemProxy.CleanupIfStale`，两条 `Stop_*` 用例还会真写 HKCU 的 `ProxyEnable/ProxyServer`。Task 7 的 `RegistrySnapshot` 只在「同类测试串行」的前提下成立——它读快照、改值、还原，两个类并发就是互相覆盖备份，最坏把用户代理留在开着的态。这个集合已经存在（`SystemProxyTests.cs:9`），复用即可，不要新造。
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -1893,8 +1906,42 @@ public class StderrRingTests
         foreach (var l in new[] { "a", "b", "c", "d", "e" }) ring.Add(l);
         Assert.Equal(new[] { "c", "d", "e" }, ring.Snapshot());
     }
+
+    [Fact]
+    public void Ring_SurvivesConcurrentWriters_AndSnapshotIsStableCopy()
+    {
+        // 裁定 R-8d：两条输出流由 .NET 在不同线程池回调上派发，轮询线程同时在读。
+        // 裸 List 的结局是丢行或 "Collection was modified" 直接把状态机掀翻。
+        var ring = new StderrRing(50);
+        Exception? boom = null;
+        using var stopReading = new CancellationTokenSource();
+
+        var w1 = new Thread(() => { try { for (var i = 0; i < 500; i++) ring.Add($"w1-{i}"); } catch (Exception e) { boom = e; } });
+        var w2 = new Thread(() => { try { for (var i = 0; i < 500; i++) ring.Add($"w2-{i}"); } catch (Exception e) { boom = e; } });
+        var reader = new Thread(() =>
+        {
+            try { while (!stopReading.IsCancellationRequested) _ = ring.Snapshot(); }
+            catch (Exception e) { boom = e; }
+        });
+
+        w1.Start(); w2.Start(); reader.Start();
+        w1.Join(); w2.Join();
+        stopReading.Cancel(); reader.Join();
+
+        Assert.Null(boom);
+        var snap = ring.Snapshot();
+        Assert.Equal(50, snap.Count);                                        // 容量守住了
+        Assert.All(snap, l => Assert.Matches(@"^w\d-\d+$", l));              // 1000 次并发写没吐出半行或外来内容
+        var copy = ring.Snapshot();
+        ring.Clear();
+        Assert.Equal(50, copy.Count);                                        // Snapshot 是拷贝，不是活视图
+    }
 }
 
+// 裁定 R-8g：Stop 会经 SystemProxy.CleanupIfStale 真写 HKCU，两条 Stop_* 用例还直接 Enable()。
+// 系统代理是进程外全局态，必须和 SystemProxyTests 同属独占集合——否则两个类并发会互相踩
+// 备份/还原（Task 7 的 RegistrySnapshot 只在集合内串行时才成立）。
+[Collection("RegistryGuard")]
 public class CoreManagerTests : IDisposable
 {
     private readonly string _dir = Directory.CreateTempSubdirectory("ca-core-").FullName;
@@ -1926,7 +1973,7 @@ public class CoreManagerTests : IDisposable
     }
     private static int Port(TcpListener l) => ((IPEndPoint)l.LocalEndpoint).Port;
 
-    private CoreManager Build(string script, int mixedPort, int controllerPort)
+    private CoreManager Build(string script, int mixedPort, int controllerPort, bool portOccupied = false)
     {
         var paths = AppPaths.ForTest(_dir); paths.EnsureCreated();
         File.WriteAllText(paths.CoreExecutable, script);
@@ -1934,7 +1981,16 @@ public class CoreManagerTests : IDisposable
         store.Save(store.Load() with { ControllerPort = controllerPort, MixedPort = mixedPort });
         var client = new MihomoClient(new HttpClient { Timeout = TimeSpan.FromSeconds(2) },
             "127.0.0.1", controllerPort, store.Load().Secret);
-        return new CoreManager(paths, store, client, new CoreProbe(client), CmdLaunch);
+        return new CoreManager(paths, store, client, new FakeProbe(client, portOccupied), CmdLaunch);
+    }
+
+    // 裁定 R-8a：夹具里 WireMock 常驻在 controller 端口上冒充内核的应答面，所以"端口被别的进程占了"
+    // 这件事必须由注入点表达，不能靠裸 TcpAlive——否则成功路径会被预检自己拒掉（样例原来就是这样的，
+    // 三条测试必红）。生产路径不传这个类，预检退回真实的 TcpAlive。
+    private sealed class FakeProbe(MihomoClient client, bool portOccupied) : CoreProbe(client)
+    {
+        public override Task<bool> ControllerPortOccupied(string host, int port, CancellationToken ct)
+            => Task.FromResult(portOccupied);
     }
 
     [Fact]
@@ -1983,6 +2039,43 @@ public class CoreManagerTests : IDisposable
         Assert.Equal(2, mgr.StartAttemptCount);           // 首发 + 一次重试，不多
         Assert.Equal(CoreState.Crashed, mgr.State);
         Assert.Contains("退出码 3", mgr.StateChangedEvents.Last().Reason);
+
+        // 裁定 R-8e：重试本身是要显示的事实（spec §9「仅启动时自动重试一次」）。
+        // 样例在 AttemptStart 顶部无条件清 _lastReason，会把这条叙述抹掉。
+        var starts = mgr.StateChangedEvents.Where(e => e.State == CoreState.Starting).ToList();
+        Assert.Equal(2, starts.Count);
+        Assert.Contains("重试", starts[1].Reason);
+    }
+
+    [Fact]
+    public async Task Start_ControllerPortAlreadyOwned_Refuses_AndNeverSpawns()
+    {
+        // 裁定 R-8a：上一个内核的孤儿还占着 9097 时，绝不能 spawn 第二个——
+        // 双探活会读到**旧内核**的应答，UI 报 Running、Stop 只杀我们自己那个，
+        // 用户流量继续走一份看不见的旧配置（spec §9 状态失真）。
+        var mgr = Build(SleepScript(), FreePort(), _wire.Port, portOccupied: true);
+
+        Assert.False(await mgr.StartAsync(default));
+
+        Assert.Equal(0, mgr.SpawnCount);                  // 一次都没起进程
+        Assert.Equal(CoreState.Crashed, mgr.State);
+        Assert.Contains("占用", mgr.StateChangedEvents.Last().Reason);
+    }
+
+    [Fact]
+    public async Task Stop_LeavesForeignSystemProxyAlone()
+    {
+        // 裁定 R-8b：「停止内核顺带清代理」只许清指向自己的那份。
+        using var _ = new RegistrySnapshot();
+        using var mixed = new TcpListener(IPAddress.Loopback, 0); mixed.Start();
+        var mgr = Build(SleepScript(), Port(mixed), _wire.Port);
+        await mgr.StartAsync(default);
+        SystemProxy.Enable("127.0.0.1:1234", "");         // 别的软件的代理（本机真有一个 8090）
+
+        await mgr.StopAsync(default);
+
+        Assert.True(SystemProxy.IsEnabled());                     // 绝不替用户关别人的代理
+        Assert.Equal("127.0.0.1:1234", SystemProxy.CurrentServer());
     }
 
     [Fact]
@@ -2041,6 +2134,26 @@ public class CoreManagerTests : IDisposable
 
 夹具约束（不是可选）：假内核走 `cmd.exe /c <脚本>`，因此 **`CoreManager` 必须接受可注入的 `launchFactory`**（`Func<string, ProcessStartInfo>`，默认实现用 mihomo 的 `-d <runtime>` 形态）；`CoreProbe` 同样必须是注入的构造参数，否则状态机无法在测试里驱动。`WireMock` 只 mock controller，`mixed` 端口由测试自己 `TcpListener` 占住或留空（`FreePort()`）来表达"内核活着但 mixed 不通"这一状态失真场景。
 
+裁定 **R-8f** 要求本任务顺手往 `MihomoClientTests` 里**追加**这一条（只加测试，不许动 `MihomoClient.cs`）：
+
+```csharp
+    [Fact]
+    public async Task Delay_404_ThrowsApiException_AndDoesNotFoldToMinusOne()
+    {
+        // spec §4.2 实测：provider 成员调 /proxies/{name}/delay 直接 404（成员不在顶层路由表）。
+        // 折成 -1 等于把「这条名字没有注册」渲染成「节点超时」，Task 15 会显示假的红色状态。
+        // 这条是 Task 6 交付时唯一没有回归锁的 spec 既定要求（把 catch 条件手改成 409 or 404，全套仍绿）。
+        _wire.Reset();
+        _wire.Given(Request.Create().WithPath("/proxies/prov-node/delay").UsingGet())
+             .RespondWith(Response.Create().WithStatusCode(404).WithBody("not found"));
+
+        var ex = await Assert.ThrowsAsync<ApiException>(
+            () => Client().GetDelayAsync("prov-node", "http://e/204", 5000, default));
+
+        Assert.Equal(404, ex.StatusCode);
+    }
+```
+
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter CoreManagerTests`
@@ -2053,10 +2166,15 @@ Expected: FAIL（类型不存在）
 using System.Net.Sockets;
 namespace ClashAcry.Core;
 
-public sealed class CoreProbe(MihomoClient client)
+// 裁定 R-8a：非 sealed + 实例方法 virtual，测试才能把"孤儿内核占着端口"与"我们的内核会来应答"分开表达。
+public class CoreProbe(MihomoClient client)
 {
-    public async Task<bool> ControllerAlive(CancellationToken ct)
+    public virtual async Task<bool> ControllerAlive(CancellationToken ct)
     { try { await client.GetVersionAsync(ct); return true; } catch { return false; } }
+
+    /// spawn 前的占用预检。默认就是真探测；测试覆盖它（见 R-8a）。
+    public virtual Task<bool> ControllerPortOccupied(string host, int port, CancellationToken ct)
+        => TcpAlive(host, port, ct);
 
     public static async Task<bool> TcpAlive(string host, int port, CancellationToken ct)
     {
@@ -2070,6 +2188,27 @@ public sealed class CoreProbe(MihomoClient client)
         }
         catch { return false; }
     }
+}
+```
+
+```csharp
+// StderrRing.cs —— 裁定 R-8d：两条输出流并发写、轮询线程并发读，裸 List 会丢行或直接抛。
+namespace ClashAcry.Core;
+
+/// 历史名叫 Stderr，实为「内核输出环」：真 mihomo 的 Go 日志走 stdout（Task 1 实测），两流都进这里。
+public sealed class StderrRing(int capacity)
+{
+    private readonly object _gate = new();
+    private readonly Queue<string> _q = new();
+
+    public void Add(string line)
+    {
+        lock (_gate) { _q.Enqueue(line); if (_q.Count > capacity) _q.Dequeue(); }
+    }
+
+    public void Clear() { lock (_gate) _q.Clear(); }
+
+    public IReadOnlyList<string> Snapshot() { lock (_gate) return _q.ToArray(); }   // 拷贝，不是活视图
 }
 ```
 
@@ -2152,12 +2291,18 @@ public sealed class CoreManager : IAsyncDisposable
         Transition(CoreState.Starting, StartAttemptCount > 1 ? _lastReason : null);
         var s = _store.Load();
         MixedPort = s.MixedPort;
-        _stderr.Clear(); _lastReason = null;
+        _stderr.Clear();
+        // 裁定 R-8e：`_lastReason` 只在首次尝试清。StartLockedAsync 在两次尝试之间写入的
+        // 「首次启动失败（…），自动重试第 2 次」必须活过第二次 AttemptStart 的顶部，
+        // 否则上面那行 Transition(Starting) 永远带 null，UI 看不出发生过重试。
+        if (StartAttemptCount == 1) _lastReason = null;
 
         var exe = s.CorePath ?? _paths.CoreExecutable;
         if (!File.Exists(exe)) { _lastReason = $"内核文件不存在：{exe}"; return false; }
-        // controller 端口已被占 → 不再 spawn（否则两个内核抢一个口，状态失真）
-        if (await CoreProbe.TcpAlive(s.ControllerHost, s.ControllerPort, ct))
+        // 裁定 R-8a：占用预检走注入的探针实例方法（默认实现是真 TCP 探测），不许在这里裸调
+        // CoreProbe.TcpAlive —— 那样夹具里常驻 controller 端口的 WireMock 会把成功路径自己拒掉。
+        // 防的是上一个内核孤儿（spec §9）：它占着 9097 时再 spawn 第二个，双探活读的是旧内核的应答。
+        if (await _probe.ControllerPortOccupied(s.ControllerHost, s.ControllerPort, ct))
         { _lastReason = $"controller 端口 {s.ControllerPort} 已被其他进程占用"; return false; }
 
         try
@@ -2193,7 +2338,9 @@ public sealed class CoreManager : IAsyncDisposable
     private async Task StopLockedAsync()
     {
         await KillProcess();
-        SystemProxy.Disable();     // spec §9：停止内核顺带清系统代理（无条件，幂等）
+        // 裁定 R-8b（同 Task 7 红线）：只清指向我们这份端口的悬挂代理，
+        // 裸调 SystemProxy.Disable() 会把用户此刻正在用的公司/别家代理一起关掉。
+        SystemProxy.CleanupIfStale(MixedPort, coreAlive: () => false);
         Transition(CoreState.Stopped);
     }
 
@@ -2215,7 +2362,13 @@ public sealed class CoreManager : IAsyncDisposable
         StateChanged?.Invoke(e);   // spec §3 禁令 3：所有迁移点唯一出口，且必须广播
     }
 
-    public async ValueTask DisposeAsync() { await StopLockedAsync(); _lifecycle.Dispose(); }
+    // 裁定 R-8c：DisposeAsync 也是公开入口，必须和 Start/Stop/Swap 抢同一把锁。
+    // 直接调 StopLockedAsync 会让 Tray 退出与在飞的 StartAsync 并发，最坏结果是一个我们不再持有的孤儿内核。
+    public async ValueTask DisposeAsync()
+    {
+        await InLifecycle(async () => { await StopLockedAsync(); return true; }, CancellationToken.None);
+        _lifecycle.Dispose();
+    }
 }
 
 public readonly record struct SwapOutcome(bool CoreRunningAfter, bool RolledBack)
@@ -2225,12 +2378,14 @@ public readonly record struct SwapOutcome(bool CoreRunningAfter, bool RolledBack
 }
 ```
 
-`StderrRing` 按 Task 8 Step 1 的测试实现为固定容量环形缓冲，必须提供 `Clear()`。锁纪律是本任务的核心：`StartAsync`/`StopAsync`/`SwapExecutableAsync` 是唯一取 `_lifecycle` 的三个入口，`CoreUpdater`（Task 11）只允许通过 `SwapExecutableAsync` 换文件，**不得自己碰内核进程**。
+`StderrRing` 按 Task 8 Step 1 的测试实现为固定容量环形缓冲，必须提供 `Clear()`，且三个方法全部加锁（R-8d）。锁纪律是本任务的核心：`StartAsync`/`StopAsync`/`SwapExecutableAsync`/`DisposeAsync` 是**只**取 `_lifecycle` 的四个公开入口，内部 `*Locked` 一律不取（信号量不可重入）；`CoreUpdater`（Task 11）只允许通过 `SwapExecutableAsync` 换文件，**不得自己碰内核进程**。
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `dotnet test tests/ClashAcry.Core.Tests --filter "CoreManagerTests|StderrRingTests"`
-Expected: PASS，8/8（`CoreManagerTests` 7 条 + `StderrRingTests` 1 条）。两条测试就是 spec 禁令的可执行化：`EveryTransition_EmitsEvent_AndNoStateIsSilent` —— 实现里出现任何绕过 `Transition` 的 `State =` 赋值它就红（禁令 3）；`ConcurrentStart_GuardHitsSecondRequest_AndSpawnHappensOnce` —— `SpawnCount` 必须为 1（禁令 1 的进程侧保证）。`Start_DoesNotReachRunning_WhenControllerAliveButMixedPortDead` 锁住 spec §9 的状态失真判据。
+Run: `dotnet test tests/ClashAcry.Core.Tests --filter "CoreManagerTests|StderrRingTests|MihomoClientTests"`
+Expected: PASS，**12/12**（`CoreManagerTests` 9 条 + `StderrRingTests` 2 条 + R-8f 那条新的 `MihomoClientTests` 用例，该套件从 7 条变 8 条）。全套 `dotnet test tests/ClashAcry.Core.Tests` 应为 **57/57**（Task 7 后基线 45 + 本任务 12）。三条测试就是 spec 禁令的可执行化：`EveryTransition_EmitsEvent_AndNoStateIsSilent` —— 实现里出现任何绕过 `Transition` 的 `State =` 赋值它就红（禁令 3）；`ConcurrentStart_GuardHitsSecondRequest_AndSpawnHappensOnce` —— `SpawnCount` 必须为 1（禁令 1 的进程侧保证）；`Start_DoesNotReachRunning_WhenControllerAliveButMixedPortDead` 锁住 spec §9 的状态失真判据。
+
+**耗时预期（不是卡死）**：`StartAsync` 的探活循环按 spec 写死 20×250 ms，失败路径要跑满两次尝试，所以 `Start_DoesNotReachRunning_...` 与 `Start_FailsWhenVersionNeverResponds_...` 各约 10 s，本套件单跑约 25~30 s。不许为了跑得快把 5 s 缩成 1 s——那是 spec §9 的判据，缩了等于把"内核慢启动被误判 Crashed"这个真实故障放回代码里。
 
 - [ ] **Step 5: 提交**
 

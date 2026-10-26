@@ -116,7 +116,11 @@ public sealed class CoreManager : IAsyncDisposable
             _proc.BeginOutputReadLine(); _proc.BeginErrorReadLine();
 
             var controllerOk = false; var mixedOk = false;
-            for (var i = 0; i < 20; i++)     // 20 x 250ms = 5s
+            // 裁定 R-8i① / spec §9「探活成本实测」：窗口按**墙上时间**算，不许改回固定轮数当预算。
+            // 旧写法 `for (i < 20)` 把 250 ms 当成了预算，可它只是间隔——每轮还要付一次 TCP 探活，
+            // 而实测 loopback 上没人听时 connect 要 ~2.03 s 才拿到拒绝，名义 5 s 实际 25 s/尝试（UI 假死）。
+            var probeWindow = Stopwatch.StartNew();
+            while (probeWindow.Elapsed < TimeSpan.FromSeconds(5))
             {
                 await Task.Delay(250, ct);
                 if (_proc.HasExited)

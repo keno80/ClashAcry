@@ -17,7 +17,10 @@ public class CoreProbe(MihomoClient client)
         {
             using var tcp = new TcpClient();
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeout.CancelAfter(1000);
+            // 裁定 R-8i②：单次探活预算 250 ms。实测 loopback 上活监听者 0 ms 应答（三个数量级余量），
+            // 而无人监听的端口要 ~2.03 s 才拿到拒绝——预算才是约束一轮成本的东西（本方法同时封顶
+            // ControllerPortOccupied 预检的最坏成本，从 1 s 压到 250 ms）。
+            timeout.CancelAfter(250);
             await tcp.ConnectAsync(host, port, timeout.Token);
             return true;
         }

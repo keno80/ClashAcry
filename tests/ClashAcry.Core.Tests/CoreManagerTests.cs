@@ -102,7 +102,18 @@ public class CoreManagerTests : IDisposable
         // spec §9 状态失真：mixed 端口没人听 → 绝不进 Running
         var mgr = Build(SleepScript(), FreePort(), _wire.Port);
 
-        Assert.False(await mgr.StartAsync(default));
+        // 裁定 R-8i③ 回归锁：窗口是墙上时间 5 s，不是轮数预算。旧写法（20 轮 × (250ms 间隔 + 1s 探活超时)）
+        // 实测 ~50 s；阈值取 12 s = StartAsync 的两次尝试 × 5 s 窗口 + 一次重试的余量取一半——
+        // R-8i 原文写的 8 s 漏算了「失败自动重试一次」会把两个 5 s 窗口串在同一次 StartAsync 里
+        // （裁定自己的净效果行也是「~5 s/次尝试」），正确实现下本用例实测 ~10.3 s，8 s 必红。
+        // 阈值仍锁得住「窗口悄悄改回轮数制」（~50 s）这类失真。
+        var sw = Stopwatch.StartNew();
+        var started = await mgr.StartAsync(default);
+        sw.Stop();
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(12),
+            $"探活窗口必须是墙上时间 5 s/次尝试（R-8i），实测失败路径 {sw.Elapsed.TotalSeconds:F1} s");
+
+        Assert.False(started);
         Assert.Equal(CoreState.Crashed, mgr.State);
         Assert.Contains("mixed", mgr.StateChangedEvents.Last().Reason);
     }

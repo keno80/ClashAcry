@@ -2471,7 +2471,7 @@ git commit -m "feat(core): 内核状态机（双探活判 Running、启动一次
   因为读回断言要碰 `internal`，本任务**授权**一处 csproj 改动：`src/ClashAcry.Core/ClashAcry.Core.csproj` 加 `<ItemGroup><InternalsVisibleTo Include="ClashAcry.Core.Tests" /></ItemGroup>`，`CreateServerPipe()` 声明为 `internal static`。补一条 `ServerPipe_AclGrantsCurrentUser_AndNothingElse`：断言规则数 `== 1`、`AccessControlType.Allow`、`IdentityReference` 等于当前用户 SID——这条就是「没有 Everyone」的唯一回归锁，跨用户拒绝连接本机测不了，也不许写假测试。探针是临时的，用完删掉，不要留在仓库里。
 - **R-9g：测试串行化写在哪要定死。** 命名管道名固定（`ContractConstants.PipeName`），同进程两个 `PipeServer` 会互相撞车。裁定：新建 `tests/ClashAcry.Core.Tests/AssemblySerial.cs` 放 `[assembly: CollectionBehavior(DisableTestParallelization = true)]`（只此一个文件、一行属性），**不要**塞进某个测试类文件里；已有的 `RegistryGuard` 集合定义保留（它表达的是「代理全局态独占」的意图，与本条不冲突）。全套因此是串行跑，Task 8 的约 30 s 也计入——报告里给出全套 wall clock，评审若拿「测试慢」开条，答案是 spec §9 的 5 s 探活判据 + 真管道往返，不是实现缺陷。
 
-- [ ] **Step 1: 写失败的测试（同进程起服务端，真命名管道往返）**
+- [x] **Step 1: 写失败的测试（同进程起服务端，真命名管道往返）**
 
 ```csharp
 using System.Diagnostics;
@@ -2678,12 +2678,12 @@ public class PipeRoundTripTests
 
 夹具约束（不是可选）：`PipeServer.CreateServerPipe()` 必须是 `internal static`（R-9f 的读回断言要直接拿到实例），并为此在 `ClashAcry.Core.csproj` 加 `InternalsVisibleTo`。命名管道名固定，所以**每个用例都要 `await using` 自己的服务端**——漏一个释放，`Client_WaitsUp_ReturnsFalseWhenServerAbsent` 就会因为「上一个用例的服务端还在监听」而随机红。测试串行化用 R-9g 的 `AssemblySerial.cs`。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter PipeRoundTripTests`
 Expected: FAIL（类型不存在）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```csharp
 // PipeServer.cs
@@ -2948,7 +2948,7 @@ public sealed class PipeClient : IAsyncDisposable
 }
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter PipeRoundTripTests`
 Expected: PASS，**10/10**（原有 3 条 + R-9a/9b/9c/9d×2/9e/9f 各一条）。全套 `dotnet test tests/ClashAcry.Core.Tests` 应为 **70/70**（Task 8 收尾后基线 60 + 本任务 10）。报告里给出全套 wall clock（Task 8 的 R-8i 已把全套时长压到 ~25 s，若又涨回 1 m 说明窗口被改回轮数制）。
@@ -2966,12 +2966,39 @@ using Xunit;
 
 以及 R-9c 要求的一行注释订正：`src/ClashAcry.Contracts/FrameCodec.cs:38-39` 说「两类分帧错误（过长/空帧）仍同属 IOException 家族」，实测 `InvalidDataException` 派生自 `SystemException`，不在该家族——把这句话改对（行为不动，catch 侧已在 `PipeServer.Pump` 里三型并列）。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/ClashAcry.Core src/ClashAcry.Contracts tests/ClashAcry.Core.Tests
 git commit -m "feat(core): 命名管道服务端/客户端（创建期 ACL、请求-回复与广播）"
 ```
+
+Task 9 落地实测回写（2026-10-26 / win-x64 / .NET 10 SDK 10.0.203，一次性探针工程在 `%TEMP%\probe9`，未入仓库）：
+
+1. **裁定 R-9f 的 DACL 少了一个右，多客户端当场不可用（必须订正，spec §4.1 那句「读回恰好 1 条 Allow」仍成立）。**
+   `PipeAccessRights.ReadWrite` 的枚举值是 `0x0002019B`（落到 ACE 上打成 `0x12019B`，`.NET` 顺手加了 `SYNCHRONIZE`），
+   **不含 `PipeAccessRights.CreateNewInstance = 0x4`**（探针把整个枚举打了一遍：ReadData=0x1、WriteData=0x2、CreateNewInstance=0x4、…、FullControl=0x1F019F）。
+   Windows 给「同名管道的后续实例」做访问检查时用的是**已存在的那个管道对象**的 DACL，并要求 `CREATE_PIPE_INSTANCE`。
+   于是只给 ReadWrite 时：首实例正常、第一个客户端正常连上，**第二台实例直接 `UnauthorizedAccessException: Access to the path is denied.`**
+   ——连裸 `new NamedPipeServerStream(...)`（不传 SD）也一样拒（探针变体 A–E 全部复现），accept 循环当场死掉，
+   `Broadcast_ReachesEveryConnectedClient` / `ManyBroadcasts_...` / `GarbageLine_...` 三条用例的第一版实现就是这么红的（第二个客户端等满 5 s 超时）。
+   改成 `ReadWrite | CreateNewInstance`（SDDL 读回 `D:(A;;0x12019f;;;S-1-5-…-1000)`，**仍然恰好 1 条 Allow、仍然没有 `S-1-1-0`**）后
+   连开 4 台实例、4 个客户端各连一台全部通过。安全红线不变：放宽的只是「同一用户自己再开一台实例」。
+2. **裁定 R-9e 的前提在本机不成立（实现照做，但它说的「不观察取消」是错的）**：`WaitForConnectionAsync` 在 .NET 10 **确实观察取消令牌**——
+   已取消的令牌 0 ms 抛 `TaskCanceledException`；300 ms 后取消则 304 ms 抛 `OperationCanceledException`，全程没有 Dispose 句柄。
+   「存住正在等待的实例并在取消时 `Dispose()`」这条路继续保留（它顺带把句柄关干净，`DisposeWhileIdle` 之后 `WaitUpAsync(500ms)` 才真是），
+   但不是必需项。accept 循环里另补了一处锁内 `IsCancellationRequested` 复检，防「取消已发生、新实例无人 Dispose」的竞态。
+3. R-9f①③④ 复核一致：`SetAccessControl` 抛 `UnauthorizedAccessException`，读回默认 **5** 条 Allow（`S-1-1-0`/`S-1-5-7`/`S-1-5-18`/`S-1-5-32-544`/当前用户）；
+   `NamedPipeServerStream` 公开构造函数 7 个、最长 7 参、**0 个**带 `PipeSecurity`；`maxNumberOfServerInstances = 255` 抛
+   `ArgumentOutOfRangeException`（消息原文给出合法区间 1–254 或 `MaxAllowedServerInstances`）。
+4. **测试样例里有三行不过编译**（与裁定无关，实现者必须动笔才能跑）：`a.Event += gotA.TrySetResult`（`Action<Frame>` 要 void，`TrySetResult` 返回 bool → CS0407）；
+   `Assert.Single(rules)` 绑定到非泛型重载读回 `object`（CS1061）；`AccessControlType` 住在 `AccessRule` 而不是基类 `AuthorizationRule`（CS1061）。
+   分别改为丢弃返回值的 lambda、`rules.Cast<AccessRule>()`，断言内容（条数/Allow/SID）逐字不变。
+5. FrameCodec 注释订正按 R-9c 落了（`InvalidDataException` 不在 `IOException` 家族，Pump 三型并列）；行为零改动。
+6. 全套时长：`dotnet test tests/ClashAcry.Core.Tests -c Release` → **70/70，runner 报 26 s，wall clock 28.1 s**（基线 ~25 s，本任务 +10 条真管道往返约 1.5 s）；
+   聚焦 `--filter PipeRoundTripTests` → **10/10，1 s**，连跑三次无抖动。R-9g 的串行照原样生效。
+7. 顺带补的两处幂等/护栏（不改变公开签名，Task 10/12 才会踩到）：`PipeServer.DisposeAsync` 与 `PipeClient.DisposeAsync` 加 `Interlocked` 幂等标志
+   （第二次调用原本会在已 Dispose 的 CTS/Semaphore 上抛），`PipeClient.WaitUpAsync` 已连接时直接返回真（否则反复探活会叠出第二条 ReadLoop 与旧字段）。
 
 ---
 

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page x:Class="ClashAcry.UI.Views.OverviewPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      AutomationProperties.AutomationId="OverviewPage">
+  <!-- Task 14 填内容（内核状态、模式、系统代理开关）。这里只给外壳导航断言一个可识别的落点。 -->
+  <StackPanel Padding="24" Spacing="8">
+    <TextBlock Text="概览" Style="{ThemeResource TitleTextBlockStyle}"/>
+  </StackPanel>
+</Page>

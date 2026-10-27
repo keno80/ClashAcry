@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page x:Class="ClashAcry.UI.Views.SettingsPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      AutomationProperties.AutomationId="SettingsPage">
+  <!-- Task 14 填内容（订阅导入、材质/主题、内核更新进度）。 -->
+  <StackPanel Padding="24" Spacing="8">
+    <TextBlock Text="设置" Style="{ThemeResource TitleTextBlockStyle}"/>
+  </StackPanel>
+</Page>

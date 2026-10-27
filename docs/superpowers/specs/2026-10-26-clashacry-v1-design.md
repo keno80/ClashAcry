@@ -218,7 +218,7 @@ docs/superpowers/{specs,plans,checklists}/
 | 形态 | 目标 | 测量 | 实测（空壳，2026-10-26 / Task 2） |
 |---|---|---|---|
 | 日常常驻：Tray + mihomo（UI 已关） | Tray ≤ **40 MB**，合计 ≤ **80 MB** | `scripts/measure-residency.ps1`：`Get-Process` 采 `WorkingSet64` 与 `PrivateMemorySize64` 各 5 次取中位数 | Tray 空壳（self-contained 未 trim）WS **16.4 MB** / Private **4.6 MB**（三轮各取中位数：17.0 / 16.4 / 16.4）；trim 版 15.9 MB。距 40 MB 线余量充足 |
-| UI 打开（Acrylic 档） | UI 进程 ≤ **220 MB**，Tray+内核+UI 合计 ≤ 260 MB | 同上，另记纯色档差值用于量化整窗 Acrylic 的成本 | 待 Task 12 起窗后实测（Task 2 仅验证 UI 空壳可编译：0 警告 0 错误） |
+| UI 打开（Acrylic 档） | UI 进程 ≤ **220 MB**，Tray+内核+UI 合计 ≤ 260 MB | 同上，另记纯色档差值用于量化整窗 Acrylic 的成本 | Task 12 外壳（NavigationView + 空页，未上 Acrylic）WS **140.4 MB** / Private **86.5 MB**，两次采样中位数一致；到窗口出现仅 ~0.5 s（热）/ 首次手动起 ~2 s。距 220 MB 线余量 80 MB，Acrylic 的成本留给 Task 13 复测 |
 
 数字是**待实测校准的初始线**：任务 0 探针先出空壳实测，若 WinUI 3 空壳常态即超线，回到本节改档默认值并记录，而不是悄悄放宽判据。
 
@@ -255,6 +255,8 @@ Stop-Process -Name ClashAcry.Tray   # 测完必须杀进程，否则污染后续
 **Core（xUnit，全自动化）**：`SettingsStore` 原子写与默认值；`ConfigInjector` 覆盖集与"其余字段字节级不变"；`CoreManager` 状态机与内核输出环——假内核必须往 **stdout** 写日志才测得到环（假内核用 WireMock.Net + 一个占端子的 `cmd.exe` 假进程）；`SystemProxy` 打真实 HKCU（备份/还原夹具）；`CoreUpdater` 资产名匹配、zip 解包、`.bak` 轮换（WireMock 假 release 响应）。
 
 **UI（FlaUI / UIAutomation，只读断言为主）**：断言"只有真窗口才有"的判据——断连时按钮置灰、横幅文案、开关回显、backdrop 档位切换后设置项标注实际生效值。不引快照测试。
+
+> Task 12 实测确认：**unpackaged + self-contained 的 WinUI 3 能在本机真起窗并被 UIA3 读到**（`FlaUI.UIA3` 拿主窗标题、AutomationId、Name、IsOffscreen 全部可用）。这推掉了本 spec 从 Task 2 起一直挂着的前置疑问——后续所有 UI 任务的验收面都建立在这条上。三条派生约束记在计划的 R-12e/R-12g/R-12i：产物目录随调用方式在 `bin\Release` 与 `bin\x64\Release` 之间变（harness 要两个都试）、FlaUI 5 把 `element.Current.X` 扁平成 `element.X`、WinUI 3 的 `NavigationViewItem` 不实现 Invoke pattern（用 SelectionItem.Select，别用鼠标 Click 抢用户光标）。
 
 **人工冒烟清单**（`docs/superpowers/checklists/v1-acceptance.md`）：内置内核启动 → 导入订阅 → 切节点 → 测延迟出值 → `curl -x 127.0.0.1:7897 https://www.gstatic.com/generate_204` 得 204 → 关窗后 `measure-residency.ps1` 达标 → 托盘"打开界面"重连正常 → 在线更新内核走完整进度 → 托盘退出后 `ProxyEnable=0` 且内核进程已终止。
 

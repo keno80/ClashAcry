@@ -3912,7 +3912,7 @@ git commit -m "feat(core): 内核在线更新（tag 精确选包、zip 缓存重
   - `sealed class TrayLink { Task<HandshakeReply?> HandshakeAsync(); Task<bool> SendAsync(string cmd, object? payload); Task<T?> RequestAsync<T>(string cmd, object? payload); string DelayUrl { get; } HandshakeReply? LastHandshake { get; } event Action<Frame>? Event; Task<bool> EnsureTrayRunningAsync(); }`（`DelayUrl` 由 `HandshakeAsync` 填，Task 15 的测速与 Task 14 的 `DelayUrlCombo` 都读它）
   - `sealed class UiPrefs { string Backdrop; string Theme; ... 全部读写走 ApplicationData.GetForUnpackaged().LocalSettings }`
 
-- [ ] **Step 1: MainWindow 的最小 XAML（三页 + 状态横幅占位）**
+- [x] **Step 1: MainWindow 的最小 XAML（三页 + 状态横幅占位）**
 
 照此写，不要自创结构（`NavigationView` 是左侧栏 + 内容区的最省事外壳；再自己加 Mica/Acrylic 类容器属于重复造轮子）：
 
@@ -3946,7 +3946,7 @@ git commit -m "feat(core): 内核在线更新（tag 精确选包、zip 缓存重
 </Window>
 ```
 
-- [ ] **Step 2: App.xaml.cs 生命周期**
+- [x] **Step 2: App.xaml.cs 生命周期**
 
 要求逐条：
 1. `OnLaunched` → 先 `SingleInstance.TryFocusExisting()`：若 `TrayLink` 上存在 UI 已开标记则发 `ui.focus` 并 `Exit()`；否则建窗。
@@ -3954,13 +3954,13 @@ git commit -m "feat(core): 内核在线更新（tag 精确选包、zip 缓存重
 3. `UnhandledException` → 写 `%LOCALAPPDATA%\ClashAcry\logs\ui-crash-.log` 并 `Banner` 显示；不允许静默吞。
 4. `RootFrame.Navigate(typeof(OverviewPage))` 为默认页；`Nav.SelectionChanged` 用 `Tag` 映射页面类型。**页面实例必须复用**：三个 Page 的 XAML 都设 `NavigationCacheMode="Required"`，切页时 `RootFrame.GoBack()/GoForward()` 或自建 `Dictionary<string, Page>` 缓存——每次切页都重建页面意味着重新握手 + 重拉 `/proxies`，整页白一下，正是用户红线的现场。
 
-- [ ] **Step 3: `TrayLink` 与"Tray 不在"横幅**
+- [x] **Step 3: `TrayLink` 与"Tray 不在"横幅**
 
 `EnsureTrayRunningAsync()`：`WaitUpAsync(500ms)` 失败 → `Process.Start` 拉起 `ClashAcry.Tray.exe`（相对 UI exe 同目录，路径从 `AppContext.BaseDirectory` 推导），再 `WaitUpAsync(3s)`；仍失败 → `BannerText.Text = "托盘宿主未运行，内核控制不可用"` + `Banner.IsOpen = true`。拉起 Tray 是唯一允许的跨进程 `Process.Start`，且只启动 Tray，不启动 mihomo（spec §3 禁令 1 不违反）。
 
 `SendAsync(cmd, payload)` = `RequestAsync(cmd, payload)` 丢弃回包；`RequestAsync<T>(cmd, payload)` 直接转 `_client.RequestAsync(cmd, payload, _ct)`，`reply is { Error: not null }` 时 `throw new TrayCommandException(reply.Error)`，否则 `JsonUtil.Read<T>(reply.Payload)`。**fire-and-forget 不算成功**（spec §3 禁令 3）：任何需要"改动已生效"文案的调用都必须走 `RequestAsync<T>` 拿到回包。
 
-- [ ] **Step 4: FlaUI 断言（真窗口）**
+- [x] **Step 4: FlaUI 断言（真窗口）**
 
 ```csharp
 public class ShellTests : IClassFixture<UiAppHarness>
@@ -4013,7 +4013,7 @@ public sealed class UiAppHarness
 
 （`--tray-absent` 是 UI 的测试启动参数：检测到它就跳过 `EnsureTrayRunningAsync`，让"Tray 不在"这一状态可复现。**不许为了让测试好看而把横幅常开。** FlaUI 的 `Application.Attach(Process)` 需要 `using FlaUI.Core;` + `using FlaUI.Core.Definitions;`，`xunit` 侧要 `using System.Diagnostics; using System.IO;`。）
 
-- [ ] **Step 5: 跑通**
+- [x] **Step 5: 跑通**
 
 ```bash
 dotnet build ClashAcry.sln -c Release
@@ -4021,12 +4021,28 @@ dotnet test tests/ClashAcry.UI.Tests -c Release
 ```
 Expected: 构建零警告（`TreatWarningsAsErrors`）；FlaUI 两条 PASS；手动跑 UI 能看到窗口、切三个页面、关掉窗口后 `Get-Process ClashAcry.UI` 无残留。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add src/ClashAcry.UI tests/ClashAcry.UI.Tests
 git commit -m "feat(ui): WinUI 3 外壳（关窗即退、单实例、Tray 缺位横幅）"
 ```
+
+
+实施日回写（Task 12 落地时踩到的，全部有对应代码行或用例作证）：
+
+- **R-12a｜崩溃日志目录归 `Paths`**：计划写的是 `%LOCALAPPDATA%\ClashAcry\logs\ui-crash-*.log`，那正是 `Paths.Root` 下多出来的一个目录。UI 侧不许自己拼路径，所以 `Paths` 新增 `LogsDir` 并进了 `EnsureCreated()` 的清单（`src/ClashAcry.Core/Paths.cs`）。
+- **R-12b｜`NavigationView` 的自带设置项要关掉**：它会在侧栏底部再放一个「设置」，走的是 `SettingsSelected` 而不是 `SelectionChanged`——本设计的设置是普通第三页（`Tag=settings`），两个都留着就是**侧栏出现两个「设置」且第二个点了没反应**。`MainWindow.xaml` 上 `IsSettingsVisible="False"`。
+- **R-12c｜第二实例不发 `ui.focus`**：计划 Step 2 写「发 `ui.focus` 并 `Exit()`」，但 Tray 侧 `ui.focus` 的语义是「UI 不在就起进程、**已在就不动**」（`TrayHost.FocusUi` 的 R-10e 注释）。第二实例发过去正好落进那条空分支，用户什么都看不到。改为第二实例自己 `ShowWindow(SW_RESTORE)` + `SetForegroundWindow`（`Services/SingleInstance.cs`），不新增跨进程命令面。
+- **R-12d｜WinUI 3 的 `Window` 没有 `Loaded` 事件**：计划伪代码 `Loaded += async (_,_) => …` 直接 CS0103。`Loaded` 挂在根 `Grid`（`MainWindow.xaml` 里 `x:Name="Root"`）。
+- **R-12e｜产物目录有两种形态**：`dotnet build <单个 csproj>` 落 `bin\Release\…`，`dotnet build ClashAcry.sln` 落 `bin\x64\Release\…`（sln 显式传了 Platform）。后果：`dotnet test tests/ClashAcry.UI.Tests -c Release --no-build` 会去找 `bin\Release` 那份 dll——刚清过时直接「找不到测试源」，有陈旧副本时则会**跑到上一版测试**（本机实测踩到：跑出一条早删掉的 `UnitTest1`，显示 1/1 PASS）。所以 UI.Tests 用 `-c Release`（不带 `--no-build`），harness 的 exe 解析两个候选目录都试。
+- **R-12f｜UI.Tests 不引用 UI 程序集**：引用会把 self-contained 的 WinUI 依赖拖进测试输出目录，而且测的就不再是「那个 exe」。exe 路径由测试程序集位置向上找 `ClashAcry.sln` 再拼（绝不写死相对路径）。
+- **R-12g｜FlaUI 5 的两处 API 与计划样例（4.x 写法）不符**：`element.Current.X` 扁平成 `element.X`（CS1061），`GetRuntimeId()` 不再公开。页面实例复用的判据因此改用 UIA `Name`——`Views/PageIdentity.cs` 给每个页面实例盖「类型内递增号」，来回切页读到同一个号即为同一实例（`SwitchPages_ReusesTheSamePageInstance`）。
+- **R-12h｜第二条用例只做本任务有的判据**：计划叫 `TrayAbsent_ShowsBannerAndDisablesCoreToggle`，但 Task 12 外壳还没有内核开关（Task 14 才有）。本轮断言横幅可见 + 文案，开关置灰那条留给 Task 14。
+- **R-12i｜`NavigationViewItem` 不支持 Invoke pattern**：实测 `PatternNotSupportedException: The requested pattern 'Invoke [#10000]' is not supported`。改用 `SelectionItem.Select()`——也顺带避免鼠标 `Click()` 抢走用户光标。
+- **R-12j｜unpackaged 偏好存储的真实投影形状**：`Microsoft.Windows.Storage.ApplicationData.GetForUnpackaged()` 无参重载在这个投影里不存在（CS7036，只有 `(publisher, appName)`），`ApplicationDataContainer` 也没有 `TryReadString` / 索引器（CS1061/CS0021）。读写走 `.Values` 字典：`UiPrefs` 用 `GetForUnpackaged("ClashAcry", "UI").LocalSettings.Values`。
+- **本轮实测**：unpackaged + self-contained 的 WinUI 3 **真起窗**（首次手动起 ~2 s，热态到窗口出现 ~0.5 s），UIA3 读得到标题/AutomationId/Name/IsOffscreen；UI 外壳 WS **140.4 MB** / Private **86.5 MB**（§10 的 220 MB 线内，Acrylic 成本留给 Task 13 复测）；UI.Tests 5 条 PASS（外壳三页、Tray 缺位横幅、页面实例复用、关窗即退、第二实例自退）、Core.Tests 120 条全绿；跑完无 `ClashAcry.UI`/`ClashAcry.Tray` 残留，HKCU `ProxyEnable=0x0`、`ProxyServer=127.0.0.1:8090` 未变。
+- **交接给 Task 17**：发布产物把 `ClashAcry.Tray.exe` 与 UI 放同目录后，`WindowOpensWithThreeNavItems`（不带 `--tray-absent` 那条）会**真的把 Tray 拉起来**并留活进程。测常驻前必须显式清理，否则 Tray 会被算进 UI 的账。
 
 ---
 

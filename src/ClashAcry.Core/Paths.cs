@@ -14,6 +14,9 @@ public sealed class AppPaths
     /// 并和其余目录一样由 <see cref="EnsureCreated"/> 建出来。
     public string CoreDownloadsDir => Path.Combine(CoreDir, "downloads");
 
+    /// <summary>崩溃与诊断日志（R-12a：和其余目录一样归 Paths 管，UI 侧不许自己拼 `%LOCALAPPDATA%`）。</summary>
+    public string LogsDir => Path.Combine(Root, "logs");
+
     private AppPaths(string root) => Root = root;
 
     public static AppPaths Default() => new(Path.Combine(
@@ -22,7 +25,7 @@ public sealed class AppPaths
 
     public void EnsureCreated()
     {
-        foreach (var d in new[] { Root, RuntimeDir, ImportsDir, CoreDir, CoreDownloadsDir })
+        foreach (var d in new[] { Root, RuntimeDir, ImportsDir, CoreDir, CoreDownloadsDir, LogsDir })
             Directory.CreateDirectory(d);
     }
 }

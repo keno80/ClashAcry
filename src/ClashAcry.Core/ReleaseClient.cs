@@ -17,9 +17,11 @@ public sealed record Release([property: JsonPropertyName("tag_name")] string Tag
 
 /// <summary>
 /// 更新源取数：release 元数据 + 资产下载。
-/// 两条纪律：① 失败一律静默（返回 null / false），调用方拿"取不到"当降级，不当故障——检查新版是后台动作，
+/// 三条纪律：① 失败一律静默（返回 null / false），调用方拿"取不到"当降级，不当故障——检查新版是后台动作，
 /// 断网时不该在托盘里炸出一条异常；② <see cref="HttpClient"/> 由外部注入且与订阅下载共用实例，
-/// 所以 User-Agent **只在请求消息上带**，绝不写 DefaultRequestHeaders（同 Task 6 的 R-6a 结论）。
+/// 所以 User-Agent **只在请求消息上带**，绝不写 DefaultRequestHeaders（同 Task 6 的 R-6a 结论）；
+/// ③ 资产下载地址是远程 JSON 里的字段，发请求前先过 <see cref="IsTrustedDownloadUrl"/>——
+/// 不校验就等于让更新源把「下载什么二进制」指向任意主机的任意明文端点。
 /// </summary>
 public sealed class ReleaseClient
 {
@@ -32,19 +34,38 @@ public sealed class ReleaseClient
 
     public const string DefaultLatestUrl = "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest";
 
+    /// <summary>release 资产的合法下载 host（精确匹配）。GitHub 的 <c>browser_download_url</c> 落在
+    /// <c>github.com</c>（重定向）与 <c>objects.githubusercontent.com</c>（CDN 落点）这两个上。</summary>
+    public static readonly IReadOnlySet<string> TrustedDownloadHosts =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "github.com", "objects.githubusercontent.com" };
+
     /// <summary>正文读取的**静默**预算：连续这么久没收到任何一块就放弃（不是总时长上限，理由见 TryDownloadAsync）。</summary>
     public static readonly TimeSpan InactivityBudget = TimeSpan.FromSeconds(30);
 
     private readonly HttpClient _http;
     private readonly string _latestUrl;
     private readonly TimeSpan _inactivityBudget;
+    private readonly Func<string, bool> _downloadGuard;
 
     /// <param name="inactivityBudget">只给测试留的缝：默认的 30 s 静默预算在真链路上是对的判据，
     /// 但一条断流连接不能被测成 30 s 的套件时长。生产侧一律不传。</param>
-    public ReleaseClient(HttpClient http, string latestUrl = DefaultLatestUrl, TimeSpan? inactivityBudget = null)
+    /// <param name="downloadGuard">只给测试留的缝：假源站在 <c>http://127.0.0.1</c>，默认的
+    /// <see cref="IsTrustedDownloadUrl"/> 在它是必拒（这正是要它拒的形态）。生产侧一律不传。</param>
+    public ReleaseClient(HttpClient http, string latestUrl = DefaultLatestUrl, TimeSpan? inactivityBudget = null,
+        Func<string, bool>? downloadGuard = null)
     {
         _http = http; _latestUrl = latestUrl; _inactivityBudget = inactivityBudget ?? InactivityBudget;
+        _downloadGuard = downloadGuard ?? IsTrustedDownloadUrl;
     }
+
+    /// <summary>
+    /// 资产 URL 的默认准入判据：必须 https 且 host 精确命中 <see cref="TrustedDownloadHosts"/>。
+    /// 精确匹配而不是后缀匹配——<c>github.com.evil.test</c> 走后缀匹配会混进来。
+    /// </summary>
+    public static bool IsTrustedDownloadUrl(string url) =>
+        Uri.TryCreate(url, UriKind.Absolute, out var u)
+        && string.Equals(u.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+        && TrustedDownloadHosts.Contains(u.Host);
 
     /// <summary>取最新 release。非 2xx / 超时 / 断网 / JSON 形状不对 → null。</summary>
     public async Task<Release?> GetLatestAsync(CancellationToken ct)
@@ -72,6 +93,9 @@ public sealed class ReleaseClient
     public async Task<bool> TryDownloadAsync(string url, string targetPath,
         Action<long, long>? onBytes, CancellationToken ct, long totalHint = 0)
     {
+        // 先验地址再动网络与磁盘：这个 url 来自 release 元数据，不是我们自己的配置。
+        if (!_downloadGuard(url)) return false;
+
         var partial = targetPath + ".partial";
         try
         {

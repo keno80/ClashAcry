@@ -45,6 +45,25 @@ public sealed class CoreUpdater
             r.Assets.FirstOrDefault(a => string.Equals(a.Name, name, StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// 把远程给的资产名收敛成下载目录里的**一个纯文件名**，任何路径成分一律拒（返回 null）。
+    /// 与 <see cref="ZipExtractor"/> 那条红线同源：包内条目名/元数据字段是源站数据，拿它拼路径就是穿越。
+    /// 别以为 <see cref="PickAsset"/> 的逐字符相等判据能挡住——它比的两个操作数都来自同一份 JSON，
+    /// <c>tag_name="../../evil"</c> 配上 <c>name="mihomo-windows-amd64-../../evil.zip"</c> 两边同时成立。
+    /// 三层各挡一种：<c>GetInvalidFileNameChars</c> 挡 <c>/ \ :</c>；<c>GetFileName</c> 相等挡相对/绝对形态；
+    /// 前缀断言挡 <c>".."</c> 这种「自身合法、拼出去却在目录外」的名字。
+    /// </summary>
+    internal static string? SafeCachePath(string downloadsDir, string assetName)
+    {
+        if (assetName.Length == 0 || assetName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) return null;
+        if (Path.GetFileName(assetName) != assetName) return null;
+
+        var root = Path.GetFullPath(downloadsDir);
+        if (!root.EndsWith(Path.DirectorySeparatorChar)) root += Path.DirectorySeparatorChar;
+        var full = Path.GetFullPath(Path.Combine(downloadsDir, assetName));
+        return full.StartsWith(root, StringComparison.OrdinalIgnoreCase) ? full : null;
+    }
+
     public async Task<UpdateResult> InstallLatestAsync(IProgress<UpdateProgress>? progress,
         SwapAsync swap, CancellationToken ct)
     {
@@ -59,7 +78,9 @@ public sealed class CoreUpdater
         if (string.Equals(CurrentVersion(), release.TagName, StringComparison.OrdinalIgnoreCase))
             return UpdateResult.AlreadyLatest;
 
-        var cacheZip = Path.Combine(_paths.CoreDownloadsDir, asset.Name);
+        // 缓存名走 SafeCachePath：asset.Name 是远程 JSON 给的，不能当路径成分直接用（见该方法）。
+        var cacheZip = SafeCachePath(_paths.CoreDownloadsDir, asset.Name);
+        if (cacheZip is null) return UpdateResult.DownloadFailed;
         // 缓存命中的判据是"存在**且**能解出 exe"，不是"文件在就行"——半截包不能把更新永久卡死。
         if (!(File.Exists(cacheZip) && ZipExtractor.HasExecutable(cacheZip)))
         {

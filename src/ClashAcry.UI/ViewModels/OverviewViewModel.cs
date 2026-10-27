@@ -146,7 +146,13 @@ public sealed class OverviewViewModel : IDisposable
             }
             SetFault("");
         }
-        catch (TrayCommandException ex) { SetFault(ex.Message); Assign(ref _state, (CoreState?)null); }
+        catch (TrayCommandException ex)
+        {
+            SetFault(ex.Message);
+            Assign(ref _state, (CoreState?)null);
+            // 连接断过 = 缓存的握手不再可信：作废它，下一轮才会重新探活 + 重新握手（TrayLink 那条注释）。
+            _link.InvalidateHandshake();
+        }
         finally { _refreshing = false; }
     }
 
@@ -197,7 +203,14 @@ public sealed class OverviewViewModel : IDisposable
             SetFault("");
             if (reply is not null) onResult(reply);
         }
-        catch (TrayCommandException ex) { SetFault(ex.Message); }
+        catch (TrayCommandException ex)
+        {
+            SetFault(ex.Message);
+            // 在飞的 core.update 被断线打断时，回帧与 core.update.result 广播**两条一起丢**，
+            // FinishUpdate 永远等不到——不复位就是按钮停在「更新内核 37%」直到进程重启。
+            // spec §9 的进行中反馈必须有终点，终点也包括失败这条。
+            if (cmd == CmdTypes.CoreUpdate && _updatePct >= 0) Assign(ref _updatePct, -1);
+        }
         finally { if (_pending > 0) End(); }
     }
 

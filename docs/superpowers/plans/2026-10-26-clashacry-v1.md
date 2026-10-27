@@ -5135,7 +5135,9 @@ git commit -m "build: 自包含发布脚本 + 内置内核本机准备（packagi
     dotnet build ClashAcry.sln -c Release          # 期望：0 warning 0 error
     dotnet test  tests/ClashAcry.Core.Tests -c Release
     dotnet test  tests/ClashAcry.UI.Tests  -c Release
-期望：Core 侧全绿（144 条）、UI 侧全绿（26 条：Shell / Backdrop / Overview / ProxiesNoJitter / ChromeContrast 五组，其中 ChromeContrast 是 5 类控件的极性分开判 + 1 条滑块对比 + 1 条浅色反证）。
+期望：Core 侧全绿（154 条）、UI 侧全绿（28 条：Shell 5 / Backdrop 4 / Overview 8 / ProxiesNoJitter 5 / ChromeContrast 6 五组）。ChromeContrast 的 6 条是 5 类控件的极性分开判（含 Card/Button/日志、ComboBox/编辑/单选、下拉项、节点行与组行）+ 1 条滚动条（滑块对比 + 翻页键深色）+ 1 条浅色反证；这里最初写的「7 条＝5 类 + 滑块 + 反证」将 ScrollBar 那条拆成了两条叙述，实际只有 1 条 `Fact`（合并前评审订正）。
+
+> 本段是 Task 18 派发前的草稿留档，落盘正文以 `docs/superpowers/checklists/v1-acceptance.md` 为准；两处数字若有出入，以清单文件为准（清单已随合并前修复轮更新到 154/28）。
 
 ## 2. 内置内核就位
     powershell -File scripts/fetch-bundled-core.ps1
@@ -5215,6 +5217,23 @@ Expected: 三条命令全绿，构建无警告。
   ③ 展开到 15px（轨道 + 4 个 `RepeatButton`）**只在"指针压在条上 + 真有滚轮进来"时发生**：光悬停（含 ±1px 抖动、10 个落点、12 轮）和光程序化滚动都停在药丸。所以滚轮留回来了，但发之前先 `WindowFromPoint` + 属主 PID 验明落点确实是本测试起的 UI 进程——不是它就一个字节都不发（原红现场：指针下窗口=别家 HWND、前台=False，滚轮滚到了用户别的界面上）。
   ④ 顺带一条取证口径：`WindowFromPoint` 在客户区返回的是 `Microsoft.UI.Content.DesktopChildSiteBridge`（子窗口），拿它和顶层 `HWND` 直接比会误判成"别家窗口"，要比 **PID**。
 - **跑法两条陷阱（写进清单第 1 条）**：`dotnet build ClashAcry.sln -c Release` 落 `bin\x64\Release`，`dotnet test … -c Release` 重新构建到 `bin\Release`；`UiAppHarness.ResolveExe()` 优先取 `bin\x64\Release`。所以**别加 `--no-build` 跑单条**——本轮第一次复现就踩了：改完代码 `--no-build` 跑的仍是上一版二进制，报错信息与现场对不上。
+  **R-19c 把这条的第二个方向也钉上了**：反方向同样会骗人——`dotnet test tests/ClashAcry.UI.Tests` **不重建 UI 工程**（R-12f：测试工程不引用 UI 工程），harness 起的是上一次解决方案构建的那个 exe。所以改过 UI/Tray 源码必须先 `dotnet build ClashAcry.sln -c Release` 再跑 UI.Tests，否则"改了没生效、测试仍全绿"。
+
+### 合并前评审修复轮（Step 2 之后、Step 4 之前，2026-10-27）
+
+三份只读评审（Core+Contracts+Tray / UI / 测试与脚本文档），基线 `4be5237..4b74ac5`（103 文件 +15305/−35）。逐条对代码核实后处置：
+
+- **R-19a｜修掉五项**：
+  ① 在线更新把远程 JSON 当路径/当地址用——`CoreUpdater.SafeCachePath` 只接受下载目录内的叶子名，`ReleaseClient.IsTrustedDownloadUrl` 只放 https + `github.com`/`objects.githubusercontent.com`（拒在动网络与磁盘之前，失败语义仍是静默的 `DownloadFailed`）；夹具用 `downloadGuard` 注入"只放回环"，生产侧不传。
+  ② `core.update` 在飞时连接断掉 → `_updatePct` 在 `RunAsync` 的失败分支复位（按钮不许停在"更新内核 37%"，spec §9 的进行中反馈必须有终点）。
+  ③ `RefreshAsync` 失败 → `TrayLink.InvalidateHandshake()`，下一轮重新探活 + 重新握手（Tray 重启后版本号/controller 不再停在旧值；顺带把 spec §12 那条"界面侧不会自动重连"结案）。
+  ④ `.gitignore` 的 `packaging/core/` 换成 `packaging/core/*` + `!packaging/core/BUNDLED.txt` 并把该文件入库（否则干净克隆无法证明产物 exe 的来路，而清单/spec/脚本都这么声称）；订正清单 §1/§2、spec §4.5/§11、fetch 与 publish 脚注里"整目录不入库"的说法。
+  ⑤ 测试侧两道用户机器护栏：`ChromeContrastTests.CursorPos` 尊重 `GetCursorPos` 返回值（读不到就不还原，老写法会把用户光标瞬移到 (0,0)）+ 滚轮**每一次**发之前复检落点属主（原来每轮只验一次，之后指针会随抖动移动）；`UiAppHarness.AssertNoLiveTray` 起窗前查到活的 `ClashAcry.Tray` 当场失败（假 Tray 抢生产管名，连上真宿主就是打到用户真内核；只判定、不替用户杀进程）。
+  测试基线随之 **Core 144→154、UI 26→28**（+2 条 Overview 回归锁）。
+- **R-19b｜一条 Critical 的前提被部分否证，但闸门照立**：报告说 `tag_name="../../x"` 配上同名资产就能借 `Path.Combine` 写到目录外——**实测拼不出来**：`PickAsset` 要求整名等于 `mihomo-windows-amd64-{tag}.zip`，那个前缀使 `..` 永远成不了独立路径段，绝对形态也过不了非法字符判据。闸门仍然要加，理由换成职责分离：路径合法性不该依赖选包判据的写法（哪天退回 `StartsWith` 就开了），而**同一条评审里真正成立的是 URL 那半**——`browser_download_url` 今天被原样发请求（任意主机、`http://` 也收），拿回来的第一个 `.exe` 又会被 `CoreManager` 执行。摘要校验**明确不做**并记进 spec §4.5：在线通路没有可信锚点可比，从同一个已攻陷的源再取一份校验文件等于没验。
+- **R-19d｜一条报告是假阳性，别照改**：「嵌套组永远选不中」不成立——`ProxiesViewModel.cs:64` 把所有 group（含嵌套）都渲染成独立行，`:141` 只是不把它重复列进父组的子项。
+- **R-19e｜汇报漏报的两条评审发现**（当轮汇报只列了五项，这两条没进我的清单，这里补记并入 v1.1）：`measure-residency.ps1` 按 `-ProcessName mihomo` 取进程不限定路径，本机 `verge-mihomo.exe` 正在跑时会量到别家内核的内存数；`--reset-prefs` 是 `Values.Clear()`，会把开发者自己存的界面偏好整份抹掉。两条都已写进 spec §12 的 v1.1 账，本轮不动代码（合并前最小改动面）。
+- 其余未修的 Important/Minor（`PipeServer` 的 `linked` CTS 生命周期与 `DrainAsync` 裸 catch、`KillProcess` 无超时、订阅导入 sync-over-async + 无上限读、`PipeClient` 请求级无截止、托盘分支 `MessageLoop` 返回后不跑清理、`settings.update` 改端口后代理指向新端口而内核听旧端口、spec §4.4 的 `window.*`/`proxies.show_hidden` 未实现）逐条落在 spec §12 的同一份账上。
 
 - [ ] **Step 3: 人工冒烟（用户参与点）**
 

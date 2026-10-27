@@ -2,10 +2,12 @@
 内置内核的本机准备（Task 17）：从 MetaCubeX/mihomo 最新 release 取 windows-amd64-compatible 资产，
 落成 packaging\core\mihomo-windows-amd64-compatible.exe，并把溯源写进 packaging\core\BUNDLED.txt。
 
-为什么入库的是「溯源三行 + 校验和」而不是二进制本身：packaging/core/ 整目录在 .gitignore 里
-（产物里的 exe 在 git 里没有任何对应物 = 无法追溯），所以每次发布前必须能证明这颗 exe 来自哪个 release 资产。
+为什么入库的是「溯源四行」而不是二进制本身：内核 exe 与下载的 zip 都在 .gitignore 里（几十 MB，
+且 git 里没有对应物就无法追溯），所以每次发布前必须能证明这颗 exe 来自哪个 release 资产。
 BUNDLED.txt 因此记四行：tag / asset URL / 下载 zip 的 SHA-256（release 页面上的资产原文）/ 解出 exe 的 SHA-256
 （publish.ps1 用它做本地校验——zip 不留在盘上，能校验收紧的是「本地 exe 没被换过」）。
+它**必须入库**：`.gitignore` 用 `packaging/core/*` + `!packaging/core/BUNDLED.txt` 豁免这一份，
+新克隆靠它才能核出来路（整目录 ignore 会连它一起挡掉，那是错的）。
 
 幂等：目标存在且 BUNDLED.txt 的 tag 与 GitHub 最新 tag 一致、exe 校验和对得上，就完全跳过网络。
 -Verify 只校验不下载（publish.ps1 用），对不上直接失败，逼你重取。

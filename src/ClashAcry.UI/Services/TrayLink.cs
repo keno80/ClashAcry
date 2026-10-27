@@ -26,6 +26,14 @@ public sealed class TrayLink : IAsyncDisposable
 
     public HandshakeReply? LastHandshake { get; private set; }
 
+    /// <summary>
+    /// 让缓存的握手作废：连接一旦断过，上一世的 controller 地址与版本号就不再是事实。
+    /// 只有 <see cref="HandshakeAsync"/> 会把 <see cref="LastHandshake"/> 置 null，所以调用方在失败分支里
+    /// 必须显式作废一次——否则 <c>RefreshAsync</c> 的「握过手就跳过探活与握手」这条短路会永久成立，
+    /// Tray 重启后界面一直拿旧握手读数（版本号停在更新前、controller 打向没人听的端口）。
+    /// </summary>
+    public void InvalidateHandshake() => LastHandshake = null;
+
     /// <summary>测速目标 URL，由 handshake 填；Task 15 的测速与 Task 14 的输入框都读这里。</summary>
     public string DelayUrl => LastHandshake?.DelayTestUrl ?? string.Empty;
 

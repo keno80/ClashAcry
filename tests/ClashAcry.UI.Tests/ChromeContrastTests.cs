@@ -156,7 +156,7 @@ public sealed class ChromeContrastTests : IClassFixture<UiAppHarness>, IDisposab
         await WaitUntilAsync(() => Find(s, "Node_n1") is not null, 15);
 
         // 悬停是展开态的前提：指针一挪开条就收回 3px 药丸，所以取样全过程都在悬停里，收尾必须把指针还回原位。
-        var origin = CursorPos();
+        var origin = CursorPos();         // null = 读不到当前位置；读不到就**不**还原，见 CursorPos
         try
         {
             var bar = RevealScrollBar(s);
@@ -188,7 +188,9 @@ public sealed class ChromeContrastTests : IClassFixture<UiAppHarness>, IDisposab
         }
         finally
         {
-            SetCursorPos(origin.X, origin.Y);
+            // 只在真的读到过原位置时才还原：origin 为 null 时那对坐标是 (0,0)，
+            // 「还原」就变成了把用户的光标瞬移到屏幕左上角。
+            if (origin is { } o) SetCursorPos(o.X, o.Y);
         }
     }
 
@@ -301,8 +303,9 @@ public sealed class ChromeContrastTests : IClassFixture<UiAppHarness>, IDisposab
     ///    先滚完再等 1s 才动指针，就变成在空气上悬停（实测落点算出 y=0 就是这么来的）；
     /// ③ 展开到实测 15px（轨道 + 4 个 RepeatButton）只在**指针压在条上并且真有滚轮进来**时发生：
     ///    光 <c>SetCursorPos</c> 悬停、光程序化滚动都停在 3px 药丸，试了 12 轮 10 个落点都不展开。
-    ///    滚轮是打到指针下的窗口的，所以发之前先 <c>WindowFromPoint</c> + 属主 PID 验明那正是本测试起的
-    ///    UI 进程——不是它就一个字节都不发。这条护栏是原来那套「悬停+滚轮」缺的（失败现场：指针下窗口=别家 HWND、
+    ///    滚轮是打到指针下的窗口的，所以**每一次发之前**都 <c>WindowFromPoint</c> + 属主 PID 验明那正是本测试起的
+    ///    UI 进程——不是它就这一次不发（复检必须在滚轮紧邻的上一行：落点会随每次抖动移动，轮与轮之间也可能有
+    ///    别家窗口压上来）。这条护栏是原来那套「悬停+滚轮」缺的（失败现场：指针下窗口=别家 HWND、
     ///    前台=False，滚轮滚到了用户别的界面上）。
     /// 展开失败直接抛，并把落点归属、条矩形、部件数一起打出来——「量不到轨道＝不通过」，不许静默降级成只判那颗药丸。
     /// </summary>
@@ -317,14 +320,17 @@ public sealed class ChromeContrastTests : IClassFixture<UiAppHarness>, IDisposab
             var r = bar.BoundingRectangle;
             var x = r.X + r.Width / 2;
             var y = r.Top + r.Height / 2;
-            var under = WindowFromPoint(new POINT { X = x, Y = y });
-            GetWindowThreadProcessId(under, out var underPid);
-            var ours = underPid == (uint)s.Process.Id;
-            for (var k = 0; k < 6 && ours; k++)
+            IntPtr under = IntPtr.Zero; uint underPid = 0; var refused = 0;
+            for (var k = 0; k < 6; k++)
             {
-                SetCursorPos(x, y - k % 2);                            // 抖 1px 让 XAML 收到 pointer move
+                var py = y - k % 2;
+                SetCursorPos(x, py);                                // 抖 1px 让 XAML 收到 pointer move
                 // 展开态实测只在「指针压在条上 + 真滚轮进来」时出现（光悬停、光程序化滚动都停在 3px 药丸）。
-                // 滚轮打在指针下的窗口上，所以先验明那正是本测试起的 UI 进程（ours），否则一个字节都不发。
+                // 滚轮打在指针下的窗口上，所以**每一次发之前**都重新验明那正是本测试起的 UI 进程：
+                // 落点会随 k 移动，轮与轮之间也可能有别的窗压上来——只在轮开头验一次，剩下五次就是滚到别家界面上去。
+                under = WindowFromPoint(new POINT { X = x, Y = py });
+                GetWindowThreadProcessId(under, out underPid);
+                if (underPid != (uint)s.Process.Id) { refused++; Thread.Sleep(120); continue; }
                 Mouse.Scroll(-1);
                 Thread.Sleep(220);
                 var expanded = s.Window.FindAllDescendants(cf => cf.ByControlType(ControlType.ScrollBar))
@@ -337,7 +343,8 @@ public sealed class ChromeContrastTests : IClassFixture<UiAppHarness>, IDisposab
                 .OrderByDescending(e => e.BoundingRectangle.Height).FirstOrDefault();
             var nr = now?.BoundingRectangle ?? Rectangle.Empty;
             log.Add($"r{round} 落点({x},{y}) 页右缘-{page.Right - x}: {nr.Width}x{nr.Height}@({nr.X},{nr.Y}) " +
-                    $"部件{(now?.FindAllDescendants().Length ?? -1)} 指针下=0x{under.ToInt64():X}{HwndInfo(under)} 属主pid={underPid}");
+                    $"部件{(now?.FindAllDescendants().Length ?? -1)} 指针下=0x{under.ToInt64():X}{HwndInfo(under)} " +
+                    $"属主pid={underPid} 拒发滚轮{refused}/6");
         }
         var win0 = WindowCapture.WindowRect(s.Hwnd);
         throw new Xunit.Sdk.XunitException(
@@ -392,11 +399,11 @@ public sealed class ChromeContrastTests : IClassFixture<UiAppHarness>, IDisposab
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern IntPtr WindowFromPoint(POINT p);
 
-    private static POINT CursorPos()
-    {
-        GetCursorPos(out var p);
-        return p;
-    }
+    /// <summary>
+    /// 当前光标位置，**读不到返回 null**。合并前评审抓到的坑：老写法丢掉 <c>GetCursorPos</c> 的返回值，
+    /// 失败时 <c>p</c> 保持默认 (0,0)，收尾那句「还原」就把用户的光标瞬移到屏幕左上角。
+    /// </summary>
+    private static POINT? CursorPos() => GetCursorPos(out var p) ? p : null;
 
     /// <summary>落点归属取证：类名 + 属主进程——「指针下窗口≠本窗」有两种解释（别家压在上面 / 自己岛的子窗口），结论完全不同。</summary>
     private static string HwndInfo(IntPtr h)

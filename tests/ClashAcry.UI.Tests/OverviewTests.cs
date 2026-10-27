@@ -70,6 +70,44 @@ public class OverviewTests : IClassFixture<UiAppHarness>
     }
 
     [Fact]
+    public async Task UpdateInterruptedByTrayDeath_TextDoesNotStallAtPercent()
+    {
+        // 合并前评审 Important 2：core.update 在飞时托盘死掉，回帧与结果广播两条一起丢，
+        // FinishUpdate 永远等不到——不复位就是「更新内核 37%」挂到进程重启。
+        // 只断文案：按钮本身此时是**该**disabled 的（_state 已空，托盘没了），那是正确行为。
+        var tray = await FakeTray.StartAsync();
+        using var s = _harness.Launch("--reset-prefs");
+        Assert.True(await tray.WaitUiConnectedAsync(TimeSpan.FromSeconds(10)));
+        await ReadyAsync(s);
+
+        Press(s, "UpdateButton");
+        await WaitUntilAsync(() => Text(s, "UpdateButton").Contains("%"), 5);
+
+        await tray.DisposeAsync();
+        await WaitUntilAsync(() => Text(s, "UpdateButton") == "更新内核", 10);
+        Assert.Contains("更新内核", Text(s, "UpdateButton"));
+    }
+
+    [Fact]
+    public async Task TrayRestarts_UIReHandshakes_AndReadsTheNewVersion()
+    {
+        // 合并前评审 Important 3：RefreshAsync 用缓存的 LastHandshake 短路，而它只在 HandshakeAsync 里被清；
+        // 失败不复位 = Tray 重启后界面永远拿着上一世的版本号与 controller 地址。
+        var first = await FakeTray.StartAsync();
+        using var s = _harness.Launch("--reset-prefs");
+        Assert.True(await first.WaitUiConnectedAsync(TimeSpan.FromSeconds(10)));
+        await ReadyAsync(s);
+        Assert.Equal("v-test", Text(s, "CoreVersionLabel"));
+
+        await first.DisposeAsync();                         // 托盘死过一次，这一轮轮询必然失败
+        var second = await FakeTray.StartAsync();
+        second.Handshake = second.Handshake with { CoreVersion = "v-second" };
+        Assert.True(await second.WaitUiConnectedAsync(TimeSpan.FromSeconds(10)), "界面没重连上新的托盘");
+        await WaitUntilAsync(() => Text(s, "CoreVersionLabel") == "v-second", 15);
+        await second.DisposeAsync();
+    }
+
+    [Fact]
     public async Task SilentRefresh_LeavesEveryVisibleTextNodeUntouched()
     {
         await using var tray = await FakeTray.StartAsync();

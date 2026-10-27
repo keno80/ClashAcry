@@ -4,5 +4,9 @@ obj/
 artifacts/
 *.user
 TestResults/
-packaging/core/
+# 内核二进制与下载的 zip 不入库（几十 MB），但**溯源那四行必须入库**：
+# BUNDLED.txt 是「产物里的 exe 从哪个 release 来」的唯一凭据，publish.ps1 打包前按它校验 sha256。
+# 整目录 packaging/core/ 一ignore 就会把它一起挡掉，所以只 ignore 目录内容、再把它豁免回来。
+packaging/core/*
+!packaging/core/BUNDLED.txt
 .superpowers/

@@ -22,6 +22,7 @@ public sealed class UiAppHarness
     /// <summary>启动 UI 并返回一个会话；用完必须 Dispose（Dispose 会杀掉进程）。参数按需在 UI 侧解释（--tray-absent 等）。</summary>
     public UiSession Launch(params string[] args)
     {
+        AssertNoLiveTray();
         KillStrayUi();
         var psi = new ProcessStartInfo(Exe) { UseShellExecute = false };
         foreach (var a in args) psi.ArgumentList.Add(a);
@@ -45,9 +46,29 @@ public sealed class UiAppHarness
     /// <summary>只起进程、不 attach、不清场——给单实例这类「要同时存在两个进程」的用例用。</summary>
     public Process StartBare(params string[] args)
     {
+        AssertNoLiveTray();
         var psi = new ProcessStartInfo(Exe) { UseShellExecute = false };
         foreach (var a in args) psi.ArgumentList.Add(a);
         return Process.Start(psi)!;
+    }
+
+    /// <summary>
+    /// 起 UI 之前先确认没有活的 <c>ClashAcry.Tray</c> 进程（合并前评审 Important 2）。
+    /// 理由不是洁癖：<see cref="Fakes.FakeTray"/> 挂的是**生产管名**，而服务端用的是
+    /// <c>MaxAllowedServerInstances</c>——真宿主同时在跑时两台都挂得上，UI 连到谁全看谁的实例先被 accept。
+    /// 连上真的那台，测试里 <c>Press(CoreToggle)</c> / UpdateButton / ImportButton 就是往用户的真内核、
+    /// 真订阅与真 <c>%LOCALAPPDATA%\ClashAcry</c> 上动手，而「界面显示了 X」仍可能偶然成立——假绿之外还带副作用。
+    /// 这里只判定并当场失败，**不**替用户杀进程：那是他的东西，该由他决定什么时候退托盘。
+    /// </summary>
+    private static void AssertNoLiveTray()
+    {
+        var live = Process.GetProcessesByName("ClashAcry.Tray");
+        var pids = live.Select(p => p.Id).ToList();
+        foreach (var p in live) p.Dispose();
+        if (pids.Count == 0) return;
+        throw new Xunit.Sdk.XunitException(
+            $"检测到 {pids.Count} 个活的 ClashAcry.Tray（pid {string.Join(",", pids)}）：假 Tray 与它抢同一个生产管名，" +
+            "UI 连上真宿主就会把命令打到用户的真内核上。请先从托盘右键「退出」，再跑 UI.Tests。");
     }
 
     private static string ResolveExe()

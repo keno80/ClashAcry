@@ -5,7 +5,8 @@
     powershell -File scripts/publish.ps1 -Trim -ReadyToRun   # 瘦身实验（判据见 spec §10）
 
 三条踩出来的硬话：
-① **先校验内核来源再打包**：packaging/core 不入库，所以「产物里那颗 exe 从哪来」只能靠 BUNDLED.txt 的 sha256 证明；
+① **先校验内核来源再打包**：packaging/core 里的 exe 与 zip 不入库，所以「产物里那颗 exe 从哪来」
+   只能靠入库的那份 BUNDLED.txt 的 sha256 证明；
    对不上就停下来重取（fetch-bundled-core.ps1），不许打包一颗来路不明的内核。
 ② **dotnet publish 不会带上 XAML 产物**：实测发布目录缺 App.xbf / MainWindow.xbf / Views\*.xbf 和 ClashAcry.UI.pri
    （构建目录里有），于是产物里的 UI 双击即 0xC0000409 闪退。这里显式补拷并断言 .pri 到位——不是可选步骤。

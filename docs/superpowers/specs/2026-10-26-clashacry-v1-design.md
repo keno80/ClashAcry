@@ -142,6 +142,16 @@ mixed 端口被占用的真机行为（Task 8 `Running` 判据依据，`-OccupyM
 - zip 内**不是** `mihomo.exe`：把 compatible 包整份取下来核对（22,543,546 字节压缩 / 解压后 61,304,320 字节），里面**只有一个条目**，名 `mihomo-windows-amd64-compatible.exe`——条目名跟随资产名。⇒ 解包按"首个 `.exe` 条目"定位，写入**调用方给定的目标路径**，绝不拿条目名拼路径（源站数据当路径 = 路径穿越面）。也⇒ 进度百分比只能按**压缩后的下载字节**算（见 §9）。
 - **整包下载的真实耗时**（Task 11 Step 6 端到端，同一次真机 `core.update`）：compatible 包 22,543,546 字节在本机实测 **538 s**（约 1.9 MB/min）跑完，进度事件 **101 条、0..100 无重复无倒退**。⇒ 两条结论：① 更新通路**不许**用固定总时长兜底——`HttpCompletionOption.ResponseHeadersRead` 之下 `HttpClient.Timeout` 只约束到响应头，正文读取不受它管（这条 9 min 的下载在 5 min 的 client timeout 下照样活了下来）；护栏改成**静默预算 30 s**（连续 30 s 收不到任何一块才放弃，慢而活着就一直跑完）。② UI 侧的进度语义是"百分比 + 无 ETA"，慢 link 上 9 min 是合法耗时（§9）。
 
+- **两道准入闸门（合并前评审 Critical 1，2026-10-27 补）**：元数据里**任何**字段都不得直接当路径或当地址用。
+  ① 缓存文件名走 `CoreUpdater.SafeCachePath`：只接受「无非法字符 + `GetFileName` 等于自身 + 全路径仍在 `core/downloads` 内」的叶子名。
+  今天 `PickAsset` 的整名相等判据已经让绝对形态拼不出来，但那是判据的巧合而非这道门的职责——判据哪天退回前缀匹配，路径必须自己站得住。
+  ② 资产 URL 走 `ReleaseClient.IsTrustedDownloadUrl`：**https** 且 host **精确**命中 `github.com` / `objects.githubusercontent.com`
+  （后缀匹配会被 `github.com.evil.test` 混进去）。拒在动网络与磁盘之前，语义仍是静默的 `DownloadFailed`。
+  测试夹具的假源站在 `http://127.0.0.1`，所以构造缝 `downloadGuard` 由夹具注入"只放回环"，生产侧一律用默认判据。
+- **在线通路没有摘要校验，这是裁定不是遗漏**：GitHub release 不随资产发布 sha256，从**同一个**已被攻陷的源再取一份校验文件等于没验；
+  摘要校验只在内置内核那条路上成立（`packaging/core/BUNDLED.txt` 四行，`publish.ps1` 打包前 `-Verify`，且该文件**必须入库**——
+  `.gitignore` 用 `packaging/core/*` + `!packaging/core/BUNDLED.txt`，写成整目录 ignore 会把溯源一起挡在库外，评审抓到过这个错）。
+
 测试夹具的坑（同批实测）：WireMock.Net 2.20 的 `WithBody(byte[])` 会声明一个与实发字节数无关的 `Content-Length`（2,000,767 字节的包报成 `3987`），带 `contentType` 的重载则干脆不发这个头。夹具因此保留"无声明长度"形态，让分母走 `size` 那条回落路径。
 
 要测"正文发到一半就断流"这条路径，WireMock 做不到，得用裸 `TcpListener` 手搓 HTTP 源站；此时**不读请求就 Close 会让 Windows 发 RST、把客户端还没读走的响应一起丢掉**（实测：正文完整写出，客户端 9 ms 内拿到连接重置）。夹具因此"发完正文后留 1 s 宽限期再断"。另外"既不声明长度也不分块、以 EOF 收尾"的响应会被 .NET 判协议违规——真实世界的未知长度形态是 `Transfer-Encoding: chunked`，夹具按后者写。
@@ -353,7 +363,14 @@ Stop-Process -Name ClashAcry.Tray   # 测完必须杀进程，否则污染后续
 
 **v1 验收线**：Core 测试全绿 + FlaUI 断言全过 + 冒烟清单全过 + §10 开销线达标。
 
-> Task 18 实测（2026-10-27）：`dotnet build ClashAcry.sln -c Release` **0 警告**；Core.Tests **144/144**；UI.Tests **26/26**（改完取样形态后连跑 4 次全绿）。UI 侧五组是 Shell / Backdrop / Overview / ProxiesNoJitter / ChromeContrast，后者 7 条 `Fact`＝5 类控件极性分开判 + 1 条滚动条轨道/滑块对比 + 1 条浅色反证。两条跑法约束已被反复验证：产物目录随调用方式在 `bin\Release` 与 `bin\x64\Release` 之间变，所以**别加 `--no-build`**（加了会跑上一版二进制，报错现场与代码对不上）；Core.Tests 用生产管名，跑之前得确认没有活的 `ClashAcry.Tray.exe`。
+> Task 18 实测（2026-10-27）：`dotnet build ClashAcry.sln -c Release` **0 警告**；Core.Tests **144/144**；UI.Tests **26/26**（改完取样形态后连跑 4 次全绿）。UI 侧五组是 Shell / Backdrop / Overview / ProxiesNoJitter / ChromeContrast，后者 6 条 `Fact`＝5 类控件极性分开判 + 1 条滚动条轨道/滑块对比 + 1 条浅色反证。**（这条的 6 是订正：合并前评审抓到当时三处文档都写成 7，`grep -c '\[Fact\]'` 实测 6；同批把总数一并订正，见下条。）**
+>
+> 两条跑法约束已被反复验证：产物目录随调用方式在 `bin\Release` 与 `bin\x64\Release` 之间变，所以**别加 `--no-build`**（加了会跑上一版二进制，报错现场与代码对不上）；Core.Tests 用生产管名，跑之前得确认没有活的 `ClashAcry.Tray.exe`。
+>
+> **合并前评审修复轮（2026-10-27，同批实测）**：三份只读评审（Core+Tray / UI / 测试与文档）逐条核实后修掉五项，测试基线随之抬到 **Core 154/154、UI 28/28**（Overview 8 条 = 原 6 + 新增 2）。三条新钉的跑法约束：
+> ① **改 UI 源码后必须先 `dotnet build ClashAcry.sln`**——`dotnet test tests/ClashAcry.UI.Tests` 只重建测试工程（它按 R-12f 不引用 UI 工程），harness 起的是 `bin\x64\Release` 那个 exe，于是"改了没生效、测试仍全绿"，本轮就是靠这条才认出两条回归锁当时是空锁；
+> ② **UI.Tests 现在起窗前先断言没有活的 `ClashAcry.Tray` 进程**（`UiAppHarness.AssertNoLiveTray`）：假 Tray 挂的也是生产管名，两台服务端同时挂得上时 UI 连到谁不定，连上真宿主就是往用户的真内核与真 `%LOCALAPPDATA%\ClashAcry` 上动手；这里只判定失败、不替用户杀进程；
+> ③ 两条新回归锁 **必须在去掉修复后跑红过才算数**（已做：`UpdateInterruptedByTrayDeath_*` 超时、`TrayRestarts_*` 报"界面没重连上新的托盘"）。
 
 
 ## 12. 风险与开放问题
@@ -363,7 +380,14 @@ Stop-Process -Name ClashAcry.Tray   # 测完必须杀进程，否则污染后续
 - **provider 成员与延迟端点——已有真机答案（v1.19.33，不再是风险项）**：`GET /proxies` 顶层表**不含** provider 成员（仅组 `all` 与 `GET /providers/proxies` 的 `proxies` 列表含之）；`GET /proxies/{成员名}/delay` 对成员**404**。据此 §4.2 已把"测 provider 成员延迟走 providers 详情 / 拿不到样本显示'上次'并标注"从兜底升级为既定实现要求。
 - **mixed 端口被占时内核"带病存活"**（v1.19.33 实测，详见 §4.2 末段）：进程不退出、controller 全功能应答、仅 stdout 一行 `level=error` bind 失败；`Running` 判据必须双探活（controller + mixed 端口 TCP），与计划 Task 8 一致。另实测内核 Go 日志写在 **stdout**（stderr 恒空），`CoreManager` 的 stderr 环应同时采集两个流。
 - **mihomo 跨版本 REST 漂移**：契约以 §4.2 + 源码为准，冒烟清单兜底。
-- **横幅的"一键拉起/重启 Tray"尚未接（Task 14 记账）**：现在横幅只说"托盘宿主未运行"，界面随即把所有内核控制置灰；用户想让界面重新连上，得自己启动 `ClashAcry.Tray.exe` 或重开 UI。补法已想清楚但不属 v1 最小闭环：横幅加一个按钮 → `EnsureTrayRunningAsync()` + 重新握手 + 清故障（故障文案按"第一条说话"，恢复靠一次成功轮询把它清空）。同批遗留：`PipeClient` 重连后 `_pending` 仍跨连接共享，且界面侧断开后**不会自动重连**（探活只在"从未握手成功"时做）。
+- **横幅的"一键拉起/重启 Tray"尚未接（Task 14 记账）**：现在横幅只说"托盘宿主未运行"，界面随即把所有内核控制置灰；用户想让界面重新连上，得自己启动 `ClashAcry.Tray.exe` 或重开 UI。补法已想清楚但不属 v1 最小闭环：横幅加一个按钮 → `EnsureTrayRunningAsync()` + 重新握手 + 清故障（故障文案按"第一条说话"，恢复靠一次成功轮询把它清空）。同批遗留：`PipeClient` 重连后 `_pending` 仍跨连接共享。
+  **界面侧"断开后不会自动重连"这条已在合并前评审修复轮解决**（2026-10-27）：`RefreshAsync` 的失败分支现在调 `TrayLink.InvalidateHandshake()`，缓存握手一作废，下一轮（2 s）就走"探活 → 重新握手"，Tray 死过又起来时版本号与 controller 地址都会重新读回来；回归锁 `OverviewTests.TrayRestarts_UIReHandshakes_AndReadsTheNewVersion`。按钮侧同批修掉一条：`core.update` 在飞时连接断掉，回帧与结果广播一起丢，`_updatePct` 若不在失败分支复位就是「更新内核 37%」挂到进程重启（锁 `UpdateInterruptedByTrayDeath_TextDoesNotStallAtPercent`）。
+- **评审修复轮记下但未动的四条（v1.1 账上，均不阻塞合并）**：
+  ① `measure-residency.ps1` 按 `-ProcessName mihomo` 取进程，**不限定路径**——本机现在就有 `verge-mihomo.exe` 在跑，脚本会心平气和地量到别家内核的内存数（AGENTS 红线的另一面）。修法很小：按 `Path -like "$env:LOCALAPPDATA\ClashAcry\*"` 过滤或收 `-Pid`。
+  ② `--reset-prefs` 走 `UiPrefs.Reset()` = `Values.Clear()`，会把开发者自己存的界面偏好整份抹掉，测试侧无人还原。应收窄到测试读写的那两个键。
+  ③ `PipeServer`：`AcceptLoop` 的 `using var linked` 在循环因产线故障抛出而死时，会把令牌 dispose 给还在跑的 `Pump`（`ObjectDisposedException` 不在它的 catch 过滤器里 → 未观察的任务异常）；`DrainAsync` 的裸 `catch` 只停写半边、连接仍留在 `_clients` 里。两条都是窄窗口的控制通道退化，不是常态路径。
+  ④ 三条宿主生命周期侧的宽限期缺失：`CoreManager.KillProcess` 的 `WaitForExitAsync()` 无超时（卡住的 mihomo 会楔死 `StopAsync`/退出钩子，5 s 预算后硬杀 → 孤儿内核 + 代理留在开启态）；`SubscriptionImport.ImportFromUrl` 是 sync-over-async + 无上限 `ReadToEnd` 且 `ct=default`（慢发订阅源能把它拖过 `HttpClient.Timeout`）；`TrayHost` 托盘分支的 `MessageLoop` 返回后不跑 `ShutdownAsync`（只有 `--no-tray` 分支跑）。
+  另：`settings.update` 改端口后界面会把新端口写进系统代理而内核仍听旧端口（下次起核才刷新）；spec §4.4 里 `window.{width,height,x,y,maximized}` 与 `proxies.show_hidden` **未实现**（前者从未被裁定延后，属文档回写欠账）。
 - **secret 落盘明文**（同用户可读）：自用容忍；管道 ACL 限当前用户 SID，`handshake` 之外不向其他进程暴露。
 - **yaml 保真度（Task 5 已实测结案，不再是待探针项）**：YamlDotNet 18.1.0 的 `YamlStream`/DOM 通路**保留全部字段值与键序、保留 block/flow 风格与用户锚点别名**（`&x`、`*x`、`<<:`），但**不保留注释**（DOM 不承载 comment token），且会出现三类无害漂移：block 序列压平到父键同列、flow 节点内部空白归一、文档尾部多一行 `...`。因此 v1 的公开承诺只有“不认识的原样透传、只做顶层必需键覆盖、用户手写原件永不被改写”，**UI 文案与导入说明不得声称保留注释或原始格式**；如日后要真保注释，需换库并另立任务。另：`YamlStream.Save` 必须显式 `assignAnchors: false`，否则会给内容重复的节点自动发随机锚点，产物里长出用户没写过的 `&203281033`。
 

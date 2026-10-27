@@ -26,16 +26,21 @@ Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Setti
 
 ```bash
 dotnet build ClashAcry.sln -c Release              # 期望：0 警告 0 错误
-dotnet test  tests/ClashAcry.Core.Tests -c Release # 期望：144/144
-dotnet test  tests/ClashAcry.UI.Tests  -c Release  # 期望：26/26（本轮连跑 4 次全绿）
+dotnet test  tests/ClashAcry.Core.Tests -c Release # 期望：154/154
+dotnet test  tests/ClashAcry.UI.Tests  -c Release  # 期望：28/28
 ```
 
-UI 侧五组：Shell / Backdrop / Overview / ProxiesNoJitter / ChromeContrast（后者 7 条 `Fact`：
-每类控件的深色底与浅色前景**极性分开判**，加一条滚动条对比、一条浅色反证）。三条跑测试的坑：
+UI 侧五组：Shell 5 / Backdrop 4 / Overview 8 / ProxiesNoJitter 5 / ChromeContrast 6（后者每类控件的
+深色底与浅色前景**极性分开判**，加一条滚动条轨道-滑块对比、一条浅色反证）。四条跑测试的坑：
 
 - UI.Tests 必须**不带 `--no-build`** 跑（测试解析 `bin\Release\…`，而解决方案构建写的是 `bin\x64\Release\…`，见 R-12e/R-14f）。
+- **改过 UI/Tray 源码后必须先 `dotnet build ClashAcry.sln -c Release` 再跑 UI.Tests**：`dotnet test tests/ClashAcry.UI.Tests`
+  只重建测试工程（它按 R-12f 不引用 UI 工程），harness 起的是解决方案构建出来的那个 exe。
+  少了这一步就是「改了没生效、测试还全绿」——评审修复轮里两条新回归锁最初就是这样被验成空锁的。
 - Core.Tests 用的管名就是生产管名 `clashacry.tray.v1`：跑套件前先确认没有 `ClashAcry.Tray.exe` 存活，
-  否则 `PipeRoundTripTests` 9 条成片失败（R-17 交接与 spec §9 末）。
+  否则 `PipeRoundTripTests` 9 条成片失败（R-17 交接与 spec §9 末）。**UI.Tests 现在把这条变成硬断言**
+  （`UiAppHarness.AssertNoLiveTray`：起窗前查到活的 `ClashAcry.Tray` 就当场失败，不替你杀进程）——
+  假 Tray 与真宿主抢同一个管名时，UI 连上真那个，`Press(CoreToggle)` / 更新 / 导入就会打到你的真内核上。
 - 两条 `DefaultLaunch_*` / `Start_*` 用例钉住内核启动参数目录，**别把 `-d` 改回 Root**（见第 4 条）。
 
 ## 2. 内置内核就位【本会话已自测】
@@ -46,8 +51,14 @@ powershell -File scripts/fetch-bundled-core.ps1 -Verify  # 期望：按 BUNDLED.
 ```
 
 期望：`packaging/core/BUNDLED.txt` 四行——`tag` / `asset`（release 页的 zip URL）/ `sha256`（**zip 原文**，
-因为 zip 才是 release 资产）/ `exe_sha256`（打包进产物的那颗 exe）。`packaging/core/` 整目录不入库，
-所以「产物里的 exe 从哪来」只能靠这四行证明；`publish.ps1` 在打包前强制跑一次 `-Verify`。
+因为 zip 才是 release 资产）/ `exe_sha256`（打包进产物的那颗 exe）。二进制（exe 与 zip）不入库，
+但 **`BUNDLED.txt` 必须入库**：`.gitignore` 用的是 `packaging/core/*` + `!packaging/core/BUNDLED.txt`，
+写成整目录 `packaging/core/` 会把它一起挡掉（合并前评审抓到的：那样「产物里的 exe 从哪来」在干净克隆上无从证明）。
+`publish.ps1` 在打包前强制跑一次 `-Verify`。核一眼它真的在库里：
+
+```bash
+git ls-files packaging/core          # 期望输出 packaging/core/BUNDLED.txt
+```
 
 ## 3. 起 Tray + 导入订阅（URL 与本地两条通路都要过）
 
@@ -178,7 +189,7 @@ powershell -Command "Get-Process mihomo -ErrorAction SilentlyContinue"
 
 ## v1 验收线（spec §11）
 
-- 第 1 条全绿（Core 144 / UI 26）+ 第 2~12 条勾完 + §10 三格开销线达标。
+- 第 1 条全绿（Core 154 / UI 28）+ 第 2~12 条勾完 + §10 三格开销线达标。
 - 已知遗留，**不阻塞 v1**，记在 spec §12 / 计划交接项里：
   ① 概览页横幅缺「一键拉起/重启 Tray」按钮（spec §12）；
   ② `PipeServer` 对同一连接串行处理，分钟级 `core.update` 会堵住后面的请求（头阻塞，进度走广播不受影响）；

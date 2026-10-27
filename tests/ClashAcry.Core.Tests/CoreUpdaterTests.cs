@@ -33,8 +33,18 @@ public class CoreUpdaterTests : IDisposable
         return p;
     }
 
-    private CoreUpdater Updater() => new(Paths(), new ReleaseClient(Http, $"{_wire.Url}/latest"));
+    private CoreUpdater Updater() => new(Paths(), Client());
     private string CachedZipPath(AppPaths p) => Path.Combine(p.CoreDownloadsDir, "mihomo-windows-amd64-v9.zip");
+
+    /// <summary>
+    /// 夹具的假源站在回环 http 上，生产的地址准入判据（https + GitHub host）在它是必拒——
+    /// 那条例外本身由 <see cref="ReleaseClientTests"/> 单独钉，这里只测更新器的编排。
+    /// </summary>
+    private static bool LocalAssetUrl(string url) =>
+        Uri.TryCreate(url, UriKind.Absolute, out var u) && u.Host is "127.0.0.1" or "localhost";
+
+    private ReleaseClient Client(Func<string, bool>? guard = null) =>
+        new(Http, $"{_wire.Url}/latest", downloadGuard: guard ?? LocalAssetUrl);
 
     private sealed class SwapSpy
     {
@@ -121,6 +131,69 @@ public class CoreUpdaterTests : IDisposable
     {
         var r = new Release("v1.0.0", new[] { new ReleaseAsset("mihomo-darwin-arm64-v1.0.0.zip", "u", 1) });
         Assert.Null(CoreUpdater.PickAsset(r));
+    }
+
+    /// <summary>
+    /// 合并前评审 Critical 1 的第一半：资产名是**远程 JSON 的字符串**，只能当文件名、不能当路径。
+    /// 今天的 <see cref="CoreUpdater.PickAsset"/> 用整名相等，绝对形态与前缀串都拼不出合法穿越；
+    /// 但那是判据的巧合，不是这道门的职责——判据哪天退回 StartsWith，路径就必须自己站得住。
+    /// </summary>
+    [Theory]
+    [InlineData("mihomo-windows-amd64-v9.zip", true)]      // 真包名（spec §4.5）
+    [InlineData("mihomo", true)]                            // 无扩展名也合法：能不能用由路径决定，不由名字决定
+    [InlineData("", false)]
+    [InlineData("..", false)]                               // 自身合法、拼出去在目录外，只有前缀断言挡得住
+    [InlineData(@"downloads\other.zip", false)]
+    [InlineData(@"C:\Windows\x.zip", false)]
+    [InlineData("a/b.zip", false)]
+    public void SafeCachePath_AcceptsOnlyALeafFileNameInsideDownloadsDir(string name, bool allowed)
+    {
+        var dir = Path.Combine(_dir, "core", "downloads");
+        var result = CoreUpdater.SafeCachePath(dir, name);
+        if (!allowed) { Assert.Null(result); return; }
+        Assert.Equal(Path.Combine(dir, name), result);
+        Assert.StartsWith(Path.GetFullPath(dir) + Path.DirectorySeparatorChar, result!);
+    }
+
+    [Fact]
+    public async Task Install_AssetUrlOnForeignHost_Refused_AndOldExeUntouched()
+    {
+        // 合并前评审 Critical 1 的第二半：browser_download_url 同样是远程数据，
+        // 用**默认**准入判据（不注入放行缝）跑一次，源站把资产指到别家主机就必须整条拒掉。
+        StubRelease(ZipWithEntry("mihomo-windows-amd64-v9.exe", new byte[] { 1, 1 }));
+        _wire.Given(Request.Create().WithPath("/latest").UsingGet()).RespondWith(
+            Response.Create().WithBody(JsonSerializer.Serialize(new
+            {
+                tag_name = "v9",
+                assets = new[]
+                {
+                    new { name = "mihomo-windows-amd64-v9.zip", browser_download_url = "http://127.0.0.1:1/dl.zip", size = 1 }
+                }
+            })));
+        var p = Paths();
+        var before = File.ReadAllBytes(p.CoreExecutable);
+        var swap = new SwapSpy();
+
+        var updater = new CoreUpdater(p, new ReleaseClient(Http, $"{_wire.Url}/latest"));
+        Assert.Equal(UpdateResult.DownloadFailed, await updater.InstallLatestAsync(null, swap, default));
+
+        Assert.Equal(before, File.ReadAllBytes(p.CoreExecutable));   // 旧内核一字未动（不变量 ①）
+        Assert.Equal(0, swap.Calls);
+        Assert.False(File.Exists(CachedZipPath(p)));                 // 也没在缓存目录留下包
+    }
+
+    [Fact]
+    public void IsTrustedDownloadUrl_AcceptsHttpsGithubAssets_RejectsEverythingElse()
+    {
+        // 真机形态（BUNDLED.txt 里那条 asset URL 的宿主）必须过，其余四种失败形态必须拒。
+        Assert.True(ReleaseClient.IsTrustedDownloadUrl(
+            "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.33/mihomo-windows-amd64-compatible-v1.19.33.zip"));
+        Assert.True(ReleaseClient.IsTrustedDownloadUrl("https://objects.githubusercontent.com/x/y.zip"));
+        Assert.False(ReleaseClient.IsTrustedDownloadUrl(
+            "http://github.com/MetaCubeX/mihomo/releases/download/v1/x.zip"));         // 明文
+        Assert.False(ReleaseClient.IsTrustedDownloadUrl("https://github.com.evil.test/x.zip"));  // 后缀伪装
+        Assert.False(ReleaseClient.IsTrustedDownloadUrl("https://evil.test/github.com/x.zip"));
+        Assert.False(ReleaseClient.IsTrustedDownloadUrl("not-a-url"));
     }
 
     [Fact]
@@ -242,7 +315,7 @@ public class CoreUpdaterTests : IDisposable
         p.EnsureCreated();
         Assert.False(File.Exists(p.CoreExecutable));
 
-        var updater = new CoreUpdater(p, new ReleaseClient(Http, $"{_wire.Url}/latest"));
+        var updater = new CoreUpdater(p, Client());
         Assert.Equal(UpdateResult.Updated, await updater.InstallLatestAsync(null, new SwapSpy(), default));
 
         Assert.Equal(new byte[] { 7, 7 }, File.ReadAllBytes(p.CoreExecutable));

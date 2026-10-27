@@ -204,7 +204,7 @@ docs/superpowers/{specs,plans,checklists}/
 
 **深色 chrome 逐类实测（Task 16 回写，2026-10-27 / win-x64 / 125% 缩放 2560x1440）**：
 
-本节要求"检查默认模板是否残留浅色"这条**实测为否证**：Windows App SDK 2.5.1 的默认 Fluent 深色模板下，逐类取样全部已经是深色，`Themes/FluentDarkOverrides.xaml` 与逐类 `ControlTemplate` **一个都没写**（计划 Step 2 划掉）。实测灰度（3x3 邻域最亮像素，`ChromeContrastTests` 5 条用例的判据即由此定）：
+本节要求"检查默认模板是否残留浅色"这条**实测为否证**：Windows App SDK 2.5.1 的默认 Fluent 深色模板下，逐类取样全部已经是深色，`Themes/FluentDarkOverrides.xaml` 与逐类 `ControlTemplate` **一个都没写**（计划 Step 2 划掉）。下表是 Task 16 的**单点取样**读数（3x3 邻域最亮像素），Task 18 把判据形态换成了区域统计（见下面「阈值三常数」段末），表里的值仍是同一批控件、同一台机器，只是量的口径变细：**Task 18 复测的底色 P25 落在 48~70、亮特征波段最大值落在 204~255**：
 
 | 部件 | 底色 | 前景 |
 |---|---|---|
@@ -219,11 +219,22 @@ docs/superpowers/{specs,plans,checklists}/
 
 阈值三常数（`ChromeContrastTests`）：`DarkMax=110`（实测深色 39~88，留余量）、`ForegroundMin=140`（实测前景 160~255）、`SpanMin=60`（滑块-轨道实测差 113）。**极性必须分开判**：底色要求"最亮处仍暗"，前景要求"最亮处够亮"——一条 `AssertDark` 通吃会把正确的深色主题里白色的箭头/文字误判成浅色残留。
 
+**判据形态在 Task 18 从"单点"改成"区域统计"（阈值一条没放宽，`ChromeProbe.BandStats`）**：同一份代码在跑全量套件时随机红过三种样子，逐条量过渲染像素才确认根因是**取样形态**而不是主题发白——
+① 带 `Header` 的 `TextBox` 的 UIA 矩形把标签行与字段一起框住（实测 771x75），**占位符字脊 238 与字段底 35 只隔 5 px**，而 `ChromeProbe.Sample` 取的是 3x3 邻域**最亮**那颗：布局漂几个像素就从"判底"翻成"判字"（`ImportUrlBox` 读到 238、判据 ≤110）。
+② 反过来节点行名单点读到 47（判据 ≥140）——落在名字第一道竖上，最长一段连续亮只有 7 px。
+③ 深色底是**压在 Desktop Acrylic 上的半透明填充**，同一点位会随背景漂（实测 35→56 而矩形没变），单点阈值本质上守不住。
+所以底色改用区域第 25 百分位（实测深色档 48~70、浅色档 240 上下）、亮特征改用波段最大值 + 与底色的跨度，并在抓帧前加 `WaitLayoutSettled`（连续三次矩形一致）。**同时补一条反证** `FillCriterion_LightThemeReallyReadsLight`：主题单选真的切到浅色后同一量法必须读到发白，否则"≤110"是在自说自话（收尾切回跟随系统——那是用户的 LocalSettings 偏好）。
+
 四条落地约束（都是踩出来的，下次改 UI 直接照做）：
 
 ① **`PrintWindow(PW_RENDERFULLCONTENT)` 抓不到 WinUI 的 `Popup`**：ComboBox 下拉、Flyout 落在独立的 `Microsoft.UI.Content.DesktopChildSiteBridge` 里、不是独立顶层 HWND，PrintWindow 只渲主窗合成面 → 弹层项抓出来是背后的页面。弹层类（`ComboBoxItem`）只能整屏 `CopyFromScreen`，且判据要先断言"屏幕坐标来自 UIA、换算零偏移"。
 ② **DPI 一致性是像素核对的前置条件**：UIA 矩形是物理像素，抓取进程若 unaware 则拿到虚拟化位图，125% 下差 1.25 倍——`ComboBoxItem` 全部读成同一个暗值、看似通过实则错位。测试进程用 `[ModuleInitializer]` 调 `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`（**不能放静态构造**：进程中途翻转感知会让后面的用例取到全透明像素）；产品侧 `ScreenCapture.Grab` 直接按缩放比断言失败，把"环境不对"变成显式失败而不是假绿。
-③ **滚动条没有 `Thumb` 元素**：UIA 只暴露 4 个 `RepeatButton`（`VerticalSmallDecrease`/`VerticalLargeDecrease`/`VerticalLargeIncrease`/`VerticalSmallIncrease`，**已自带 AutomationId，无需模板补 id**——计划 R-15 交接项①里"滚动条本身还没有 id"这条作废），且 `VerticalScrollBarVisibility="Auto"` 下整条在显形前报 `0x0 off=True`：显形需要指针进右缘 2px 感应带停留 ~700 ms + 一次滚轮。滑块在 15px 宽的条身里只占中间约 6px，横向剖面是 `48 48 48 48 48 48 48 62 118 161 161 161 118 62 48`——**fx=0.5 落在半透明边缘（62）**，所以量法是 `ChromeProbe.ScanThumb`：先粗扫 15 列找最亮列，再沿该列竖扫量轨道（48）/滑块芯（161）/滑块行数（约 30 行）。
+③ **滚动条没有 `Thumb` 元素，而且分紧凑/展开两态**：UIA 只暴露 4 个 `RepeatButton`（`VerticalSmallDecrease`/`VerticalLargeDecrease`/`VerticalLargeIncrease`/`VerticalSmallIncrease`，**已自带 AutomationId，无需模板补 id**——计划 R-15 交接项①里"滚动条本身还没有 id"这条作废），且 `VerticalScrollBarVisibility="Auto"` 下整条在显形前报 `0x0 off=True`。
+   **Task 18 把两个因子拆开测过，订正 Task 16 那句"指针进右缘 2px 停 ~700ms + 一次滚轮"**：
+   ① 显形**不必**碰真鼠标——`ScrollPattern.SetScrollPercent` 单独就能让条出现（第一次轮询即命中）；
+   ② 但那是**紧凑态**：实测 **3px 宽、整列 161、UIA 部件为空**（既没有轨道也没有翻页件），并且约 1 s 后自己收回 0×0——拿紧凑态当"轨道 vs 滑块"量就是在量滑块本身，这正是 Task 18 那条"轨道最暗处读到 161"红点的根因；落点也必须在滚完之后**立刻**按下，先滚完再等 1 s 才动指针就变成在空气上悬停（实测算出 `y=0`）；
+   ③ **展开**到 15px（轨道 + 4 件）只在"指针压在条上 + 真有滚轮进来"时发生：光 `SetCursorPos` 悬停（±1px 抖动、10 个落点、12 轮）和光程序化滚动都停在药丸。滚轮打在指针下的窗口上，所以发之前先 `WindowFromPoint` + **属主 PID** 验明落点确实是本测试起的 UI 进程，不是它就一个字节都不发（旧版没有这道护栏，失败现场是"指针下窗口=别家 HWND、前台=False"，滚轮滚到了用户别的界面上）。顺带一条取证口径：`WindowFromPoint` 在客户区返回的是 `Microsoft.UI.Content.DesktopChildSiteBridge` 子窗口，拿它跟顶层 `HWND` 直接比会误判成别家，要比 PID。
+   滑块在 15px 宽的条身里只占中间约 6px，横向剖面是 `48 48 48 48 48 48 48 62 118 161 161 161 118 62 48`——**fx=0.5 落在半透明边缘（62）**，所以量法是 `ChromeProbe.ScanThumb`：先粗扫 15 列找最亮列，再沿该列竖扫量轨道（48）/滑块芯（161）/滑块行数（约 30 行）。
 ④ **`AppWindow.Resize` 吃物理像素**：PerMonitorV2 之后按字面写 `1000x680` 会变成 800x544 DIP（界面小一圈）。现按 `GetDpiForWindow` 换算，设计稿的 1000x680 保持为 **DIP** 意图。
 
 ## 9. 错误处理
@@ -341,6 +352,9 @@ Stop-Process -Name ClashAcry.Tray   # 测完必须杀进程，否则污染后续
 **人工冒烟清单**（`docs/superpowers/checklists/v1-acceptance.md`）：内置内核启动 → 导入订阅 → 切节点 → 测延迟出值 → `curl -x 127.0.0.1:7897 https://www.gstatic.com/generate_204` 得 204 → 关窗后 `measure-residency.ps1` 达标 → 托盘"打开界面"重连正常 → 在线更新内核走完整进度 → 托盘退出后 `ProxyEnable=0` 且内核进程已终止。
 
 **v1 验收线**：Core 测试全绿 + FlaUI 断言全过 + 冒烟清单全过 + §10 开销线达标。
+
+> Task 18 实测（2026-10-27）：`dotnet build ClashAcry.sln -c Release` **0 警告**；Core.Tests **144/144**；UI.Tests **26/26**（改完取样形态后连跑 4 次全绿）。UI 侧五组是 Shell / Backdrop / Overview / ProxiesNoJitter / ChromeContrast，后者 7 条 `Fact`＝5 类控件极性分开判 + 1 条滚动条轨道/滑块对比 + 1 条浅色反证。两条跑法约束已被反复验证：产物目录随调用方式在 `bin\Release` 与 `bin\x64\Release` 之间变，所以**别加 `--no-build`**（加了会跑上一版二进制，报错现场与代码对不上）；Core.Tests 用生产管名，跑之前得确认没有活的 `ClashAcry.Tray.exe`。
+
 
 ## 12. 风险与开放问题
 

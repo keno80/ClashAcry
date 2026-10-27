@@ -5031,6 +5031,7 @@ git commit -m "feat(ui): 深色 chrome 逐类控件模板覆盖 + PrintWindow �
 - **R-16c｜`PrintWindow` 抓不到 WinUI 的 `Popup`，弹层只能整屏取**：`PW_RENDERFULLCONTENT(2)` 只渲主窗自己的合成面，ComboBox 下拉落在 `Microsoft.UI.Content.DesktopChildSiteBridge` 里（实测顶层 HWND 只有主窗一个，弹层不是独立窗口），抓出来是背后的页面——**看着像"下拉项是白的"，其实那一片根本没渲**。`ScreenCapture.Grab`（`CopyFromScreen` 虚拟屏）才是 `ComboBoxItem` 的唯一通路，夹具 docstring 里写明了这条，免得下次又拿主窗位图去量弹层。
 - **R-16d｜DPI 感知不一致＝整份像素断言错位，而且能假通过**：本机 125% 缩放（物理 2560x1440 / unaware 视角 2048x1152）。UIA 的 `BoundingRectangle` 是**物理**坐标，抓取进程若 unaware 则拿到**虚拟化**位图，两边差 1.25 倍：`ComboBoxItem` 全部读成同一个暗值（44/48），像"深色合格"，实际每格取的都是错位后的别的像素。修法是测试进程 `[ModuleInitializer]` 调 `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`——**不能放静态构造函数**：进程中途翻转感知会让后面的用例取到全透明像素（第一次踩就是这么坏的）。产品侧顺带查出**真 bug**：`ClashAcry.UI` 原来没有清单，进程按 unaware 跑，125% 屏上窗口矩形 1250x850 而 XAML 只画左上 1000x680、其余 DWM 拉伸（文字发虚、PrintWindow 边缘透明）。补 `src/ClashAcry.UI/app.manifest`（PerMonitorV2）+ csproj 的 `<ApplicationManifest>`，并让 `ScreenCapture.Grab` 在缩放比≠1 时**直接判失败**，把"环境不对"变成显式红而不是假绿。
 - **R-16e｜滚动条：没有 `Thumb` 元素、滑块不在条身正中**：UIA 只给 4 个 `RepeatButton`，且 `VerticalScrollBarVisibility="Auto"` 下整条显形前报 `0x0 off=True`。显形判据实测要：指针落在**页面右缘 −2 px** 的感应带、停留 ~700 ms、再加一次滚轮（同向滚轮在顶/底不产生滚动，所以 `RevealScrollBar` 来回换向）。15px 宽的条身里滑块只占中间约 6px，横向剖面 `48 48 48 48 48 48 48 62 118 161 161 161 118 62 48`——**`fx=0.5` 读到的是半透明边缘 62**，直接按它定阈值会把"滑块看得见"误判成失败（第一版就是这么红的）。`ChromeProbe.ScanThumb` 先粗扫 15 列找最亮列、再沿该列竖扫，顺带数滑块达前景的行数（判据 ≥6，实测约 30），防的是"量到 1px 抗锯齿边"那种假通过。R-15 交接项①里"`ScrollBarTrack`/`ScrollBarThumb` 要模板覆盖补 id"这条**作废**：部件自带 id（`VerticalSmallDecrease` 等），不需要覆盖模板。
+  **Task 18 订正（见 R-18b）**：这条里"显形判据实测要：指针落在页面右缘 −2px、停留 ~700ms、再加一次滚轮"是**把两个因子捆在一起观测**的结果，拆开才知道——程序化滚动单独就能让条存在（但只有 3px 药丸、无部件、~1s 后收回），而**展开**成 15px 需要"指针压在条上 + 真滚轮"，光悬停不展开。`RevealScrollBar` 因此改成"程序化滚动 → 立刻按当下药丸坐标放指针 → 滚轮"，且滚轮前先用 `WindowFromPoint` + 属主 PID 验明落点是本测试进程。
 - **R-16f｜`--force-dark` 只钉内容面，绝不写 `UiPrefs`**：`App.ForceDarkRequested` → `Root.RequestedTheme = Dark` 后按**当前偏好**重挂材质；写进 LocalSettings 等于用一条测试参数改用户的界面偏好，下一条读默认档的用例会被它污染（R-13a 同一类地雷）。另外 `AppWindow.Resize` 吃**物理像素**：PerMonitorV2 之后按字面写 1000x680 会变成 800x544 DIP（界面比设计稿小一圈），现按 `GetDpiForWindow` 换算，让 1000x680 保持 DIP 意图。
 - **开销复测（每次改 UI 的硬指标，数值已回写 spec §10）**：Tray 空闲 WS 34 MB / Private 8.5 MB，UI WS **150.7 MB / Private 89.8 MB**（对照 Task 15 的 150.6 / 90.1，DPI 改动无可测代价）。**Tray 在 UI 会话后顶到 WS 42.1 MB——40 MB 线再次被管道活动顶穿**（Task 10 的 45.4 MB 同一现象，Task 15 的 38.2 是采样时点不同，不是问题消了）。判据不放宽，trim + ReadyToRun 归 Task 17，复测口径「连开 5 次管道会话后 Tray ≤ 40 MB」。
 - **全量验证**：`dotnet build ClashAcry.sln -c Release` 0 警告 0 错误；Core.Tests **143/143**；UI.Tests **25/25**（原 20 + 本任务 5）。取样期间未启动真实 mihomo，宿主前后 HKCU `ProxyEnable=0` / `ProxyServer=127.0.0.1:8090` / `ProxyOverride` 逐字未变。
@@ -5121,7 +5122,7 @@ git commit -m "build: 自包含发布脚本 + 内置内核本机准备（packagi
 - Create: `docs/superpowers/checklists/v1-acceptance.md`
 - Modify: `docs/superpowers/specs/...-design.md`（把实测结论固化进 §4.2/§10/§12）
 
-- [ ] **Step 1: 写清单（照这份落盘，每条给可复制命令与期望输出）**
+- [x] **Step 1: 写清单（照这份落盘，每条给可复制命令与期望输出）**（`docs/superpowers/checklists/v1-acceptance.md`，12 条 + 第 0 条代理三值备份；「本会话已自测」标出 agent 已跑过的部分，其余留人工）
 
 `docs/superpowers/checklists/v1-acceptance.md` 正文：
 
@@ -5134,7 +5135,7 @@ git commit -m "build: 自包含发布脚本 + 内置内核本机准备（packagi
     dotnet build ClashAcry.sln -c Release          # 期望：0 warning 0 error
     dotnet test  tests/ClashAcry.Core.Tests -c Release
     dotnet test  tests/ClashAcry.UI.Tests  -c Release
-期望：Core 侧全绿（≥45 条）、UI 侧全绿（Shell / Backdrop / Overview / ProxiesNoJitter / ChromeContrast 五组，其中 ChromeContrast 是 5 条极性分支 + 1 条滑块对比）。
+期望：Core 侧全绿（144 条）、UI 侧全绿（26 条：Shell / Backdrop / Overview / ProxiesNoJitter / ChromeContrast 五组，其中 ChromeContrast 是 5 类控件的极性分开判 + 1 条滑块对比 + 1 条浅色反证）。
 
 ## 2. 内置内核就位
     powershell -File scripts/fetch-bundled-core.ps1
@@ -5191,7 +5192,7 @@ git commit -m "build: 自包含发布脚本 + 内置内核本机准备（packagi
 期望：`ProxyEnable` 为 0；无 mihomo 残留进程。
 ```
 
-- [ ] **Step 2: 跑全量自动化**
+- [x] **Step 2: 跑全量自动化**
 
 ```bash
 dotnet build ClashAcry.sln -c Release
@@ -5199,6 +5200,21 @@ dotnet test tests/ClashAcry.Core.Tests -c Release
 dotnet test tests/ClashAcry.UI.Tests -c Release
 ```
 Expected: 三条命令全绿，构建无警告。
+
+实测结论（Task 18 复核，2026-10-27）：
+
+- **R-18a｜全量绿了，但三条随机红的成因不是阈值，是判据形态**（已修，`ChromeContrastTests` + `ChromeProbe.BandStats`）：
+  三条命令现在稳定全绿（`dotnet build` 0 警告；Core **144/144**；UI **26/26** 连跑 4 次）。本轮之前它在同一份代码上随机红三种样子，逐条量过渲染像素才定下来：
+  ① `ImportUrlBox` 单点读到 238（判据 ≤110）——带 `Header` 的 `TextBox` 的 UIA 矩形把**标签行 + 字段**一起框进来（实测 771×75），占位符字脊正好 238、字段底 35，两者只隔 **5 px**，而 `ChromeProbe.Sample` 取的是 3×3 邻域**最亮**那个像素：布局漂几个像素就从"判底"翻成"判字"。
+  ② `Node_n1` 单点读到 47（判据 ≥140）——同一个刀口反过来：落在节点名的第一道字竖上，名字最长一段连续亮只有 7 px。
+  ③ 两条都是**单点取样**的固有毛病，不是深色档真发白。判据形态因此改成**区域统计**：底色用第 25 百分位（实测深色档 48~70、浅色档 240 上下），亮特征用波段最大值 + 与底色的跨度（实测亮特征 204~255、跨度 140~200），阈值线（110/140/60）一个都没放宽；抓帧前加 `WaitLayoutSettled`（连续三次矩形一致）。跨度与极性以及"部件找不到＝不通过"沿用 R-16 口径。
+  补一条反证 `FillCriterion_LightThemeReallyReadsLight`：主题单选真的切到浅色后，同一量法必须读到发白，否则"≤110"是在自说自话。单点时代没法这样核对，所以这条是新增的**区分力证明**，不是新增的宽松。
+- **R-18b｜订正 R-16e 的显形手法**：R-16e 说"指针落在页面右缘 −2px 停 700ms 再加一次滚轮"——那是**唯一**观测到的组合，本轮把两个因子拆开测过才明白各自职责：
+  ① `ScrollPattern.SetScrollPercent` 单独就能让条**存在**（第一次轮询即命中），不必真鼠标；
+  ② 但此时是**紧凑态**：实测 **3px 宽、整列 161、UIA 部件为空**（没有轨道也没有翻页件），并且 ~1 s 后自己收回 0×0——拿它当"轨道 vs 滑块"量就是在量滑块本身，这就是本轮"轨道最暗处读到 161"那条红的根因；
+  ③ 展开到 15px（轨道 + 4 个 `RepeatButton`）**只在"指针压在条上 + 真有滚轮进来"时发生**：光悬停（含 ±1px 抖动、10 个落点、12 轮）和光程序化滚动都停在药丸。所以滚轮留回来了，但发之前先 `WindowFromPoint` + 属主 PID 验明落点确实是本测试起的 UI 进程——不是它就一个字节都不发（原红现场：指针下窗口=别家 HWND、前台=False，滚轮滚到了用户别的界面上）。
+  ④ 顺带一条取证口径：`WindowFromPoint` 在客户区返回的是 `Microsoft.UI.Content.DesktopChildSiteBridge`（子窗口），拿它和顶层 `HWND` 直接比会误判成"别家窗口"，要比 **PID**。
+- **跑法两条陷阱（写进清单第 1 条）**：`dotnet build ClashAcry.sln -c Release` 落 `bin\x64\Release`，`dotnet test … -c Release` 重新构建到 `bin\Release`；`UiAppHarness.ResolveExe()` 优先取 `bin\x64\Release`。所以**别加 `--no-build` 跑单条**——本轮第一次复现就踩了：改完代码 `--no-build` 跑的仍是上一版二进制，报错信息与现场对不上。
 
 - [ ] **Step 3: 人工冒烟（用户参与点）**
 

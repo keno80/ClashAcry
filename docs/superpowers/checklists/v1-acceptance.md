@@ -3,6 +3,14 @@
 执行顺序即编号。带**【人眼】**的只能人工确认，其余给可复制命令与期望输出。
 标了「本会话已自测」的条目是 2026-10-27 由 agent 跑过的，数值来自 spec §10 的 Task 17 表；其余等人工过一遍。
 
+**合并后复测（同一天的第二轮，产物为 `main` 重打包的 `ClashAcry-v0.1.0-win-x64.zip` 解包件）**：
+第 1/2 条重跑全绿；第 3 条的**两条通路（loopback HTTP URL 与本地 path）都从命名管道打通过**（`artifacts/smoke/pipe-probe.ps1`，
+回 `config_file`、原件按哈希落 `imports\`、**源 yaml mtime 与字节数逐字未变**），只剩行内文案与文件对话框归人眼；
+第 4 条的**内核半程真跑**（`core.start` → `Running`、9097/7897 都在监听、`/version` 无 token 401 带 token 200 回 `v1.19.33`、
+三条 `/proxies/t*/delay` 200 = 72/62/60 ms、`core.stop` 后 mihomo 从进程表消失且端口释放）；
+第 5 条**没动**：agent 全程没发 `sysproxy.set`，HKCU 三值与第 0 条抄下的原值逐字一致（拨系统代理这件事归人眼，见下）。
+第 12 条也**没做**：这轮的 Tray 是硬杀收尾（`--no-tray` 的 CI 形态没有优雅出口），托盘「退出」的清理链仍要你亲手点一次。
+
 环境前提（AGENTS.md）：本机 .NET 10 SDK 在 `%LOCALAPPDATA%\Microsoft\dotnet`，Git Bash 里先
 `export PATH=/c/Users/Keno/AppData/Local/Microsoft/dotnet:$PATH`，否则 `dotnet` 会报 "No .NET SDKs were found"。
 
@@ -118,8 +126,9 @@ powershell -File scripts/measure-residency.ps1 -ProcessName mihomo -Json
 ```
 
 期望：`Get-Process ClashAcry.UI` 无输出（关窗即退）；
-- **Tray 空闲态**（内核已停或没起）WS ≤ **40 MB** —— 本会话实测 空闲 **31.4** / 连开 5 次管道会话后 **37.4~37.8**；
-- **满载常驻**（Tray + mihomo 在跑，UI 已关）合计 ≤ **80 MB** —— 本会话 3 分钟 soak 实测 **74.0~77.5**（mihomo 自身 WS 25~26 MB）。
+- **Tray 空闲态** WS ≤ **40 MB** —— 判据**只在「这一进程生命周期里没起过内核」的新 Tray 上读**（2026-10-27 复测：冷启动 5 s **33.4**；连开 5 次管道会话后 **37.4~37.8**）。
+  **`core.stop` 不归还工作集**：跑过内核再停掉的 Tray，60 s 后仍读 **49.0**（Private 只有 12.3），这一格由下面的合计线判——别拿它当超标，也别为此放宽 40。
+- **满载常驻**（Tray + mihomo 在跑，UI 已关）合计 ≤ **80 MB** —— 本会话 3 分钟 soak 实测 **74.0~77.5**（mihomo 自身 WS 25~26 MB）；合并后复测单点 **48.0 + 27.0 = 75.0**。
 
 口径是 Task 17 裁定的「按空闲/满载拆两格」（spec §10 开头的判据表）：40 只管空闲态，
 满载那格由合计线管。这一条**不是把 40 放宽**——内核在跑时 Tray 读 49~51 MB 是实测事实，写在这里备查。

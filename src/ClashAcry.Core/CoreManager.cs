@@ -53,9 +53,10 @@ public sealed class CoreManager : IAsyncDisposable
     }
 
     public Task<bool> StartAsync(CancellationToken ct) => InLifecycle(() => StartLockedAsync(ct), ct);
-    // 样例这里写的是 `InLifecycle(async () => { await StopLockedAsync(); }, ct)`：无返回值的 async lambda
-    // 推不出 InLifecycle<T> 的 T（CS0411）。按 R-8c 给 DisposeAsync 的同一形状补 `return true`。
-    public Task StopAsync(CancellationToken ct) => InLifecycle(async () => { await StopLockedAsync(); return true; }, ct);
+    // 裁定 R-10b：声明从非泛型 `Task` 改回 `Task<bool>`。实现体本来就 `return true`，只是原声明把结果
+    // 洗掉了，于是 Task 10 的 `core.stop` 回包无从表达「真的停了」。Task 8 现有用例都是
+    // `await mgr.StopAsync(...)` 不取值，改宽返回类型不破任何断言。
+    public Task<bool> StopAsync(CancellationToken ct) => InLifecycle(async () => { await StopLockedAsync(); return true; }, ct);
 
     /// Task 11 用：在生命周期锁内换文件，内核由本方法负责停/起
     public Task<SwapOutcome> SwapExecutableAsync(Func<Task> replaceFiles, CancellationToken ct) =>

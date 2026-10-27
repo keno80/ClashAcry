@@ -198,6 +198,73 @@ public class PipeRoundTripTests
     }
 
     [Fact]
+    public async Task Completion_Faults_WhenAcceptLoopDies_AfterStart()
+    {
+        // 裁定 R-10j：Task 9 的 I-1 把「就绪之后 accept 循环死了」这条唯一去处放在 DisposeAsync 的重抛上，
+        // 但 Tray 不该为了看见故障而必须走到退出路径（图标还在、UI 永远连不上，比直接死更难诊断）。
+        // 死因用 internal 的 PipeFactory 注入：Task 9 的建实例失败分支除了真把 Windows 命名管道耗尽以外
+        // 没有任何可达路径，注入前这条死因从来没有被任何测试观察过。
+        var server = new PipeServer(EchoHandler);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await server.StartAsync(cts.Token);
+        Assert.False(server.Completion.IsCompleted);                       // 循环活着，观察面不抢先结束
+        var faulted = server.Completion.ContinueWith(_ => { }, TaskContinuationOptions.OnlyOnFaulted);
+
+        var boom = new IOException("模拟：就绪之后建下一台实例失败");
+        server.PipeFactory = () => throw boom;
+        await using (var client = new PipeClient())                        // 连一个客户端，逼循环去建第二台
+        {
+            Assert.True(await client.WaitUpAsync(TimeSpan.FromSeconds(5)));
+            await client.RequestAsync(CmdTypes.Handshake, null, cts.Token);
+        }
+
+        var seen = await Task.WhenAny(faulted, Task.Delay(5000));
+        Assert.True(ReferenceEquals(faulted, seen), $"续接未被 OnlyOnFaulted 触发：state={server.Completion.Status}");
+        Assert.True(server.Completion.IsFaulted, "观察面必须是**故障**收尾，不是「结束」");   // 断言：不靠 DisposeAsync 就看见死因
+        Assert.NotNull(server.Completion.Exception);
+        Assert.Same(boom, server.Completion.Exception!.InnerException);
+        // 同一条死因的既有去处不变：DisposeAsync 仍然重抛（Task 10 的退出钩子必须 await 它一次）。
+        var rethrown = await Assert.ThrowsAsync<IOException>(() => server.DisposeAsync().AsTask());
+        Assert.Same(boom, rethrown);
+    }
+
+    [Fact]
+    public async Task Completion_StaysUnfaulted_WhenLoopEndsByDispose()
+    {
+        // R-10j 的反向锁：正常退出（取消）不许让 Tray 的 OnlyOnFaulted 续接挂上一句「服务异常」的假故障。
+        var server = new PipeServer(EchoHandler);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await server.StartAsync(cts.Token);
+        await server.DisposeAsync();
+
+        Assert.False(server.Completion.IsFaulted);
+    }
+
+    [Fact]
+    public async Task SecondDisposeAsync_RethrowsTheSameFault()
+    {
+        // Task 9 遗留 Minor 的现形处：`_acceptFault` 不清空，第二次 DisposeAsync 会再抛同一个异常。
+        // Tray 的退出钩子因此**只 await 一次**（R-10j①），并用 Interlocked 挡住菜单连点。
+        var server = new PipeServer(EchoHandler);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await server.StartAsync(cts.Token);
+        var boom = new IOException("模拟：就绪之后建下一台实例失败");
+        server.PipeFactory = () => throw boom;
+        await using (var client = new PipeClient())
+        {
+            Assert.True(await client.WaitUpAsync(TimeSpan.FromSeconds(5)));
+            await client.RequestAsync(CmdTypes.Handshake, null, cts.Token);
+        }
+        var faulted = server.Completion.ContinueWith(_ => { }, TaskContinuationOptions.OnlyOnFaulted);
+        Assert.Same(faulted, await Task.WhenAny(faulted, Task.Delay(5000)));
+
+        var first = await Assert.ThrowsAsync<IOException>(() => server.DisposeAsync().AsTask());
+        var second = await Assert.ThrowsAsync<IOException>(() => server.DisposeAsync().AsTask());
+        Assert.Same(boom, first);
+        Assert.Same(first, second);
+    }
+
+    [Fact]
     public void ServerPipe_AclGrantsCurrentUser_AndNothingElse()
     {
         // 裁定 R-9f（实测）：SetAccessControl 在 .NET 10 抛 UnauthorizedAccessException，

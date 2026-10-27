@@ -16,5 +16,9 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\ClashAcry.Core\ClashAcry.Core.csproj" />
     <ProjectReference Include="..\..\src\ClashAcry.Contracts\ClashAcry.Contracts.csproj" />
+    <!-- 裁定 R-10k：TrayCommandRouting 住在 ClashAcry.Tray（命令路由表是 Tray 宿主的部件），测试按计划放这里
+         → 不加引用就是 CS0246。控制器已实测：SelfContained 的 WinExe 项目可被 net10.0-windows 测试项目引用，
+         产出的 ClashAcry.Tray.dll 能被测试主机加载。 -->
+    <ProjectReference Include="..\..\src\ClashAcry.Tray\ClashAcry.Tray.csproj" />
   </ItemGroup>
 </Project>

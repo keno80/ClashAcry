@@ -53,6 +53,14 @@ mihomo.exe                原版 Go 内核，external-controller 127.0.0.1:9097
 
 关窗语义：UI 的窗口关闭 = 进程退出（`Application.Exit`），代理链路因内核归 Tray 而不中断。单实例：二次启动 UI 时经管道发 `ui.focus` 让既有窗口前置，自身退出。
 
+**Tray 退出路径实测（Task 10，2026-10-27）**：`OutputType=WinExe` 的进程**不继承父控制台**——从 Git Bash 起它之后 `kill -INT` 打不进去，`Console.CancelKeyPress` 与 `SetConsoleCtrlHandler` 两条都没被触发（进程照跑、管道照应答）。所以优雅收尾在发布形态下**只有一条真路**：托盘菜单「退出」→ `TrayHost.ShutdownAsync`（摘图标 → 关系统代理 → 停内核 → 关管道 → `Environment.Exit`）。两条连带结论：① `--no-tray` 的 CI/FlaUI 形态因此没有优雅出口，收尾只能硬杀进程（Task 12 需要它自己可控地停宿主时再补一条命令）；② 计划里「WinExe 从终端起来时 CancelKeyPress 是可用的主路」这句被实测否证，代码注释已按实测改写。
+
+**托盘两条尚未证的 Win32 细节（留给 Task 18 的人工点击）**：① `HWND_MESSAGE` 消息窗口上 `TrackPopupMenuEx(TPM_RETURNCMD)` 是否真能响应点击（消息窗口不能 `SetForegroundWindow`）；不响应就换成普通隐藏窗口（`WS_POPUP` 不显示）+ `SetForegroundWindow` + `GetWindowRect` 定位。② 图标在 Win11 默认落在**隐藏图标飞出区**，不在常驻可见区——冒烟清单要写清去哪儿找。
+
+**tooltip 泵只在文案变化时才 `NIM_MODIFY`**（Task 10 实测订正）：无条件每 2 s 刷一次会把用户正悬停 reading 的提示气泡打断，等于「没人能读完 tooltip」；现在常态下这条循环什么都不做。
+
+**发布产物的一条启动期地雷（Task 10 实测）**：`publish\` 目录里残留一份旧的 **trimmed** `System.Private.CoreLib.dll`（2.5 MB，Task 2 的 trim 实验留下）时，重发布**不会**覆盖它，产物一启动就是 `MissingMethodException`（先是 `MemoryExtensions.Contains`，改调用后换成 `Console.get_Error`——被裁掉的 BCL 成员一个接一个冒出来），而框架依赖的 `dotnet run` 一切正常，极易误判成代码 bug。规则：**发布前先清 `publish\` 目录**（Task 17 的发布脚本必须带上这一步）。
+
 ## 4. 契约
 
 ### 4.1 命名管道 `clashacry.tray.v1`
@@ -195,6 +203,19 @@ Start-Process src\ClashAcry.Tray\bin\Release\net10.0-windows10.0.19041.0\win-x64
 powershell -File scripts/measure-residency.ps1 -ProcessName ClashAcry.Tray -Json   # → {"name":"ClashAcry.Tray","working_set_mb":16.4,"private_mb":4.6}
 Stop-Process -Name ClashAcry.Tray   # 测完必须杀进程，否则污染后续测量
 ```
+
+**Task 10 复测（2026-10-27，真宿主：托盘 + 管道 + 路由 + tooltip 泵，self-contained 发布产物）**：
+
+| 采样点 | WS | Private |
+|---|---|---|
+| 起来 30 s（空闲） | 36.2 MB | 9.7 MB |
+| 起来 90 s（空闲） | 37.7 MB | 10.4 MB |
+| 连开 5 次管道会话后 | 45.4 MB | 15.8 MB |
+| 之后再静置 30 s | 39.3 MB | 9.7 MB |
+
+判据结论：**按字面不过**——空壳基线的 16.4 MB 是「什么都没装」的数字，装上 SettingsStore / HttpClient / 管道 / System.Text.Json 之后 WS 常态 37–45 MB，正好压在 40 MB 线上、被管道活动顶穿。三条已排除的坏味道：① 不是泄漏（连开 33 次会话后仍是 44.7 MB / Private 13.9 MB，回落后 Private 回到 9.7 MB）；② 不是 GC 配置问题（`ServerGarbageCollection=false`、`ConcurrentGarbageCollection=false` 已生效，Private 只有 ~10 MB，多出来的是 self-contained 运行时的**映像共享页**，算在 WS 里）；③ 合计线仍守住（45 + mihomo ≈ 25 MB ≈ 70 MB ≤ 80 MB）。
+处理：不放宽判据，瘦身归到 Task 17（发布产物）一起做——`PublishTrimmed`（§11 探针第 4 条本来就要求它）+ ReadyToRun + `JsonSerializer` 源生成，届时以「管道活动后 WS ≤ 40 MB」为复测口径。
+
 
 ## 11. 测试与验收
 

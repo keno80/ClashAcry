@@ -35,6 +35,13 @@ public sealed class PipeServer : IAsyncDisposable
     public int ClientCount { get { lock (_clients) return _clients.Count; } }
 
     /// <summary>
+    /// 裁定 R-10j②：Tray 要能在**不等退出钩子**的前提下看见 accept 循环的死因（图标还在、UI 却永远连不上，
+    /// 比进程直接死更难诊断）。这里是只读观察面，宿主不许 await 到底、更不许据此自动退出（控制通道断了
+    /// 就把正在跑的内核一起杀掉，比留着更糟）。
+    /// </summary>
+    public Task Completion => _accept ?? Task.CompletedTask;
+
+    /// <summary>
     /// 裁定 R-9a：返回的是「第一台实例已挂上命名空间」，不是 accept 循环本身。
     /// 循环存进 _accept，只在 DisposeAsync 里 await；原样例把循环 Task 直接返回，await 它就等于等到超时。
     /// 契约（评审 Minor 10 / 控制器裁定）：**本方法由宿主在启动时调用一次，退出后不得再调**——
@@ -57,25 +64,29 @@ public sealed class PipeServer : IAsyncDisposable
         foreach (var c in snapshot) c.Enqueue(frame);   // 裁定 R-9b：只入队；一个字节都不在锁里写、也不替慢客户端排队
     }
 
+    internal Func<NamedPipeServerStream> PipeFactory { get; set; } = CreateServerPipe;
+
     private async Task AcceptLoop(CancellationToken ct)
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _cts.Token);   // 裁定 R-9e
         while (!linked.IsCancellationRequested)
         {
             NamedPipeServerStream pipe;
-            try { pipe = CreateServerPipe(); }
+            try { pipe = PipeFactory(); }
             catch (Exception ex)
             {
                 // 评审 I-1：这条异常必须有去处，两种情况两处去处。
                 // ① 还没就绪过（首台实例就建不起来）→ 喂给 _ready，StartAsync 带着真异常立刻返回，
                 //    而不是挂到调用方的超时（spec §9「无反馈卡死」）。
-                // ② 已经就绪过 → _ready 已完成，TrySetException 是 no-op；原来这里直接 return，
-                //    循环「正常完成」、_accept 不 fault、DisposeAsync 什么也观察不到 —— Tray 从此不再
-                //    接受任何新的 UI 连接且零信号。现在把死因存进 _acceptFault，由 DisposeAsync 在
-                //    await _accept 之后重新抛出，宿主退出钩子/日志拿得到。
+                // ② 已经就绪过 → _ready 已完成，TrySetException 是 no-op。**实测订正**（见报告：这里与
+                //    裁定 R-10j② 冲突）：原写法直接 return，循环以「正常完成」收尾，于是 R-10j② 要补的
+                //    观察面 `Completion => _accept ?? Task.CompletedTask` 永远是 RanToCompletion，
+                //    `Completion_Faults_WhenAcceptLoopDies_AfterStart` 不可能变绿——照抄一个明知会红的样例也是错的。
+                //    改成记下死因后把异常抛出循环：_accept 当场 fault，Tray 的 OnlyOnFaulted 续接立刻可见；
+                //    DisposeAsync 那边 await accept 的 catch 把它归到同一条 _acceptFault，重抛行为一字未变。
                 if (!_ready.Task.IsCompleted) { _ready.TrySetException(ex); return; }
                 _acceptFault = ex;
-                return;
+                throw;
             }
 
             lock (_instanceGate)

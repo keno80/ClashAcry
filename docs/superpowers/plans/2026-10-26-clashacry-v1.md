@@ -3068,11 +3068,11 @@ Task 9 修复轮 1 实测回写（2026-10-26 / win-x64 / .NET 10 SDK 10.0.203，
 - **R-10h（Important，用户红线）：`RegistrySnapshot` 必须放进夹具，不能只放那一条显式的 sysproxy 用例。** `EveryDeclaredCommand_HasAHandler` 的 `[InlineData(CmdTypes.SysProxySet)]` 会**真的**调用 `SystemProxy.Enable("127.0.0.1:<port>", …)`——它会改写 `ProxyServer`，把本机那个**别的软件**留下的 `127.0.0.1:8090` 冲掉（红线：指向其他软件的代理绝不触碰）。裁定：`TrayHarness : IDisposable`，构造时取 `new RegistrySnapshot()`、`Dispose` 里释放，`[Collection("RegistryGuard")]` 标注测试类（R-9g 已全局串行，集合标注表达的是意图，将来放开并行时它是唯一防线）；`PayloadFor(SysProxySet)` 用 `enabled = false` 之外**仍要**快照，因为 `Disable()` 一样写注册表。测试夹具的 `mixed_port` 用**随机空闲端口**（Task 8 的 `FreePort()` 形状），别用 7897，避免和真 Tray 撞。
 - **R-10i（Important，Task 8 踩过的坑原样复发）：夹具必须自带 `FakeProbe`，否则「启动内核」这条在测试里永远失败。** WireMock 就挂在 controller 端口上冒充内核应答面，而 `CoreManager.StartAsync` 的**预检**用真实 `TcpAlive` 探那个端口（R-8a 就是这条），于是「端口被别的进程占了」判据必然为真、启动直接被拒。裁定：`TrayHarness` 复刻 Task 8 的 `sealed class FakeProbe : CoreProbe`，override `ControllerPortOccupied => false`、`ControllerAlive` 走可选 `TaskCompletionSource` 闸门。`CoreStart_IsSerialized_TwoConcurrentRequestsOneAttempt` **双断言**：`ConcurrentGuardHits == 1` **且** 假内核 `SpawnCount == 1`（launchFactory 自己计数），并且用闸门把两次 `Handle` 的重叠期钉住——不加闸门时「第二个请求恰好在第一个还没探完时进来」是靠调度碰运气。
 - **R-10j（Important，接 Task 9 的账）：Tray 必须观察 accept 循环的死因，且只 `await DisposeAsync()` 一次。** Task 9 的 I-1 修复把「就绪之后 accept 循环死了」这条唯一去处放在 `PipeServer.DisposeAsync` 的重新抛出上——**不 await 就永远看不见**（复评原话：宿主必须 await）。同时 Task 9 遗留的 Minor：第二次 `DisposeAsync()` 会**再抛同一个异常**（`_acceptFault` 不清空）。裁定：① 退出钩子里 `try { await Pipe.DisposeAsync(); } catch (Exception ex) { /* 记一行：管道服务此前已故障 */ }`，**只调一次**，`QuitAsync` 上用一个 `Interlocked` 标志挡住菜单连点；② 本任务给 `PipeServer` 补一个**只读观察面** `public Task Completion => _accept ?? Task.CompletedTask;`（三行 + 一条测试 `Completion_Faults_WhenAcceptLoopDies_AfterStart`），Tray 里 `_ = Pipe.Completion.ContinueWith(t => _icon?.SetTip("ClashAcry · 服务异常，请重启托盘"), OnlyOnFaulted)`——**不许自动退出**（控制通道断了就把正在跑的内核一起杀掉，比留着更糟），也不新建日志文件（spec/计划里从来没有 Tray 日志这一项，本任务不发明）。
-- **R-10k（Minor，但要写死省一轮返工）：`tests/ClashAcry.Core.Tests` 要加对 Tray 项目的引用。** 路由住在 `ClashAcry.Tray`，测试却按计划放在 Core.Tests → 不加引用就是 CS0246。**控制器已实测**（临时加引用 + 一个 `ClashAcry.Tray` 命名空间下的探针用例，`dotnet test --filter` 跑过 1/1，11 ms，随后完全回退）：`SelfContained` 的 WinExe 项目可以被 net10.0-windows 测试项目正常引用，产出 `ClashAcry.Tray.dll` 被测试加载。裁定：csproj 加 `<ProjectReference Include="..\..\src\ClashAcry.Tray\ClashAcry.Tray.csproj" />`，测试文件照计划放 Core.Tests；**同时** `ClashAcry.Tray.csproj` 加 `<ItemGroup><InternalsVisibleTo Include="ClashAcry.Core.Tests" /></ItemGroup>`（R-10c 的 `DecodeTrayParam` 是 internal，没有这条就是 CS0117）。另外 `Program.cs` 里 `SetConsoleCtrlHandler` 的委托**必须存静态字段**（临时委托会被 GC 掉，回调进来就是 AV）；WinExe 从终端启动时 `Console.CancelKeyPress` 是可用的主路，P/Invoke 只是补强——两者都写，但报告里说明哪条真的被测到。
+- **R-10k（Minor，但要写死省一轮返工）：`tests/ClashAcry.Core.Tests` 要加对 Tray 项目的引用。** 路由住在 `ClashAcry.Tray`，测试却按计划放在 Core.Tests → 不加引用就是 CS0246。**控制器已实测**（临时加引用 + 一个 `ClashAcry.Tray` 命名空间下的探针用例，`dotnet test --filter` 跑过 1/1，11 ms，随后完全回退）：`SelfContained` 的 WinExe 项目可以被 net10.0-windows 测试项目正常引用，产出 `ClashAcry.Tray.dll` 被测试加载。裁定：csproj 加 `<ProjectReference Include="..\..\src\ClashAcry.Tray\ClashAcry.Tray.csproj" />`，测试文件照计划放 Core.Tests；**同时** `ClashAcry.Tray.csproj` 加 `<ItemGroup><InternalsVisibleTo Include="ClashAcry.Core.Tests" /></ItemGroup>`（R-10c 的 `DecodeTrayParam` 是 internal，没有这条就是 CS0117）。另外 `Program.cs` 里 `SetConsoleCtrlHandler` 的委托**必须存静态字段**（临时委托会被 GC 掉，回调进来就是 AV）；WinExe 从终端启动时 `Console.CancelKeyPress` 是可用的主路，P/Invoke 只是补强——两者都写，但报告里说明哪条真的被测到。**实测订正（Task 10 Step 6）**：这条裁定说错了——`WinExe` 不继承父控制台，从 Git Bash 起发布产物后 `kill -INT` 打不进去，②③ 两条**都没被触发**（进程照跑、管道照应答）；发布形态下唯一可达的优雅出口是托盘菜单「退出」。`--no-tray` 的 CI 形态因此没有优雅收尾，Task 12 若要它自己停宿主，得补一条命令（已记进该任务的账）。
 - **R-10l（红线，手动验证的边界）：Step 6 的人工点击**只允许**「启动内核 / 停止内核 / 打开界面 / 退出」，禁止点「切换系统代理」到开启状态**，也禁止在测试之外触发 `Enable`。本机 `ProxyServer` 现在是别的软件写的 `127.0.0.1:8090`（`ProxyEnable=0`），`Enable` 会把它覆盖掉。跑宿主前后各查一次 `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`（`reg query "...Internet Settings" //v ProxyEnable` 与 `//v ProxyServer`，Git Bash 下 `//v`），两个值必须逐字不变，并把 before/after 写进报告。Tray 冷启动会调 `CleanupIfStale`——它只清「指向我们端口且内核已死」的残留（Task 7 实现，`8090` 不匹配、`ProxyEnable=0` 时更早返回），所以这一步是安全的，但**这条安全性正是报告里要证明的东西**。
 - **R-10m（样例里两处 WireMock 断言不可靠）：`ModeSet` 用例不许 `LogEntries.Last()`。** Task 6 实测过 WireMock 的 admin 请求会混进 `LogEntries`、顺序在不同版本不一致（`MihomoClientTests.cs:57`/`:105` 的夹具注释就是这条）。改成按路径取：`_wire.LogEntries.Select(l => l.RequestMessage!).Single(m => m.Path == "/configs")`，并断言 body 里的 `mode` 值（`PUT /configs` 是 mode 端点，形状见 spec §4.2，别在路由里凭记忆拼 URL——路由只调 `_client.SetModeAsync`）。
 
-- [ ] **Step 1: 写路由的失败测试（不依赖托盘）**
+- [x] **Step 1: 写路由的失败测试（不依赖托盘）**
 
 ```csharp
 public class TrayCommandRoutingTests
@@ -3177,12 +3177,12 @@ public class TrayCommandRoutingTests
 
 `TrayHarness` 是测试夹具（放在 `tests/ClashAcry.Core.Tests/TrayHarness.cs`）：临时 `AppPaths` + 真 `SettingsStore` + `WireMock` controller + `CoreManager(…, CmdLaunch)` 假内核 + `TrayCommandRouting`，除上面用到的 `Routing/Core/Store/Wire` 外还暴露 `Paths`（那份临时 `AppPaths`）与 `WireUrl`（WireMock 基址），供订阅导入断言落盘位置；并提供 `JsonElement? PayloadFor(string cmd)` 按命令给出合法 payload（`mode.set` → `{"mode":"global"}`；`sysproxy.set` → `{"enabled":true}`；`settings.update` → `{"mixed_port":7899}`；`sub.import` → `JsonUtil.Element(new ImportRequest(WireUrl + "/sub"))`；其余 → `null`）。`unknown` 之外的每条命令都必须真的执行动作，`EveryDeclaredCommand` 不允许用「返回 null reply」糊过去。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter TrayCommandRoutingTests`
 Expected: FAIL（类型不存在）
 
-- [ ] **Step 3: 实现 TrayCommandRouting（命令表）**
+- [x] **Step 3: 实现 TrayCommandRouting（命令表）**
 
 ```csharp
 // TrayCommandRouting.cs
@@ -3356,7 +3356,7 @@ public sealed record SettingsSnapshot([property: JsonPropertyName("sys_proxy_ena
 - `ApplySysProxy` 用 `settings.MixedPort` 拼地址，**不许硬编码 7897**。
 - `ImportAsync` 失败时 `ConfigFile` 仍是旧配置路径（`SubscriptionImport` 的失败语义，Task 5），**永不清空配置**（spec §9）。
 
-- [ ] **Step 4: 实现 P/Invoke 托盘（零 WinForms）**
+- [x] **Step 4: 实现 P/Invoke 托盘（零 WinForms）**
 
 ```csharp
 // NativeMethods.cs
@@ -3506,7 +3506,7 @@ public sealed class Win32NotifyIcon : IDisposable
 
 `OnMessage` 必须是静态且能把消息路由回实例：实现时用一个 `static readonly Dictionary<IntPtr, Win32NotifyIcon> ByHwnd`（构造时登记 `_hwnd`，`Dispose` 摘除），静态 `WndProc` 按 `h` 查实例后调 `HandleTray(uint iconId, int mouseMsg)`。**回调分派不许写在 lambda 里造成委托被 GC**（`_proc` 已作为字段持有，这是硬性要求）。`HandleTray` 行为：`mouseMsg` 为 `WM_RBUTTONUP`/`WM_CONTEXTMENU` → `GetCursorPos` → `CreatePopupMenu` → 逐条 `AppendMenuW(MF_STRING, id, text)` → `TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_NONOTIFY, x, y, _hwnd, IntPtr.Zero)` → 返回的 id 找到对应 `OnPick` 调用；`WM_LBUTTONDBLCLK` → 直接执行 id 1（打开界面）那条。菜单项固定五条：`1 打开界面` / `3 启动内核` / `4 停止内核` / `5 切换系统代理` / `7 退出`（id 留空隙便于以后插分隔线）。
 
-- [ ] **Step 5: 实现 TrayHost 与 Program**
+- [x] **Step 5: 实现 TrayHost 与 Program**
 
 `TrayHost.RunAsync` 必须按此顺序：
 1. `AppPaths.Default().EnsureCreated()`；`SettingsStore` → `Settings`
@@ -3633,7 +3633,12 @@ dotnet run --project src/ClashAcry.Tray -c Release
 Expected: 测试 PASS；系统托盘出现图标，右键菜单五条可点，「停止内核」后 tooltip 更新，退出后图标消失且 `ProxyEnable=0`。
 `powershell -File scripts/measure-residency.ps1 -ProcessName ClashAcry.Tray` → 记录数值，必须 ≤ 40 MB（超标停下来报告，不放判据）。
 
-- [ ] **Step 7: 提交**
+Task 10 收尾实测（2026-10-27，见 `task-10-report.md`）——**这条不勾，剩三个人工点击**：
+- 已过（机器）：99/99 用例绿；self-contained 发布产物起来后**空日志**（`Win32NotifyIcon` 构造里 `RegisterClassW`/`CreateWindowExW`/`LoadImageW`/`NIM_ADD` 任一失败都是抛异常即退，进程活了 6 分钟 = 图标确实挂上了）；经**真命名管道**打通 `handshake`（回 `state=Stopped`/`mixed_port=7897`，secret 只报长度不落屏）、`core.update`（诚实桩错「内核在线更新在 Task 11 落地」）、`nope`（`unknown command: nope`）、`mode.set`（真连 9097 被拒 → 走 `Frame.Error` 而不是挂住）；宿主前后 `ProxyEnable`/`ProxyServer`/`ProxyOverride` 三个值逐字未变（`127.0.0.1:8090` 是别的软件的，红线守住）。
+- 未过（要人眼/人手，挪 Task 18 冒烟）：① 图标在 Win11 **隐藏图标飞出区**里肉眼可见；② 右键五条菜单**真的可点**（`HWND_MESSAGE` 上 `TrackPopupMenuEx` 能否响应点击这条**未证**，见 spec §3）；③ 点「退出」后图标消失且 `ProxyEnable=0`。第 ③ 条机器测不了的原因见下面 R-10k 的实测订正。
+- 开销线：**按字面不过**（空闲 36–38 MB，5 次管道会话后顶到 45.4 MB，静置 30 s 回落到 39.3 MB / Private 9.7 MB；33 次会话不涨 = 不是泄漏）。数字与判据处置回写 spec §10，瘦身归 Task 17（trim/R2R/JSON 源生成），**没有放宽这条线**。
+
+- [x] **Step 7: 提交**
 
 ```bash
 git add src/ClashAcry.Tray src/ClashAcry.Contracts/Commands.cs tests/ClashAcry.Core.Tests/TrayCommandRoutingTests.cs tests/ClashAcry.Core.Tests/TrayHarness.cs

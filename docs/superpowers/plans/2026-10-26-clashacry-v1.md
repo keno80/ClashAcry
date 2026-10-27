@@ -5241,27 +5241,26 @@ Expected: 三条命令全绿，构建无警告。
 
 派发状态（2026-10-27）：**尚未开始**——这一步只能在用户机器上真跑（要真订阅、真内核、真人眼）。清单已落盘且每条都给了可复制命令与期望输出；agent 已自测的部分在清单里标了「本会话已自测」（第 1/2/6 条的脚本半程与开销数值、第 4/5 条的管道与端口侧旁证），剩下第 0 条（先抄 HKCU 代理三值）与第 3/4/5/7/8/9/10/11/12 条的人工动作归用户。
 
-- [ ] **Step 4: 回写 spec 并合并**
+- [x] **Step 4: 回写 spec 并合并**
 
 把 §4.2 端点表、§10 实测列、§12 已消解的风险条目全部定稿。
 
-实测进度（2026-10-27）：回写已完成并推送——§4.2 端点表按 Task 1 真机逐条核实过（provider 成员走 providers 详情、`/proxies/{成员}/delay` 对成员 404、mixed 端口被占时"带病存活"故 `Running` 必须双探活），§10 三格全部有真机数字且定稿，§12 两条（亚克力合成开销、self-contained 常驻代价）按实测结案。**本机没有 `gh`**（`command not found`），所以 PR 由用户在浏览器开（compare 链接与正文由 agent 备好），点合并同样归用户。
+实测进度（2026-10-27）：回写已完成并推送——§4.2 端点表按 Task 1 真机逐条核实过（provider 成员走 providers 详情、`/proxies/{成员}/delay` 对成员 404、mixed 端口被占时"带病存活"故 `Running` 必须双探活），§10 三格全部有真机数字且定稿，§12 两条（亚克力合成开销、self-contained 常驻代价）按实测结案。
+
+**合并实况（2026-10-27，用户指令「你直接合并，缺什么装什么」）**：合并已由 agent 完成，走的是 git 而不是 PR——
+① `GET /repos/keno80/ClashAcry/pulls?state=all` 返回空数组，**仓库上从来没有开过 PR**，所以「在浏览器点合并」这个前提本来就不成立；
+② 因此没装 `gh`：装了也只是给 API 加一层，而 `gh` 的鉴权要交互式 `auth login`（浏览器/device code），agent 完不成，反而不如 git 这条路直；读仓库状态用匿名 `curl` + 公开 API 就够了（本仓库是公开的，`api.github.com/repos/... ` 返 200）。
+③ 实际动作：`git merge --no-ff feat/clashacry-v1`（main 原本 `4be5237` 是分支祖先，无冲突，合并提交 `2b21483`，树内容与 `ca7bf8c` **完全相同**——`git diff --stat feat/clashacry-v1..HEAD` 为空），用 `--no-ff` 是为了让 57 个提交在主干上仍成一组可回看的交付单元，与主干此前的线性 docs 历史不冲突；然后 `git push origin main`。
+④ 合并前在 main 的树上重跑了一遍验收三件套：`dotnet build ClashAcry.sln -c Release` **0 警告 0 错误**、Core **154/154**、UI **28/28**。
 
 ```bash
-git add docs && git commit -m "docs: v1 验收结论与实测数据回写 spec"
-git push origin feat/clashacry-v1
-gh pr create --base main --head feat/clashacry-v1 --title "ClashAcry v1：双进程 mihomo 客户端（WinUI 3 + Acrylic）" --body "$(cat <<'EOF'
-## Summary
-- Tray 宿主托管内核生命周期，UI 关窗即退；整窗 Desktop Acrylic 默认，可切 Mica/纯色
-- 核心闭环：启停、订阅导入、节点切换与测速、系统代理、内核在线更新
-## Test plan
-- [ ] dotnet test（Core + UI）全绿
-- [ ] v1-acceptance.md 逐条勾选
-- [ ] measure-residency.ps1 达标（Tray 空闲 ≤40MB / Tray+内核满载合计 ≤80MB / UI ≤220MB）
-EOF
-)"
+git checkout main && git pull --ff-only
+git merge --no-ff feat/clashacry-v1 -m "Merge branch 'feat/clashacry-v1' into main"
+dotnet build ClashAcry.sln -c Release && dotnet test tests/ClashAcry.Core.Tests -c Release && dotnet test tests/ClashAcry.UI.Tests -c Release
+git push origin main && git checkout feat/clashacry-v1
 ```
-合并前把 PR 链接报给用户，**由用户点合并**（破坏性/共享状态操作需确认）。
+
+远端分支 `feat/clashacry-v1` **保留未删**（删远端分支属破坏性操作，等用户点头）；v1.1 的改动按 AGENTS 规则另起 `feat/<范围>` 分支。
 
 ---
 

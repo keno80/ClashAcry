@@ -371,6 +371,8 @@ Stop-Process -Name ClashAcry.Tray   # 测完必须杀进程，否则污染后续
 > ① **改 UI 源码后必须先 `dotnet build ClashAcry.sln`**——`dotnet test tests/ClashAcry.UI.Tests` 只重建测试工程（它按 R-12f 不引用 UI 工程），harness 起的是 `bin\x64\Release` 那个 exe，于是"改了没生效、测试仍全绿"，本轮就是靠这条才认出两条回归锁当时是空锁；
 > ② **UI.Tests 现在起窗前先断言没有活的 `ClashAcry.Tray` 进程**（`UiAppHarness.AssertNoLiveTray`）：假 Tray 挂的也是生产管名，两台服务端同时挂得上时 UI 连到谁不定，连上真宿主就是往用户的真内核与真 `%LOCALAPPDATA%\ClashAcry` 上动手；这里只判定失败、不替用户杀进程；
 > ③ 两条新回归锁 **必须在去掉修复后跑红过才算数**（已做：`UpdateInterruptedByTrayDeath_*` 超时、`TrayRestarts_*` 报"界面没重连上新的托盘"）。
+>
+> **合并实况（2026-10-27）**：v1 已进 `main`，合并提交 `2b21483`（`--no-ff`，树内容与修复轮末位提交 `ca7bf8c` 完全相同），合并前在 main 的树上重跑三件套全绿。仓库上从未开过 PR（匿名 API `pulls?state=all` 返空），所以这一步走的是 git 而非 `gh`；远端分支 `feat/clashacry-v1` 保留未删。过程细节与「为什么没装 gh」记在计划 Task 18 Step 4。
 
 
 ## 12. 风险与开放问题

@@ -19,6 +19,9 @@ public sealed class TrayHost
     /// <summary>
     /// 更新通路单独一个 client：内核包是 10 MB 量级的**整包下载**，30 s 的 REST 超时会在慢link上
     /// 把正常的下载掐死成 DownloadFailed。不复用 _http 还有一条好处——两边的默认头互不污染（R-6a 纪律）。
+    /// 真机订正：这里的 5 min **只兜到响应头**——ReleaseClient 用 ResponseHeadersRead 发请求，正文读取不受
+    /// HttpClient.Timeout 约束（实测 22.5 MB 的包在本机以 ~42 KB/s 跑了 538 s 也没被掐）。
+    /// 下载的真正护栏是 <see cref="ReleaseClient.InactivityBudget"/>：静默 30 s 才死，慢但活着就一直跑完。
     /// </summary>
     private readonly HttpClient _updateHttp = new() { Timeout = TimeSpan.FromMinutes(5) };
     public CoreManager Core { get; private set; } = null!;

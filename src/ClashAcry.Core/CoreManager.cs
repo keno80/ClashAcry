@@ -58,7 +58,13 @@ public sealed class CoreManager : IAsyncDisposable
     // `await mgr.StopAsync(...)` 不取值，改宽返回类型不破任何断言。
     public Task<bool> StopAsync(CancellationToken ct) => InLifecycle(async () => { await StopLockedAsync(); return true; }, ct);
 
-    /// Task 11 用：在生命周期锁内换文件，内核由本方法负责停/起
+    /// <summary>
+    /// Task 11 用：在生命周期锁内换文件，内核由本方法负责停/起。
+    /// 两条真值口径（Task 11 补的三条用例锁住，见 CoreManagerTests 的 Swap_*）：
+    /// ① **换之前没在跑就绝不因为换核把它拉起来**——v1 的语义是"可预期的显式启停"，回滚分支若无条件
+    ///    StartLockedAsync，一次失败的更新会在用户没点过启动的情况下多出一个内核进程；
+    /// ② <see cref="SwapOutcome.CoreRunningAfter"/> 报告的是换完之后**真的**在不在跑，不是"操作成功"。
+    /// </summary>
     public Task<SwapOutcome> SwapExecutableAsync(Func<Task> replaceFiles, CancellationToken ct) =>
         InLifecycle(async () =>
         {
@@ -66,8 +72,8 @@ public sealed class CoreManager : IAsyncDisposable
             Transition(CoreState.Updating);
             await StopLockedAsync();
             try { await replaceFiles(); }
-            catch (IOException) { var back = await StartLockedAsync(ct); return SwapOutcome.Rollback(back); }
-            var started = wasRunning ? await StartLockedAsync(ct) : true;
+            catch (IOException) { var back = wasRunning ? await StartLockedAsync(ct) : false; return SwapOutcome.Rollback(back); }
+            var started = wasRunning ? await StartLockedAsync(ct) : false;
             return SwapOutcome.Done(started);
         }, ct);
 

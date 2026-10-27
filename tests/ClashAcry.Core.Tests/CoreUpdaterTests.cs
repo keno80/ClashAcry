@@ -231,6 +231,26 @@ public class CoreUpdaterTests : IDisposable
     }
 
     [Fact]
+    public async Task MissingOldExe_InstallsNewCore_InsteadOfReportingInUse()
+    {
+        // 真机端到端（Task 11 Step 6）踩到的坑：机器上没有 mihomo.exe 时，备份那步的 File.Copy 抛
+        // FileNotFoundException——它是 IOException 的子类，被折成 InUseRolledBack，用户看到
+        // 「内核被占用，已回滚」而机器上根本没有可占用的内核。没有旧文件就没有要备份的东西：
+        // 跳过备份直接把新核装进去，在线更新顺带修好这种坏安装，且不许留一个来路不明的 .bak。
+        StubRelease(ZipWithEntry("mihomo-windows-amd64-v9.exe", new byte[] { 7, 7 }));
+        var p = AppPaths.ForTest(_dir);           // 不走 Paths()：那个夹具会先造一份「可覆盖的旧 exe」
+        p.EnsureCreated();
+        Assert.False(File.Exists(p.CoreExecutable));
+
+        var updater = new CoreUpdater(p, new ReleaseClient(Http, $"{_wire.Url}/latest"));
+        Assert.Equal(UpdateResult.Updated, await updater.InstallLatestAsync(null, new SwapSpy(), default));
+
+        Assert.Equal(new byte[] { 7, 7 }, File.ReadAllBytes(p.CoreExecutable));
+        Assert.False(File.Exists(p.CoreExecutable + ".bak"));
+        Assert.Equal("v9", File.ReadAllText(p.CoreVersionFile).Trim());
+    }
+
+    [Fact]
     public async Task SwapDoneButCoreNotRestarted_StillReportsUpdated()
     {
         // R-11h：Done(false) = 包换上了但内核没被重新拉起。更新器不发明第六种结果——

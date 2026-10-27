@@ -91,7 +91,12 @@ public sealed class CoreUpdater
                 {
                     // .bak 必须先落：目标被运行中的内核占用时（OS 以 FILE_SHARE_READ 映射镜像，读得动、覆盖不掉），
                     // 第二次 Copy 抛 IOException，此时回滚要有据可依。File.Replace 在这种场景直接失败且不产生备份。
-                    File.Copy(_paths.CoreExecutable, _paths.CoreExecutable + ".bak", overwrite: true);
+                    // 真机端到端（Task 11 Step 6）踩到的坑：旧 exe 不存在时这里抛 FileNotFoundException，而它是
+                    // IOException 的子类 → 被折成 InUseRolledBack，用户看到"内核被占用"却根本没内核。
+                    // 没有旧文件就没有可占用的东西，也没什么要备份——跳过这步，让下面的 Copy 直接把新核装进去，
+                    // 在线更新顺带修好"内核文件不存在"的坏安装。
+                    if (File.Exists(_paths.CoreExecutable))
+                        File.Copy(_paths.CoreExecutable, _paths.CoreExecutable + ".bak", overwrite: true);
                     File.Copy(staging, _paths.CoreExecutable, overwrite: true);
                 }, ct);
             }
@@ -100,8 +105,8 @@ public sealed class CoreUpdater
 
             if (outcome.RolledBack) return UpdateResult.InUseRolledBack;
 
-            // Done(false) 也走这条：包确实换上了，只是内核没能重新拉起。
-            // 进程语义不由更新器发明结果，由 CoreManager 的 core.state（+ reason）广播表达（裁定 R-11h）。
+            // Done(false) 也走这条：包确实换上了。它有两种成因——换之前本来就没在跑（按定义不该被拉起来），
+            // 或跑着但新核起不来。进程语义不由更新器发明结果，由 CoreManager 的 core.state（+ reason）广播表达（裁定 R-11h）。
             File.WriteAllText(_paths.CoreVersionFile, release.TagName);
             return UpdateResult.Updated;
         }

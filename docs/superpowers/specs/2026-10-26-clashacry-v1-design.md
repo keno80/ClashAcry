@@ -129,8 +129,11 @@ mixed 端口被占用的真机行为（Task 8 `Running` 判据依据，`-OccupyM
   ⇒ 选包**必须按整名相等**匹配 `mihomo-windows-amd64-compatible-{tag}.zip`，回退 `mihomo-windows-amd64-{tag}.zip`；任何前缀/包含式匹配都会误选工具链变体（那一族体积还更大）。
 - 资产 `size` 与真实字节数一致（compatible 包 `22543546`），`browser_download_url` 走 `302` → `objects.githubusercontent.com`，终响应 **`Content-Length: 22543546`、无 `Content-Encoding`**。⇒ 进度分母优先取响应的 `Content-Length`，缺失（分块传输 / 代理抹头）时回落到元数据 `size`。
 - zip 内**不是** `mihomo.exe`：把 compatible 包整份取下来核对（22,543,546 字节压缩 / 解压后 61,304,320 字节），里面**只有一个条目**，名 `mihomo-windows-amd64-compatible.exe`——条目名跟随资产名。⇒ 解包按"首个 `.exe` 条目"定位，写入**调用方给定的目标路径**，绝不拿条目名拼路径（源站数据当路径 = 路径穿越面）。也⇒ 进度百分比只能按**压缩后的下载字节**算（见 §9）。
+- **整包下载的真实耗时**（Task 11 Step 6 端到端，同一次真机 `core.update`）：compatible 包 22,543,546 字节在本机实测 **538 s**（约 1.9 MB/min）跑完，进度事件 **101 条、0..100 无重复无倒退**。⇒ 两条结论：① 更新通路**不许**用固定总时长兜底——`HttpCompletionOption.ResponseHeadersRead` 之下 `HttpClient.Timeout` 只约束到响应头，正文读取不受它管（这条 9 min 的下载在 5 min 的 client timeout 下照样活了下来）；护栏改成**静默预算 30 s**（连续 30 s 收不到任何一块才放弃，慢而活着就一直跑完）。② UI 侧的进度语义是"百分比 + 无 ETA"，慢 link 上 9 min 是合法耗时（§9）。
 
 测试夹具的坑（同批实测）：WireMock.Net 2.20 的 `WithBody(byte[])` 会声明一个与实发字节数无关的 `Content-Length`（2,000,767 字节的包报成 `3987`），带 `contentType` 的重载则干脆不发这个头。夹具因此保留"无声明长度"形态，让分母走 `size` 那条回落路径。
+
+要测"正文发到一半就断流"这条路径，WireMock 做不到，得用裸 `TcpListener` 手搓 HTTP 源站；此时**不读请求就 Close 会让 Windows 发 RST、把客户端还没读走的响应一起丢掉**（实测：正文完整写出，客户端 9 ms 内拿到连接重置）。夹具因此"发完正文后留 1 s 宽限期再断"。另外"既不声明长度也不分块、以 EOF 收尾"的响应会被 .NET 判协议违规——真实世界的未知长度形态是 `Transfer-Encoding: chunked`，夹具按后者写。
 
 ## 5. 分层与目录
 
@@ -201,6 +204,14 @@ docs/superpowers/{specs,plans,checklists}/
 **进度语义（Task 11 回写，裁定 R-11c 落地口径）**：`core.update.progress` 的百分比是**下载进度**，不是"解包/替换"进度——分母优先取响应 `Content-Length`，缺失时回落到 release 元数据的资产 `size`（§4.5），两者都拿不到就**不报中间档**，只在读满后补一次 100% 收尾。节流判据是"整数百分比变了没有"：同一档位只发一帧，2 MB 包实测 25 帧、`pct` 单调不减且去重（回归用例 `Progress_IsMonotonic_Throttled_AndEndsAt100`）。缓存命中（`core\downloads\<资产名>` 存在**且能解出 `.exe` 条目**）完全跳过网络、也就没有进度帧——这不是缺反馈，那条路径本来就是瞬时的。结果帧 `core.update.result` 必发，UI 的"…中"才有终点。
 
 **失败分类（Task 11 回写）**：源站取不到 / 没有匹配当前平台的资产 / 传输失败 → `DownloadFailed`；包能下下来却解不出 `.exe` 条目 → `ExtractFailed`（两种失败不混，否则"源站挂了"和"上游发了个空包"在 UI 上是同一句话）；目标 exe 被运行中的内核占用 → 备份已落 `.bak`、换文件抛 `IOException` → `InUseRolledBack`，**`version.txt` 不写**（写了下次就以为已是新版本，用户永久卡在坏版本）。`AlreadyLatest` 在任何联网动作之前判定，零下载零换文件。更新器全程不碰内核进程、不改 `CoreState`（§3 禁令 1）：停核 / 换文件 / 起核由 `CoreManager.SwapExecutableAsync` 在生命周期锁内完成。
+
+**换文件的四条真机订正（Task 11 Step 6 端到端回写）**：
+① **旧 exe 不存在不是"被占用"**——`FileNotFoundException` 是 `IOException` 的子类，备份那步的 `File.Copy` 在没有旧文件时抛它，于是被折成 `InUseRolledBack`：用户看到"内核被占用，已回滚"，而机器上根本没有可占用的内核。没有旧文件就没有要备份的东西 ⇒ 跳过备份直接把新核装进去（在线更新顺带修好这种坏安装），且不留下路不明的 `.bak`。
+② **换之前没在跑，就绝不因为换核把它拉起来**；回滚分支同理。`SwapOutcome.CoreRunningAfter` 报告的是换完之后**真的**在不在跑，不是"操作成功"——第一版在这里既多起了一个用户没要的进程，又把 `Done(true)` 说成了假话。
+③ **换核成功后的 controller 版本读取必须容错**：更新成功 ≠ 内核在跑（见②），那句裸调 `GetVersionAsync` 实测把 `connection refused` 抛穿到回帧——`Updated` 和 `core.update.result` 事件一起丢了，只剩一句 socket 错误。版本读不到就保持 `settings.core_version` 原值（展示位，内核真跑起来后 `handshake` 带真版本），结果仍是 `Updated`。
+④ `InUseRolledBack` 的回滚依据不是"用 `.bak` 还原"，而是**第二次 Copy 失败 ⇒ 旧 exe 从头到尾没被动过**；`.bak` 只是留证。
+
+**测试与真机宿主的互斥（同批实测）**：Core 测试用的管名就是生产管名 `clashacry.tray.v1`，真 Tray 宿主在跑时 `PipeRoundTripTests` 的 9 条用例会成片失败（自己的服务端建不起来 / `WaitsUp` 探到了真宿主）。跑套件前先确认没有 `ClashAcry.Tray.exe` 存活；反之，端到端验证也要在同一次跑里避开套件。
 
 ## 10. 常驻开销目标（验收判据）
 

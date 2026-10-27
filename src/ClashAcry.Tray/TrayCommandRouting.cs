@@ -144,8 +144,16 @@ public sealed class TrayCommandRouting
         var res = await _updateCore(progress, default);   // Task 11 把装配处换成真 CoreUpdater，路由不动
         if (res is UpdateResult.Updated)                // 版本号只在更新成功时重写，UI 收到 result 后重发 handshake 取新值
         {
-            var v = await _client.GetVersionAsync(default);
-            if (v is not null) _store.Update(s => s with { CoreVersion = v.Version });
+            // 真机端到端（Task 11 Step 6）踩到的：换核成功后内核**不一定在跑**——换之前没跑就不起，起了也可能探活失败，
+            // 这条裸调用于是在内核已经换好的当口把 "connection refused" 抛穿到回帧，用户看到的是一句 socket 错误，
+            // 而下面的 UpdateResult 事件也一起丢了。读不到版本号是常态不是故障：CoreVersion 只是展示值，
+            // 内核真跑起来后 handshake 会带真版本。
+            try
+            {
+                var v = await _client.GetVersionAsync(default);
+                if (v is not null) _store.Update(s => s with { CoreVersion = v.Version });
+            }
+            catch (Exception) { /* 内核没在跑：见上 */ }
         }
         if (_pipe.ClientCount > 0) _pipe.Broadcast(EventTypes.UpdateResult, res);
         return res;

@@ -303,6 +303,71 @@ public class CoreManagerTests : IDisposable
         await mgr.StopAsync(default);
     }
 
+    // ── Task 11：SwapExecutableAsync 是更新器唯一被授权碰内核进程的缝。它此前零覆盖，
+    // 而两条真值口径只有测出来才成立（实施日在这条缝上发现并改掉一个真缺陷：回滚分支会无条件起核）。──
+
+    [Fact]
+    public async Task Swap_WhenStopped_ReplacesExe_AndNeverSpawnsCore()
+    {
+        using var _ = new RegistrySnapshot();
+        var mgr = Build(SleepScript(), FreePort(), _wire.Port);
+        var exe = AppPaths.ForTest(_dir).CoreExecutable;
+        var seen = new List<CoreState>();
+        mgr.StateChanged += e => seen.Add(e.State);
+
+        var res = await mgr.SwapExecutableAsync(
+            () => { File.WriteAllBytes(exe, new byte[] { 1, 2, 3 }); return Task.CompletedTask; }, default);
+
+        Assert.False(res.RolledBack);
+        // Done 的第一位是「换完之后真的在跑吗」，不是「操作成功」：v1 的语义是可预期的显式启停，
+        // 换核不是启动。这条断言就是那处无条件起核缺陷的回归锁。
+        Assert.False(res.CoreRunningAfter);
+        Assert.Equal(0, mgr.SpawnCount);
+        Assert.Equal(new byte[] { 1, 2, 3 }, File.ReadAllBytes(exe));
+        Assert.Equal(CoreState.Stopped, mgr.State);
+        Assert.Contains(CoreState.Updating, seen);        // spec §3 禁令 3：迁移点唯一出口且必须广播
+    }
+
+    [Fact]
+    public async Task Swap_WhenReplaceFailsWhileStopped_RollsBackWithoutStartingCore()
+    {
+        using var _ = new RegistrySnapshot();
+        var mgr = Build(SleepScript(), FreePort(), _wire.Port);
+        var exe = AppPaths.ForTest(_dir).CoreExecutable;
+        // 真机形态：跑着的 mihomo 由 OS 以 FILE_SHARE_READ 映射镜像；这里用同样的共享度占住目标，
+        // 让换文件那一步抛 IOException（File.WriteAllBytes 要写访问，现有共享只读 → 共享冲突）。
+        using var hold = new FileStream(exe, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+
+        var res = await mgr.SwapExecutableAsync(
+            () => { File.WriteAllBytes(exe, new byte[] { 9 }); return Task.CompletedTask; }, default);
+
+        Assert.True(res.RolledBack);
+        Assert.False(res.CoreRunningAfter);
+        Assert.Equal(0, mgr.SpawnCount);                  // 一次失败的更新绝不多出一个用户没点过的内核进程
+        Assert.Equal(CoreState.Stopped, mgr.State);
+    }
+
+    [Fact]
+    public async Task Swap_WhileRunning_WhenTargetInUse_RestartsOldCoreAndReportsRolledBack()
+    {
+        using var _ = new RegistrySnapshot();
+        using var mixed = new TcpListener(IPAddress.Loopback, 0); mixed.Start();
+        var mgr = Build(SleepScript(), Port(mixed), _wire.Port);
+        Assert.True(await mgr.StartAsync(default));
+        var exe = AppPaths.ForTest(_dir).CoreExecutable;
+        using var hold = new FileStream(exe, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+
+        var res = await mgr.SwapExecutableAsync(
+            () => { File.WriteAllBytes(exe, new byte[] { 9 }); return Task.CompletedTask; }, default);
+
+        // spec §9「替换失败退回原 .exe 并保持内核运行」：换之前在跑，失败回滚后就该还在跑。
+        Assert.True(res.RolledBack);
+        Assert.True(res.CoreRunningAfter);
+        Assert.Equal(CoreState.Running, mgr.State);
+        Assert.Equal(2, mgr.SpawnCount);                  // 停了一次、回滚又起一次
+        await mgr.StopAsync(default);
+    }
+
     private static void TryDelete(string dir)
     { try { Directory.Delete(dir, true); } catch { } }
 }

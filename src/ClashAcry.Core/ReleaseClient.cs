@@ -4,8 +4,9 @@ using System.Text.Json.Serialization;
 namespace ClashAcry.Core;
 
 /// <summary>
-/// GitHub releases 的资产条目。<see cref="Size"/> 只作展示，下载进度的分母取响应的 Content-Length——
-/// 那才是这次真的会读到的字节数（重定向、CDN 压缩都可能让两者不一致）。
+/// GitHub releases 的资产条目。<see cref="Size"/> 是下载进度分母的**候补**：优先用响应头的 Content-Length
+/// （那才是这次真的会读到的字节数），只在它缺失或不可信时退到元数据 size（实测：WireMock 的假响应会声明一个
+/// 与实发字节数无关的值，真 GitHub 则两者一致）。
 /// </summary>
 public sealed record ReleaseAsset([property: JsonPropertyName("name")] string Name,
                                  [property: JsonPropertyName("browser_download_url")] string BrowserDownloadUrl,
@@ -22,17 +23,27 @@ public sealed record Release([property: JsonPropertyName("tag_name")] string Tag
 /// </summary>
 public sealed class ReleaseClient
 {
-    /// <summary>GitHub API 无 User-Agent 直接 403（实测约束，spec §4.2）。逐请求带。</summary>
+    /// <summary>
+    /// 逐请求带的 User-Agent。计划原本写的是"GitHub API 无 UA 直接 403"——Task 11 实测**否证**了这条
+    /// （<c>curl -H "User-Agent;"</c> 仍回 200）；保留 UA 的理由换成实的：GitHub 的 API 文档要求客户端自报标识，
+    /// 现在的"不拦"是宽容不是契约，而中间的代理/企业网关确实会按 UA 拦无名请求。带它零成本。
+    /// </summary>
     public const string UserAgent = "ClashAcry";
 
     public const string DefaultLatestUrl = "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest";
 
+    /// <summary>正文读取的**静默**预算：连续这么久没收到任何一块就放弃（不是总时长上限，理由见 TryDownloadAsync）。</summary>
+    public static readonly TimeSpan InactivityBudget = TimeSpan.FromSeconds(30);
+
     private readonly HttpClient _http;
     private readonly string _latestUrl;
+    private readonly TimeSpan _inactivityBudget;
 
-    public ReleaseClient(HttpClient http, string latestUrl = DefaultLatestUrl)
+    /// <param name="inactivityBudget">只给测试留的缝：默认的 30 s 静默预算在真链路上是对的判据，
+    /// 但一条断流连接不能被测成 30 s 的套件时长。生产侧一律不传。</param>
+    public ReleaseClient(HttpClient http, string latestUrl = DefaultLatestUrl, TimeSpan? inactivityBudget = null)
     {
-        _http = http; _latestUrl = latestUrl;
+        _http = http; _latestUrl = latestUrl; _inactivityBudget = inactivityBudget ?? InactivityBudget;
     }
 
     /// <summary>取最新 release。非 2xx / 超时 / 断网 / JSON 形状不对 → null。</summary>
@@ -45,7 +56,7 @@ public sealed class ReleaseClient
             await using var stream = await resp.Content.ReadAsStreamAsync(ct);
             return JsonSerializer.Deserialize<Release>(stream);
         }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException
+        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException
                                    or JsonException or InvalidOperationException)
         { return null; }
     }
@@ -76,12 +87,20 @@ public sealed class ReleaseClient
             await using (var src = await resp.Content.ReadAsStreamAsync(ct))
             await using (var dst = new FileStream(partial, FileMode.Create, FileAccess.Write, FileShare.None))
             {
+                // 实测：`HttpCompletionOption.ResponseHeadersRead` 之下，HttpClient.Timeout 只管到**响应头**，
+                // 正文读取完全不受它约束（真机 22.5 MB 的包在 ~5 min 预算外跑了 9 min 也没被掐）。
+                // 所以这里给的必须是**静默预算**而不是总时长预算：一条彻底断流的 CDN 连接要能在 30 s 内被放弃，
+                // 而一条慢但活着（实测 1.9 MB/min）的连接不能被误杀——固定总时长在后者上是永久失败。
+                using var idle = new CancellationTokenSource();
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, idle.Token);
                 var buf = new byte[81920];
                 long received = 0; int n;
-                while ((n = await src.ReadAsync(buf, ct)) > 0)
+                idle.CancelAfter(_inactivityBudget);
+                while ((n = await src.ReadAsync(buf, linked.Token)) > 0)
                 {
-                    await dst.WriteAsync(buf.AsMemory(0, n), ct);
+                    await dst.WriteAsync(buf.AsMemory(0, n), linked.Token);
                     received += n;
+                    idle.CancelAfter(_inactivityBudget);   // 每来一块就重新上表
                     // 块内一律报声明值：这里报 max(declared, received) 会让第一个块就"100%"，进度条全程贴着满格走。
                     onBytes?.Invoke(received, total);
                 }
@@ -90,7 +109,9 @@ public sealed class ReleaseClient
             File.Move(partial, targetPath, overwrite: true);
             return true;
         }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException
+        // OperationCanceledException 而不是 TaskCanceledException：正文读取被 idle.Token 掐掉时抛的是基类，
+        // 按子类抓会让"静默超时"这条新加的护栏变成未捕获异常穿透到调用方。
+        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException
                                    or IOException or UnauthorizedAccessException or NotSupportedException)
         { return false; }
         finally

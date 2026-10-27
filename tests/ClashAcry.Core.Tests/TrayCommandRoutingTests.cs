@@ -1,6 +1,8 @@
 using System.Text.Json;
 using ClashAcry.Contracts;
 using ClashAcry.Tray;
+using WireMock.RequestBuilders;
+using WireMock.ResponseBuilders;
 
 namespace ClashAcry.Core.Tests;
 
@@ -98,6 +100,27 @@ public class TrayCommandRoutingTests
         Assert.True(stop!.Payload!.Value.GetBoolean());
         Assert.Equal(CoreState.Stopped, h.Core.State);
         Assert.Null(h.Core.RunningProcessId);
+    }
+
+    [Fact]
+    public async Task CoreUpdate_WhenVersionReadFails_StillRepliesUpdated_NotErrorFrame()
+    {
+        // 真机端到端（Task 11 Step 6）：换核成功后内核**不一定在跑**（换之前没跑就不起），路由那句裸调
+        // GetVersionAsync 就在「内核已经换好」的当口把 connection refused 抛穿到回帧——Updated 和
+        // core.update.result 事件一起丢了，用户只看到一句 socket 错误。
+        // 夹具用 500 表达「读不到版本」；非 2xx（ApiException）与断连（HttpRequestException）
+        // 是同一条守卫的两个面，真机踩到的是后者。
+        using var h = new TrayHarness();
+        h.UpdateStubResult = UpdateResult.Updated;
+        h.Wire.Reset();
+        h.Wire.Given(Request.Create().WithPath("/version").UsingGet()).RespondWith(
+            Response.Create().WithStatusCode(500));
+
+        var reply = await h.Routing.Handle(Cmd(CmdTypes.CoreUpdate));
+
+        Assert.Null(reply!.Error);
+        Assert.Equal(UpdateResult.Updated, JsonUtil.Read<UpdateResult>(reply.Payload));
+        Assert.NotEqual("v9.9.9-test", h.Store.Load().CoreVersion);   // 读失败就不许把旧版本号当成新值写进展示位
     }
 
     [Theory]

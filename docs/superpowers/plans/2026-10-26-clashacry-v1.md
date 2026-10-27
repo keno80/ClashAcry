@@ -3687,6 +3687,15 @@ git commit -m "feat(tray): Win32 托盘宿主与命令路由（零 XAML/零 WinF
 - **R-11m（真机体积决定，接线级）**：真包 `22,543,546` 字节（§4.5），`TrayHost` 那个 `Timeout = 30 s` 的 `_http` 是给 REST 调用的预算，用它下载内核会把正常下载掐死成 `DownloadFailed`。裁定：更新通路用**独立的 `HttpClient`（`Timeout = 5 min`）**，顺带保持「不给共享实例挂默认头」的纪律；这也让 Task 17 的产物审计少一个耦合点。
 - **R-11n（Minor，别谎报占用）**：`IOException → InUseRolledBack` 的兜底只包住 `await swap(…)` 那一句，不许罩住整个 try——否则 `File.WriteAllText(version.txt)` 的盘上异常也会被报成「目标被占用」，把一种没发生过的失败说给用户。
 
+实施日回写（Task 11 Step 5–6：真机端到端与它查出来的四处语义，全部有对应用例或代码行作证）：
+
+- **R-11o（订正 R-11m 的前提）**：`Timeout = 5 min` 那个独立 client 实测**兜不住整包下载**——`HttpCompletionOption.ResponseHeadersRead` 之下 `HttpClient.Timeout` 只约束到**响应头**，正文读取完全不受它管（22.5 MB 的包在本机跑了 **538 s** 也没被掐）。所以真正的护栏换成正文读取的**静默预算 `ReleaseClient.InactivityBudget = 30 s`**：每收到一块就重新上表，彻底断流的连接 30 s 内被放弃，慢而活着（实测 1.9 MB/min）的连接跑完为止。固定总时长上限在这条链路上等于永久失败，不要再加回来。`TryDownloadAsync` 的取消异常按 **`OperationCanceledException`** 抓而不是 `TaskCanceledException`——被 idle 令牌掐掉时抛的是基类，按子类抓等于让这条新护栏变成未捕获异常。预算做成构造参数（默认 30 s，只有测试传小值）：不然一条断流用例要在套件里干等半分钟。
+- **R-11p（真 CoreManager 的两处语义缺陷，补覆盖时查出来的）**：`SwapExecutableAsync` 第一版 ① 回滚分支无条件 `StartLockedAsync`——换核前明明没跑，更新失败却给用户起了一个他从来没要的内核；② `Done(started)`/`Rollback(true)` 把"操作成功"当"内核在跑"报，`CoreRunningAfter` 说的不是真话。裁定并落码：两处都改成 `wasRunning ? await StartLockedAsync(ct) : false`，`CoreRunningAfter` 只报换完之后**真的**在不在跑（spec §9 订正②）。`SwapExecutableAsync` 至此有 `Swap_WhenStopped_ReplacesExe_AndNeverSpawnsCore` / `Swap_WhenReplaceFailsWhileStopped_RollsBackWithoutStartingCore` / `Swap_WhileRunning_WhenTargetInUse_RestartsOldCoreAndReportsRolledBack` 三条覆盖（都带 `RegistrySnapshot`，Stop 会真写 HKCU）。
+- **R-11q（Minor，别把"没有旧内核"说成"旧内核被占用"）**：`FileNotFoundException` 是 `IOException` 的子类，旧 exe 不存在时备份那步抛它 → 被折成 `InUseRolledBack`，而回滚根本没发生、可占用的东西也不存在。`CoreUpdater` 的 replaceFiles 改成 `if (File.Exists(_paths.CoreExecutable))` 才备份：没有旧文件就没有要备份的东西，直接把新核装进去（在线更新顺带修好这种坏安装，`version.txt` 照写），用例 `MissingOldExe_InstallsNewCore_InsteadOfReportingInUse` 锁住"装上 + 不留来路不明的 `.bak`"。附带把回滚语义写清：`InUseRolledBack` 的依据是**第二次 Copy 失败 ⇒ 旧 exe 从未被动过**，`.bak` 只是留证、没有人去还原它。
+- **R-11r（订正 R-11g 的最后一句，真机抛穿）**：R-11g 说"内核没跑时 `GetVersionAsync` 返回 `null`，`if (v is not null)` 已经吞了，不要为它加新分支"——**否证**：端口没人听时它抛 `HttpRequestException`（非 2xx 才走 `null`/`ApiException` 那支），于是换核成功的当口整条 `core.update` 回帧变成 `error: 由于目标计算机积极拒绝…`，`Updated` 与 `core.update.result` 事件一起丢了。`UpdateCoreAsync` 里那次版本读取包进 `try/catch`：**结果仍是 `Updated`**、读不到就保持 `settings.core_version` 原值（展示位，内核真跑起来后 `handshake` 带真版本），`UpdateResult` 事件不许被这句附带读取绑架。用例 `CoreUpdate_WhenVersionReadFails_StillRepliesUpdated_NotErrorFrame`（夹具用 500 表达读失败，与真机的断连同一条守卫）。
+- **R-11s（环境级，端到端前置）**：Core 套件用的就是生产管名 `clashacry.tray.v1`——真 Tray 宿主活着时 `PipeRoundTripTests` 成片红 9 条（自己的服务端建不起来、`WaitsUp` 探到真宿主）。**跑套件前先确认没有 `ClashAcry.Tray.exe` 存活**；反过来做端到端时也别同时跑套件。本次两次复跑（9 红 → 收掉宿主后 120 全绿）都是这个原因，不是回归。
+
+
 
 样例的 `Paths()` 每次调用都 `new AppPaths` + `EnsureCreated()`，`EnsureCreated` 用 `Directory.CreateDirectory`（对已存在目录是 no-op，实测不抛），这条不用改；但 `CachedZip_SkipsNetworkEntirely` 里那句手搓 `Directory.CreateDirectory(Path.GetDirectoryName(...)!)` 按 R-11e 删掉。
 
@@ -3880,7 +3889,7 @@ Expected: PASS，9/9
 
 `core.update` → `TrayCommandRouting` 调 `updater.InstallLatestAsync(progress, _core.SwapExecutableAsync, ct)`——**更新器拿到的是 `CoreManager` 的换文件入口，不是进程控制权**（spec §3 禁令 1：内核生命周期只归 Tray，且替换动作必须落在 `_lifecycle` 锁内，避免"边下载边点启动"）。进度回调里把 `UpdateProgress` 转成 `core.update.progress` 事件广播；UI 断开时不发（`PipeServer.ClientCount > 0`）。结果 `UpdateResult` 也要广播（`core.update.result`），否则 UI 的「…中」没有终点（用户红线：长耗时操作必须有进行中反馈）。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add src/ClashAcry.Core src/ClashAcry.Tray tests/ClashAcry.Core.Tests/CoreUpdaterTests.cs

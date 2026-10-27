@@ -17,4 +17,7 @@ public sealed record Settings(
     [property: JsonPropertyName("core_path")] string? CorePath = null,
     [property: JsonPropertyName("delay_test_url")] string DelayTestUrl = "http://www.gstatic.com/generate_204",
     [property: JsonPropertyName("last_subscription")] string? LastSubscription = null,
-    [property: JsonPropertyName("core_version")] string? CoreVersion = null);
+    [property: JsonPropertyName("core_version")] string? CoreVersion = null,
+    // R-20b：开启系统代理前抓的 HKCU 原值快照（null = 没快照过）。它是"欠用户一次还原"的凭证，
+    // 不是引擎设置，所以绝不出现在 settings.get 的快照里（spec §3：secret/core_path 同样不外露）。
+    [property: JsonPropertyName("sys_proxy_backup")] SystemProxy.Backup? SysProxyBackup = null);

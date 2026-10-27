@@ -5253,6 +5253,10 @@ Expected: 三条命令全绿，构建无警告。
 - **R-20a｜托盘「退出」= 整个应用退出**：`TrayHost.ShutdownAsync` 在停内核之后、关管道之前对 `Process.GetProcessesByName("ClashAcry.UI")` 逐个 `CloseMainWindow()`，由 UI 自己的「关窗即退」把进程带走（spec §3 新增「反向语义」段）。**只用 `CloseMainWindow()`、绝不 `Kill()`**：对真窗口实测 `MainWindowHandle=592352`、返回 `True`、3 s 内进程消失；强杀会吞掉 `App.OnUnhandled` 的崩溃落盘，也可能连带杀掉 UI.Tests 的 FlaUI 窗口。关不掉的不重试、不硬来，退出照旧完成。
   **这条没有回归锁**（记录一下口径）：`ShutdownAsync` 以 `Environment.Exit` 收尾、且真机只有托盘菜单那一条路可达（§3 的 WinExe 实测），单元侧要钉它就得把 TrayHost 抽空——本轮以"对当前那扇真窗口直接调 `CloseMainWindow()` 并观测进程消失"的实测代替，写进 spec §12 ⑨ 与清单第 12 条。
 - **同轮第二项（未动代码，待用户拍板）**：`sysproxy.set(true)` 把 clash-verge 留下的 `ProxyServer=127.0.0.1:8090` / `ProxyOverride=localhost;127.*;<local>` 覆盖成了我们自己的值，`Disable` 依 R-7c 不还原——清单第 0 条早就警告过这件事，本轮它真发生了，快照/还原的补法记进 spec §12 ⑩。
+- **R-20b｜系统代理载荷的快照/还原（用户 2026-10-27 点头「开始吧」，同轮落地）**：`Enable` 前 `SystemProxy.Capture()` → `settings.json` 的 `sys_proxy_backup`（§4.3 新增字段，不进 `settings.get` 回包）；`Disable` 调 `Restore(backup, ourServer, ourBypass)`，**判据取当前 `ProxyServer` 而不是 `ProxyEnable`**（第三方可以在我们开着时改地址而不动开关），不成立就一条都不写、快照留着——方向与 R-7c 一致，宁可漏还不反向抹别人。还原含"原本不存在 ⇒ 删除"，不写空串（R-7b 同口径）。三条建档规矩：只在当前值不是我们自己的串时建档（否则"开→还原失败→再开"会把自己写成原值）、冷启动 `CleanupIfStale` 返回真时才顺带还原（强杀没有退出钩子，那是唯一还能还的时机，故返回值改造）、还原成功才销凭证。**「停止内核」不还原**，只翻开关。
+  回归锁七条：`Restore_GivesBackForeignValues_WhileServerIsStillOurs` / `Restore_WhenSomeoneElseWroteAfterUs_WritesNothing_AndReportsFalse` / `Restore_BackupOfAbsence_DeletesValues_NotEmptyStrings` / `CleanupIfStale_ReportsWhetherItCleanedOurOwnLeftover` / `SysProxyBackup_RoundTripsUnderTheSpecKeyNames`，加路由打通到注册表的两条 `SysProxy_EnableThenDisable_RestoresTheForeignProxyServer`、`SysProxy_EnableTwice_KeepsTheTrueOriginal_NotOurOwnLeftover`。
+  **反证做过**：把 `ApplySysProxy` 临时退回旧的两行（`Enable`/`Disable`、无快照）后，那两条路由锁当场全红（失败 2 / 通过 0），恢复接线后 Core **166/166**、UI **28/28**、构建 0 警告。
+  本机的两键已手工改回基线（旧产物没留快照，新代码无从代劳）：`ProxyEnable=0` / `ProxyServer=127.0.0.1:8090` / `ProxyOverride=localhost;127.*;<local>`。
 
 - [x] **Step 4: 回写 spec 并合并**
 

@@ -25,7 +25,7 @@
 - 轮询/自动刷新不得产生可见抖动：`ListView` 的 `ItemsSource` 用节点名作 key 的集合、就地更新属性，不整表重置。
 - 长耗时操作（内核下载更新）必须有进行中反馈：按钮禁用 + 文案「下载更新中 NN%」，禁止阻塞式弹窗。
 - UI 文案仅中文；深色 chrome 逐类核对（`Button`/`ComboBox`/`ComboBoxItem`/`ListBoxItem`/`ScrollBar` 含 `Track.Thumb` 与翻页 `RepeatButton`），判据为像素取样。
-- 开销线（Task 2 建立基线，此后每次改 UI 复测）：Tray ≤ **40 MB**，Tray+内核 ≤ **80 MB**，UI ≤ **220 MB**。
+- 开销线（Task 2 建立基线，此后每次改 UI 复测；**Task 17 裁定拆两格**）：Tray **空闲态**（无内核在跑）≤ **40 MB**，**满载常驻**（Tray + mihomo 在跑）合计 ≤ **80 MB**，UI ≤ **220 MB**。判据表与裁定理由见 spec §10。
 - 每个任务结尾：`dotnet test` 相关项目全绿 → `git commit` → `git push origin feat/clashacry-v1`。
 - **WireMock.Net 写法统一**：`server.Given(Request.Create()…匹配条件…).RespondWith(Response.Create()…响应…)`。`WithPath`/`UsingGet` 是请求侧，`WithStatusCode`/`WithBody`/`WithJson` 是响应侧——把响应方法挂在请求构造器上编译不过。JSON 响应一律用 `.WithBody(JsonSerializer.Serialize(obj))`，`Content-Type` 无所谓（客户端直接反序列化流）。
 - 测试项目引用面：`tests/ClashAcry.UI.Tests` **只引用 `ClashAcry.Core`**，UI 侧一律经 FlaUI 从窗口外断言；不把 WinUI 应用工程拉进测试项目（XAML 编译器依赖会污染测试构建）。
@@ -5108,10 +5108,10 @@ git commit -m "build: 自包含发布脚本 + 内置内核本机准备（packagi
 - **R-17d｜UI 与 Tray 必须同目录**：`TrayLink.EnsureTrayRunningAsync` 找的是 `AppContext.BaseDirectory\ClashAcry.Tray.exe`（Task 12 的定位方式），所以装配阶段两份 self-contained 运行时合并到同一目录（同名同内容，覆盖无害），**没有**走计划里预留的"分目录 + 改进程定位"那条改道，spec §3 因此不动。
 - **R-17e｜内置内核的来路只靠 `packaging/core/BUNDLED.txt` 三行**：`tag: v1.19.33` / `asset: <zip 的 release URL>` / `sha256: <下载 zip 原文的 SHA-256>`，另加本任务补的第四行 `exe_sha256`（打包进产物的就是这颗 exe，光有 zip 的哈希还得人工对一次）。`fetch-bundled-core.ps1` 幂等（tag 一致就跳过网络）、`-Verify` 模式供 `publish.ps1` 在打包前卡住来路不明的内核；`packaging/core/` 整目录不入库。
 - **R-17f｜trim 这条路实测判死，不是"还没试"**：`-p:PublishTrimmed=true` 产物启动即 `InvalidOperationException: Reflection-based serialization has been disabled`（`SettingsStore.Load` → `TrayHost.RunAsync`）；加 `-p:JsonSerializerIsReflectionEnabledByDefault=true` 重发一次，runtimeconfig 里那条确实是 `true`，仍然同一异常退出（trim 已把反射解析器裁掉）。走通的代价是 STJ 源生成 + YamlDotNet 两套反射面手术，而 Task 2 的 trim 空壳实测只省 **0.5 MB WS**（16.4→15.9）；ReadyToRun 只影响启动耗时。数字与归因见 spec §10 的 Task 17 表。
-- **R-17g｜40 MB 线要的是用户拍板，不是再测一轮**（计划明写"超标停下来报告，不放宽判据"，此处按这条执行）：驱动项此前每一轮都判错了——不是管道活动（连开 5 次会话 37.4~37.8 MB，仍在线内；3 次连续界面会话 40.2~45.1 MB，只压线/微超），而是**内核在 Tray 里跑起来**：`core.start` 之后、界面一个字节都没发的采样点是 **49.0 MB / Private 12.4**，3 分钟 soak 49.8→51.5 **平台不单调**（不是泄漏）。WS +17.6 而 Private 只 +5.2 ⇒ 多出来的是映像共享页与已触碰未归还的页；把 `DOTNET_GCHeapHardLimit` 压到 32 MB 四个采样点 48.9/49.9/49.6/52.4 一格没动，证实托管堆不是来源。**另两条线本轮都守住**：Tray+内核 74.0~77.5 MB（线 80，mihomo 自身 WS 只有 25~26 MB，Private 60 MB 是 Go 预留堆不进 WS 口径），UI 最坏档 180.0 MB（线 220；节点页 30 行全落地 + 刚跑完全组测速，再轮询 20 s 回落 178.3——Task 15 交接项②那格账由此补齐，取样夹具是一次性的 `ResidencyScratch.cs`，量完已删）。
+- **R-17g｜40 MB 线要的是用户拍板，不是再测一轮**（计划明写"超标停下来报告，不放宽判据"，此处按这条执行）：驱动项此前每一轮都判错了——不是管道活动（连开 5 次会话 37.4~37.8 MB，仍在线内；3 次连续界面会话 40.2~45.1 MB，只压线/微超），而是**内核在 Tray 里跑起来**：`core.start` 之后、界面一个字节都没发的采样点是 **49.0 MB / Private 12.4**，3 分钟 soak 49.8→51.5 **平台不单调**（不是泄漏）。WS +17.6 而 Private 只 +5.2 ⇒ 多出来的是映像共享页与已触碰未归还的页；把 `DOTNET_GCHeapHardLimit` 压到 32 MB 四个采样点 48.9/49.9/49.6/52.4 一格没动，证实托管堆不是来源。**另两条线本轮都守住**：Tray+内核 74.0~77.5 MB（线 80，mihomo 自身 WS 只有 25~26 MB，Private 60 MB 是 Go 预留堆不进 WS 口径），UI 最坏档 180.0 MB（线 220；节点页 30 行全落地 + 刚跑完全组测速，再轮询 20 s 回落 178.3——Task 15 交接项②那格账由此补齐，取样夹具是一次性的 `ResidencyScratch.cs`，量完已删）。**处置结果：2026-10-27 用户裁定"按空闲和满载拆两格执行"**，即 spec §10 末的处置①，其余两条（压实现 / 写死 50 MB）不采用；数字一个都没放宽，判据表已按两格重写。
 - **R-17h｜PowerShell 侧的两条坑，写脚本时会再踩**：① 带中文的 `.ps1` 必须 **UTF-8 BOM**，否则 PS 5.1 把字符串字面量切错，表现为 `Start-Process : 系统找不到指定的文件`（文件明明在）；② `NamedPipeClientStream.ReadTimeout` 直接抛"此集不支持超时"，只能靠阻塞 `ReadLine` + 外层 timeout 兜。帧的 `\n` 一定用 `[char]10` 拼，不许写在单引号多行字面量里——那样换行落在 JSON 中间，服务端按坏帧摘除连接，客户端看到的是"管道已被中断"。
 - **全量验证**：`dotnet build ClashAcry.sln -c Release` 0 警告 0 错误；Core.Tests **144/144**（原 143 + R-17b 的回归锁）；UI.Tests **25/25**。产物 zip `artifacts/publish/ClashAcry-v0.1.0-win-x64.zip` 110.1 MB / 535 文件，`core\mihomo.exe` 61,304,320 字节与 `exe_sha256` 对得上。真内核通路：`sub.import` → `core.start` → `RESTful API listening at: 127.0.0.1:9097` + `Mixed(http+socks) proxy listening at: 127.0.0.1:7897` → 握手 `state:"Running"` → `core.stop` 后进程消失。宿主前后 HKCU `ProxyEnable=0` / `ProxyServer=127.0.0.1:8090` 逐字未变，`sysproxy.set` 一次没调，机器上同时在跑的 `verge-mihomo`（pid 23600）未被连接。
-- **交接给 Task 18**：① R-17g 的三个处置选项要用户拍板后才能把 40 MB 写进验收清单的判据；② 清单第 4/5/6 条现在才有真东西可测（内核能起、能过 7897、Tray+内核合计 74~78 MB）；③ 清单第 1 条写 Core 侧条数时按 144，UI 侧 25；④ `DefaultLaunch` 那条回归锁要在清单里点名，防止下次有人把 `-d` 改回 Root"为了让 geo 库跟着 Root 走"。
+- **交接给 Task 18**：① 40 MB 的口径已裁定（拆两格：Tray 空闲 ≤40 / Tray+内核满载合计 ≤80），清单第 6 条照这两格写，不再挂"待拍板"；② 清单第 4/5/6 条现在才有真东西可测（内核能起、能过 7897、Tray+内核合计 74~78 MB）；③ 清单第 1 条写 Core 侧条数时按 144，UI 侧 25；④ `DefaultLaunch` 那条回归锁要在清单里点名，防止下次有人把 `-d` 改回 Root"为了让 geo 库跟着 Root 走"。
 
 ---
 
@@ -5165,7 +5165,7 @@ git commit -m "build: 自包含发布脚本 + 内置内核本机准备（packagi
 操作：关掉 UI 主窗口（不点托盘退出）。
     Get-Process ClashAcry.UI -ErrorAction SilentlyContinue      # 期望：无输出（进程已退）
     powershell -File scripts/measure-residency.ps1 -Json
-期望：Tray ≤ 40 MB；Tray+内核 ≤ 80 MB。数值回写 spec §10 实测列。
+期望：Tray **空闲态**（内核已停）≤ 40 MB；**满载常驻**（Tray + mihomo 在跑）合计 ≤ 80 MB。数值回写 spec §10 实测列。（口径按 Task 17 裁定拆两格，见 spec §10 开头。）
 
 ## 7. 托盘「打开界面」重连回显
 操作：托盘菜单 → 打开界面。
@@ -5218,7 +5218,7 @@ gh pr create --base main --head feat/clashacry-v1 --title "ClashAcry v1：双进
 ## Test plan
 - [ ] dotnet test（Core + UI）全绿
 - [ ] v1-acceptance.md 逐条勾选
-- [ ] measure-residency.ps1 达标（Tray ≤40MB / 合计 ≤80MB）
+- [ ] measure-residency.ps1 达标（Tray 空闲 ≤40MB / Tray+内核满载合计 ≤80MB / UI ≤220MB）
 EOF
 )"
 ```

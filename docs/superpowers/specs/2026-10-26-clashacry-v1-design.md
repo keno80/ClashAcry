@@ -27,7 +27,7 @@
 
 已否决路线：Rust 后台（见 §1）；MSIX 打包（v1 不做，免安装 zip 够用）；WinForms 托盘（开销）；Web 技术栈界面（本项目目标即原生 Fluent，不在范围内）。
 
-NativeAOT 明确**不承诺**：WinUI 3 XAML 编译绑定依赖 CoreCLR，本项目按 CoreCLR 自包含发布。Tray 进程 trimming **空壳实测（2026-10-26，Task 2）**：`dotnet publish src/ClashAcry.Tray -c Release -r win-x64 --self-contained -p:PublishTrimmed=true` 删 obj/bin 全新还原后 0 警告 0 错误——**无任何 `IL2xxx`/`IL3xxx`**（全局 `TreatWarningsAsErrors=true`，有警告即构建失败，故"零警告"是构建强保证）；发布产物 20 MB（未 trim 86 MB），空壳常驻 WS 15.9 MB（未 trim 16.4 MB）。**是否最终启用留待 Task 17 复验**：届时 Core 已含 YamlDotNet/反射敏感代码，只要冒出一条 IL2xxx 就按既定策略放弃 trimming。
+NativeAOT 明确**不承诺**：WinUI 3 XAML 编译绑定依赖 CoreCLR，本项目按 CoreCLR 自包含发布。Tray 进程 trimming **空壳实测（2026-10-26，Task 2）**：`dotnet publish src/ClashAcry.Tray -c Release -r win-x64 --self-contained -p:PublishTrimmed=true` 删 obj/bin 全新还原后 0 警告 0 错误——**无任何 `IL2xxx`/`IL3xxx`**（全局 `TreatWarningsAsErrors=true`，有警告即构建失败，故"零警告"是构建强保证）；发布产物 20 MB（未 trim 86 MB），空壳常驻 WS 15.9 MB（未 trim 16.4 MB）。**是否最终启用留待 Task 17 复验**：届时 Core 已含 YamlDotNet/反射敏感代码，只要冒出一条 IL2xxx 就按既定策略放弃 trimming。**Task 17 复验结果＝不启用**：产物启动即 `InvalidOperationException: Reflection-based serialization has been disabled`（`SettingsStore.Load`），再加 `-p:JsonSerializerIsReflectionEnabledByDefault=true` 仍以同一异常退出（runtimeconfig 里那条确实是 true，但反射解析器已被裁掉）；要走通得给 STJ 上源生成再处理 YamlDotNet 两套反射面，而收益上限就是本节空壳量到的 0.5 MB WS。ReadyToRun 同理不采用（只影响启动耗时）。数字见 §10 的 Task 17 段④。
 
 ## 3. 进程架构与所有权
 
@@ -263,8 +263,11 @@ docs/superpowers/{specs,plans,checklists}/
 
 | 形态 | 目标 | 测量 | 实测（空壳，2026-10-26 / Task 2） |
 |---|---|---|---|
-| 日常常驻：Tray + mihomo（UI 已关） | Tray ≤ **40 MB**，合计 ≤ **80 MB** | `scripts/measure-residency.ps1`：`Get-Process` 采 `WorkingSet64` 与 `PrivateMemorySize64` 各 5 次取中位数 | Tray 空壳（self-contained 未 trim）WS **16.4 MB** / Private **4.6 MB**（三轮各取中位数：17.0 / 16.4 / 16.4）；trim 版 15.9 MB。距 40 MB 线余量充足 |
-| UI 打开（Acrylic 档） | UI 进程 ≤ **220 MB**，Tray+内核+UI 合计 ≤ 260 MB | 同上，另记纯色档差值用于量化整窗 Acrylic 的成本 | Task 12 外壳（NavigationView + 空页，未上 Acrylic）WS **140.4 MB** / Private **86.5 MB**，两次采样中位数一致；到窗口出现仅 ~0.5 s（热）/ 首次手动起 ~2 s。距 220 MB 线余量 80 MB，Acrylic 的成本留给 Task 13 复测（**已复测，见本节末：差值在噪声内**） |
+| **Tray 空闲态**（没内核在跑：冷启动后、或内核已停） | Tray ≤ **40 MB** | `scripts/measure-residency.ps1`：`Get-Process` 采 `WorkingSet64` 与 `PrivateMemorySize64` 各 5 次取中位数 | Tray 空壳（self-contained 未 trim）WS **16.4 MB** / Private **4.6 MB**（三轮各取中位数：17.0 / 16.4 / 16.4）；trim 版 15.9 MB。**Task 17 满载产物**：空闲 31.4 / Private 7.2，连开 5 次管道会话后 37.4~37.8 ⇒ 在线内 |
+| **日常常驻（满载）**：Tray + mihomo 在跑（UI 已关） | **合计 ≤ 80 MB**（Tray 自身在这一格不设 40 线，见下面的裁定） | 同上，两个进程各采一次并求和 | Task 17 真内核 3 分钟 soak：Tray 49.8→51.5 / mihomo 26.1→26.5 ⇒ **合计 74.0~77.5 MB**，线内但只剩 2.5~6 MB 余量 |
+| UI 打开（Acrylic 档） | UI 进程 ≤ **220 MB**，Tray+内核+UI 合计 ≤ 260 MB | 同上，另记纯色档差值用于量化整窗 Acrylic 的成本 | Task 12 外壳（NavigationView + 空页，未上 Acrylic）WS **140.4 MB** / Private **86.5 MB**；Task 17 最坏档（节点页 30 行全落地 + 刚跑完全组测速）**180.0 / 104.9**，再轮询 20 s 回落 178.3 ⇒ 线内余量 40 MB |
+
+**判据口径的裁定（2026-10-27，用户批准"按空闲和满载拆两格执行"）**：原来那一行"日常常驻：Tray ≤ 40 MB，合计 ≤ 80 MB"把两种形态压在同一个 40 上，而 40 是 Task 2 在什么都没装的空壳（16.4 MB）上定的。Task 17 的归因数据说明这是**错位而不是严格**：顶穿 40 的驱动项是「内核在 Tray 里跑起来」（`core.start` 后、界面一个字节都没发的采样点 49.0 MB；连开 5 次管道会话只有 37.8，3 次连续界面会话 40.2~45.1），且 WS +17.6 而 Private 只 +5.2、`DOTNET_GCHardLimit=32MB` 实测一格没动 ⇒ 多出来的是映像共享页与已触碰未归还的页，**不是可裁掉的托管堆**（trim 路线另有实测判死，见本节末 Task 17 段④）。拆两格之后**一个数字都没放宽**：空闲那格仍按 40 判（实测 31.4 / 37.8，在线内），满载那格由本就在的合计线 80 判（实测 74.0~77.5）。UI 的 220 与三进程的 260 不动。
 
 数字是**待实测校准的初始线**：任务 0 探针先出空壳实测，若 WinUI 3 空壳常态即超线，回到本节改档默认值并记录，而不是悄悄放宽判据。
 
@@ -315,10 +318,10 @@ Stop-Process -Name ClashAcry.Tray   # 测完必须杀进程，否则污染后续
 ④ **trim 这条瘦身路线本轮实测判死**：`-p:PublishTrimmed=true` 产物启动即 `InvalidOperationException: Reflection-based serialization has been disabled`（`SettingsStore.Load`，SettingsStore.cs:22）；再加 `-p:JsonSerializerIsReflectionEnabledByDefault=true` 仍以同一异常退出（runtimeconfig 里那条开关确实是 true，但 trim 后的 STJ 反射解析器已被裁掉）。要走通必须给 STJ 上 `JsonSerializerContext` 源生成，再处理 YamlDotNet（同样靠反射）——**收益上限就是 Task 2 量到的 0.5 MB，代价是两棵反射面的手术**，且 ③ 已证明缺口不在托管堆。ReadyToRun 只影响启动耗时，不影响这几个数字，未采用。
 ⑤ 系统代理与用户现成的 clash 客户端全程未动：`sysproxy.set` 一次都没调，宿主前后 HKCU `ProxyEnable=0` / `ProxyServer=127.0.0.1:8090` 逐字未变，机器上同时在跑的 `verge-mihomo`（pid 23600）未被连接；本项目的内核用自己的 `core\mihomo.exe`（v1.19.33）与自己的 9097/7897 端口。
 
-**因此 40 MB 这条线要的是拍板，不是再测一轮**：它是在 Task 2 的空壳（16.4 MB，什么都没装）上定的，从未按"Tray 里真的养着一颗内核进程 + 两条重定向日志流 + 输出环"这个形态重新推过。三条处置，按本节的证据排序：
-① **推荐——把口径拆成两格，数字一个都不放宽**：`Tray ≤ 40 MB` 只管**空闲态**（无内核在跑；本轮实测 31.4 MB，连开 5 次管道会话后 37.4~37.8 MB，都在线内），内核在跑的那格由**合计线 `Tray+内核 ≤ 80 MB`** 管（本轮 74.0~77.5 MB）。理由是这两格本来就对应两种形态，把空闲态的线套在满载态上不是严格而是错位；v1 的常驻形态恰恰是"内核一直在跑"，合计线才是它的判据，而它守着。
-② 继续压实现换 40 线——可动的地方是 tooltip 泵每 2 s 的 `_store.Load()`（读盘 + JSON 反序列化，本可用内存里的 Settings）、`StderrTail` 的两次拷贝、两条重定向流；但 ③ 的归因数据（Private 只 +5.2 MB、GC 硬上限无效）说明这些是个位数 MB 的收益，填不平 9 MB。
-③ 认定"Tray 满载 50 MB"是可接受形态并写下这条线——最诚实但最松，且要人接受 40 这条从第一天就没按满载定的数字作废。
+**40 MB 这条线的处置结果（2026-10-27 已裁定）**：它是在 Task 2 的空壳（16.4 MB，什么都没装）上定的，从未按"Tray 里真的养着一颗内核进程 + 两条重定向日志流 + 输出环"这个形态重新推过。当时给的三条处置：
+① **采用——把口径拆成两格，数字一个都不放宽**：`Tray ≤ 40 MB` 只管**空闲态**（无内核在跑；本轮实测 31.4 MB，连开 5 次管道会话后 37.4~37.8 MB，都在线内），内核在跑的那格由**合计线 `Tray+内核 ≤ 80 MB`** 管（本轮 74.0~77.5 MB）。用户批准"按空闲和满载拆两格执行"，判据表已按此重写（见本节开头）。
+② 继续压实现换 40 线——可动的地方是 tooltip 泵每 2 s 的 `_store.Load()`（读盘 + JSON 反序列化，本可用内存里的 Settings）、`StderrTail` 的两次拷贝、两条重定向流；但归因数据（Private 只 +5.2 MB、GC 硬上限无效）说明这些是个位数 MB 的收益，填不平 9 MB。不采用。
+③ 认定"Tray 满载 50 MB"是可接受形态并写下这条线——最诚实但最松，且要人接受 40 这条从第一天就没按满载定的数字作废。不采用（① 已经把 40 留在它唯一被验证过的形态上）。
 
 
 ## 11. 测试与验收

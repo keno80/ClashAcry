@@ -19,12 +19,12 @@ public sealed class UiAppHarness
 {
     public string Exe { get; } = ResolveExe();
 
-    /// <summary>启动 UI 并返回一个会话；用完必须 Dispose（Dispose 会杀掉进程）。</summary>
-    public UiSession Launch(string? arg = null)
+    /// <summary>启动 UI 并返回一个会话；用完必须 Dispose（Dispose 会杀掉进程）。参数按需在 UI 侧解释（--tray-absent 等）。</summary>
+    public UiSession Launch(params string[] args)
     {
         KillStrayUi();
         var psi = new ProcessStartInfo(Exe) { UseShellExecute = false };
-        if (arg is not null) psi.ArgumentList.Add(arg);
+        foreach (var a in args) psi.ArgumentList.Add(a);
         var process = Process.Start(psi)!;
         var automation = new UIA3Automation();
         try
@@ -43,10 +43,10 @@ public sealed class UiAppHarness
     }
 
     /// <summary>只起进程、不 attach、不清场——给单实例这类「要同时存在两个进程」的用例用。</summary>
-    public Process StartBare(string? arg = null)
+    public Process StartBare(params string[] args)
     {
         var psi = new ProcessStartInfo(Exe) { UseShellExecute = false };
-        if (arg is not null) psi.ArgumentList.Add(arg);
+        foreach (var a in args) psi.ArgumentList.Add(a);
         return Process.Start(psi)!;
     }
 
@@ -88,6 +88,9 @@ public sealed class UiSession : IDisposable
     public Application App { get; }
     public Window Window { get; }
     public Process Process => _process;
+
+    /// <summary>窗口句柄：FlaUI 5 把它收在 <c>Properties</c> 组里，没有 <c>Window.NativeWindowHandle</c>（R-13c 同一批 API 面）。</summary>
+    public nint Hwnd => Window.Properties.NativeWindowHandle.Value;
 
     internal UiSession(Process process, UIA3Automation automation, Application app, Window window)
     {

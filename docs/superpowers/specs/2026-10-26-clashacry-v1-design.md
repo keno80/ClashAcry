@@ -178,11 +178,18 @@ docs/superpowers/{specs,plans,checklists}/
 
 ## 8. Fluent / Acrylic 视觉方案
 
-- **backdrop 三档**：`Acrylic`（默认，整窗 `DesktopAcrylicController`）· `Mica`（`MicaController`）· `纯色`。设置页单选即时生效，不重启：换 `Window.SystemBackdrop` 实例并触发一次重挂。
+- **backdrop 三档**：`Acrylic`（默认，整窗亚克力——**实际装的是 XAML 层 `DesktopAcrylicBackdrop`，见本节末 Task 13 回写 ①**）· `Mica` · `纯色`。设置页单选即时生效，不重启：换 `Window.SystemBackdrop` 实例并触发一次重挂。
 - **强制降级**：系统"个性化 → 颜色 → 透明效果"关闭、远程桌面会话、`DesktopAcrylicController.IsSupported()` 返回假这三种情况下，一律自动落纯色，并在设置项上明写"当前实际生效：纯色（系统透明已关闭）"。绝不静默假装还是亚克力。探测逻辑（读 `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\EnableTransparency` + `IsSupported()`）由任务 0 探针实测确认可行性，不成立则改用等价的系统事件监听。
 - **层级材质**：卡片/浮层用 `SystemBackdropElement` 或 `AcrylicBrush`（薄层），内容层保持 `SolidBackgroundFillColorBase` 系，保证文字对比度不靠猜。
 - **主题**：`ElementTheme` 三档跟随系统/light/dark。深色下控件 chrome **逐类核对**（`Button`/`ComboBox`/`ComboBoxItem`/`ListBoxItem`/`ScrollBar` 含 `Track.Thumb` 与翻页 `RepeatButton`，每类都要检查默认模板是否残留浅色），验收判据用像素取样而非肉眼看图。
 - **动效范围**：v1 只做 `ThemeTransition` + 页面切换转场 + 按钮 pressed/pointerover 默认态。connected animation、弹簧自定义曲线推迟。
+
+**backdrop 落地形态与降级证据（Task 13 回写，2026-10-27 / win-x64 / Windows App SDK 2.5.1）**：
+
+① **装的是 XAML 层 backdrop，不是 composition 控制器**。本节原写"整窗 `DesktopAcrylicController` / `MicaController`"，实测在 .NET 投影里挂不上去：`Microsoft.UI.Xaml.Media.ISystemBackdrop` 是不可访问类型（CS0122），控制器赋给 `Window.SystemBackdrop` 报 CS0029、`AddSystemBackdropConfiguration` 不可见（CS1061），`Microsoft.UI.Composition.SystemBackdrops.ISystemBackdrop` 干脆不存在（CS0246）。实际形态是 `Microsoft.UI.Xaml.Media.DesktopAcrylicBackdrop` / `MicaBackdrop`（`Window.SystemBackdrop` 的属性类型就是它们的公共基类 `SystemBackdrop`）。**代价**：拿不到 `SystemBackdropConfiguration`，材质明暗只能靠根元素 `RequestedTheme` 传导（本项目的主题三档正是这么生效的），也不需要 `Activated` 挂钩与 `Dispose` 生命周期——失焦停算归框架管。控制器唯一还需要的地方是 `IsSupported()` 探测，那是静态方法、不要求能实例化。
+② **判级逻辑在 Core，纯函数**：`BackdropPolicy.Resolve(requested, systemAllowsTransparency, acrylicSupported, micaSupported)` → `(Effective, Degraded, Reason)`，三开关交叉 8 例 + 默认档不静默降档 1 例（`BackdropPolicyTests`，9/9）。UI 侧只负责"把结果装到窗口上 + 写标注"。文案口径固定：`当前实际生效：{亚克力|Mica|纯色}`，降级时追加`（{系统透明效果已关闭 | 当前设备不支持亚克力 | 当前设备不支持 Mica}）`；**纯色是请求档时不算降级、不带括号**。
+③ **探测判据实测**：HKCU `…\Themes\Personalize\EnableTransparency` 可读（本机 0x1，测试全程只读），**缺键按"允许"处理**——老系统或被策略删键不等于用户关了透明，判成关会让默认亚克力凭空降级。
+④ **降级分支靠注入驱动，不改用户机器**：`BackdropService` 的三个 `Func<bool>` 是可注入缝，UI 的 `--force-degrade` 把"系统允许"注成假，用来断言降级文案；真机上手动关闭透明效果的那项目视仍留在验收清单。**远程桌面会话没有单独判据**：v1 依赖 `IsSupported()` 在 RDP 下的表现（本机未实测），Task 18 冒烟若发现 RDP 下仍挂上材质，则回本节补显式判据。
 
 ## 9. 错误处理
 
@@ -218,7 +225,7 @@ docs/superpowers/{specs,plans,checklists}/
 | 形态 | 目标 | 测量 | 实测（空壳，2026-10-26 / Task 2） |
 |---|---|---|---|
 | 日常常驻：Tray + mihomo（UI 已关） | Tray ≤ **40 MB**，合计 ≤ **80 MB** | `scripts/measure-residency.ps1`：`Get-Process` 采 `WorkingSet64` 与 `PrivateMemorySize64` 各 5 次取中位数 | Tray 空壳（self-contained 未 trim）WS **16.4 MB** / Private **4.6 MB**（三轮各取中位数：17.0 / 16.4 / 16.4）；trim 版 15.9 MB。距 40 MB 线余量充足 |
-| UI 打开（Acrylic 档） | UI 进程 ≤ **220 MB**，Tray+内核+UI 合计 ≤ 260 MB | 同上，另记纯色档差值用于量化整窗 Acrylic 的成本 | Task 12 外壳（NavigationView + 空页，未上 Acrylic）WS **140.4 MB** / Private **86.5 MB**，两次采样中位数一致；到窗口出现仅 ~0.5 s（热）/ 首次手动起 ~2 s。距 220 MB 线余量 80 MB，Acrylic 的成本留给 Task 13 复测 |
+| UI 打开（Acrylic 档） | UI 进程 ≤ **220 MB**，Tray+内核+UI 合计 ≤ 260 MB | 同上，另记纯色档差值用于量化整窗 Acrylic 的成本 | Task 12 外壳（NavigationView + 空页，未上 Acrylic）WS **140.4 MB** / Private **86.5 MB**，两次采样中位数一致；到窗口出现仅 ~0.5 s（热）/ 首次手动起 ~2 s。距 220 MB 线余量 80 MB，Acrylic 的成本留给 Task 13 复测（**已复测，见本节末：差值在噪声内**） |
 
 数字是**待实测校准的初始线**：任务 0 探针先出空壳实测，若 WinUI 3 空壳常态即超线，回到本节改档默认值并记录，而不是悄悄放宽判据。
 
@@ -242,6 +249,8 @@ Stop-Process -Name ClashAcry.Tray   # 测完必须杀进程，否则污染后续
 
 判据结论：**按字面不过**——空壳基线的 16.4 MB 是「什么都没装」的数字，装上 SettingsStore / HttpClient / 管道 / System.Text.Json 之后 WS 常态 37–45 MB，正好压在 40 MB 线上、被管道活动顶穿。三条已排除的坏味道：① 不是泄漏（连开 33 次会话后仍是 44.7 MB / Private 13.9 MB，回落后 Private 回到 9.7 MB）；② 不是 GC 配置问题（`ServerGarbageCollection=false`、`ConcurrentGarbageCollection=false` 已生效，Private 只有 ~10 MB，多出来的是 self-contained 运行时的**映像共享页**，算在 WS 里）；③ 合计线仍守住（45 + mihomo ≈ 25 MB ≈ 70 MB ≤ 80 MB）。
 处理：不放宽判据，瘦身归到 Task 17（发布产物）一起做——`PublishTrimmed`（§11 探针第 4 条本来就要求它）+ ReadyToRun + `JsonSerializer` 源生成，届时以「管道活动后 WS ≤ 40 MB」为复测口径。
+
+**Task 13 复测（整窗亚克力的成本，本节上一版留的账）**：同一 UI 外壳、同一采样法（各 5 次取中位数），**亚克力档 WS 145.6 MB / 纯色档 WS 145.9 MB** ⇒ 外壳阶段整窗亚克力**测不出额外开销**，差值在噪声内；UI 的内存账基本全是 XAML/WinUI 运行时本身，不是材质。与 Task 12 的 140.4 MB 不矛盾：那是还没装设置页与材质时的同一外壳。220 MB 线守住（余量 ~75 MB），真实控件（Task 14/15）落地后复测。
 
 
 ## 11. 测试与验收

@@ -4060,7 +4060,7 @@ git commit -m "feat(ui): WinUI 3 外壳（关窗即退、单实例、Tray 缺位
   - `sealed class BackdropService { BackdropKind Requested { get; } BackdropKind Effective { get; } bool Degraded { get; } string DegradedReason { get; } void Apply(Window w, BackdropKind kind, ElementTheme theme); }`
   - `static bool BackdropService.TransparentEffectsAllowedBySystem()`
 
-- [ ] **Step 1: 写失败的测试（纯策略，无窗口）**
+- [x] **Step 1: 写失败的测试（纯策略，无窗口）**
 
 ```csharp
 public class BackdropPolicyTests
@@ -4098,12 +4098,12 @@ public class BackdropPolicyTests
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter BackdropPolicyTests`
 Expected: FAIL（类型不存在）→ Step 3 的 3a 落地后即 PASS，9/9
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 3a — Core 纯策略（`src/ClashAcry.Core/BackdropPolicy.cs`，不引用任何 WinUI 类型）：
 
@@ -4201,7 +4201,7 @@ public sealed class BackdropService
 
 `MicaController { Kind = MicaKind.BaseAlloy }` 若在 2.5.1 上编译不过（该属性属于较新 SDK），去掉 `Kind` 初始化即可，Mica 档仍然成立。若 Task 13 的真机验证（Step 6 第 ② 项：关掉系统透明效果再看窗口）证明 `EnableTransparency` 注册表判定与实际视觉不符，改用实测等价的判据并回写 spec §8。
 
-- [ ] **Step 4: 设置页三档单选 + 实际生效标注 + 主题三档**
+- [x] **Step 4: 设置页三档单选 + 实际生效标注 + 主题三档**
 
 `SettingsPage.xaml`：
 - backdrop 组：三个 `RadioButton`（`Acrylic（默认）`/`Mica`/`纯色`，组名 `BackdropGroup`，AutomationId 分别 `BackdropAcrylic`/`BackdropMica`/`BackdropSolid`）；
@@ -4213,7 +4213,7 @@ public sealed class BackdropService
 
 > 为什么多一个 `BackdropSelectedLabel`：FlaUI 各版本读 `TogglePattern`/`SelectionItemPattern` 的写法不一样（`Current.Toggle` 在 FlaUI 4/5 已移除），而 `Current.Name` 是 UIA **属性**、跨版本稳定。测试一律走"UI 自己把状态写成一行可读文本"，不在测试里跟 pattern API 较劲。同理，`OverviewPage` 的开关状态一律由 `CoreStateLabel` 文本反映，测试不用读 `ToggleSwitch` 的 pattern。
 
-- [ ] **Step 5: UI 侧断言（只读，真窗口）**
+- [x] **Step 5: UI 侧断言（只读，真窗口）**
 
 `tests/ClashAcry.UI.Tests/BackdropTests.cs` 复用 Task 12 的 `UiAppHarness`，只断言"标注说得对"，不断言材质本身。
 本项目**只引用 Core，不引用 UI 工程**（WinUI 应用工程被测试项目引用会拖进一整套 XAML 编译器依赖，收益为零）——所以判据写成自一致性断言，而不是在测试里重算材质支持度：
@@ -4275,7 +4275,7 @@ public class BackdropTests : IClassFixture<UiAppHarness>
 
 （`using FlaUI.Core; using FlaUI.Core.Automation;`。HWND 从 `w.Current.NativeWindowHandle` 取（FlaUI 的 `Window` 是 UIA 元素，没有 `Handle` 属性）；材质本身没法用 UIA 断言，交给 Step 6 的肉眼与 Task 16 的像素取样。`UiAppHarness.Launch` 返回的 `Application` 要能被 `using` 且 `Dispose` 时真的杀掉 UI 进程——Task 12 的实现里用 `Application.Attach` 已满足。）
 
-- [ ] **Step 6: 跑通 + 肉眼确认**
+- [x] **Step 6: 跑通 + 肉眼确认**
 
 ```bash
 dotnet test tests/ClashAcry.Core.Tests --filter BackdropPolicyTests
@@ -4284,12 +4284,22 @@ dotnet test tests/ClashAcry.UI.Tests --filter BackdropTests
 ```
 Expected: 策略 9/9、UI 3/3。然后手动两项（这俩只能人眼）：① 切三档，窗口背景立刻变化且窗口没重开；② 到「设置 → 个性化 → 颜色 → 透明效果」关掉后重开 UI，窗口不透明，且设置页标注出现「当前实际生效：纯色（系统透明已关闭）」——spec §8「降级要明说」的验收点。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add src/ClashAcry.Core src/ClashAcry.UI tests/ClashAcry.Core.Tests/BackdropPolicyTests.cs tests/ClashAcry.UI.Tests/BackdropTests.cs
 git commit -m "feat(ui): backdrop 三档即时切换 + 主题三档（默认整窗亚克力，降级显式标注）"
 ```
+
+
+实施日回写（Task 13 落地时踩到的，全部有对应代码行或用例作证）：
+
+- **R-13a｜降级分支由注入的假开关驱动，绝不动用户的个性化设置**：计划 Step 6 第 ② 项要「到设置里关掉透明效果再重开 UI」，那是改用户的机器（HKCU `Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\EnableTransparency`）。测试不许干这事，改为走 `BackdropService` 的三个 `Func<bool>` 注入点：UI 加 `--force-degrade`，`MainWindow` 构造时把 `systemAllows` 注入成 `() => false`。判据与计划要求一字不差（`Degradation_SpellsOutTheReason` → 「当前实际生效：纯色（系统透明效果已关闭）」），而且可复现。`EnableTransparency` 全程只读，本机 0x1 未变。**真机手动关透明那项目视仍留人（或 Task 18 冒烟）**——注入只证明「判级 + 文案」这条链对，证明不了系统自己关掉透明时窗口的实际视觉。
+- **R-13b｜装的是 XAML 层 backdrop，不是 composition 控制器**：计划 3b 那套 `DesktopAcrylicController` + `ISystemBackdrop` + `SystemBackdropConfiguration` 在 Windows App SDK 2.5.1（WinUI 实际位 2.3.9）的 .NET 投影里编译不过——`Microsoft.UI.Xaml.Media.ISystemBackdrop` 是不可访问类型（CS0122）、控制器赋给 `Window.SystemBackdrop` 报 CS0029、`AddSystemBackdropConfiguration` 不可见（CS1061）、`Microsoft.UI.Composition.SystemBackdrops.ISystemBackdrop` 干脆不存在（CS0246）。可用形态是 XAML 层的 `Microsoft.UI.Xaml.Media.DesktopAcrylicBackdrop` / `MicaBackdrop`（`Window.SystemBackdrop` 的属性类型就是它们的公共基类 `SystemBackdrop`）。两处连带简化，签名因此与计划不同：① **`Apply` 没有 `theme` 参数**——XAML 层 backdrop 的明暗自动跟根元素 `RequestedTheme`；② 不需要 `SystemBackdropConfiguration`/`Activated` 挂钩，也不需要 `DisposeCurrent()`，失焦停算与 composition 生命周期归框架管。
+- **R-13c｜FlaUI 5 里 WinUI 3 `RadioButton` 只支持 SelectionItem**：计划样例的 `.Click()` 会抢用户光标（同 R-12i），换 `Patterns.SelectionItem.Pattern.Select()` 后实测 `Toggle` pattern 也是 `PatternNotSupportedException`——选档只能走 SelectionItem。HWND 从 `w.Properties.NativeWindowHandle.Value`（`nint`）取，样例的 `w.Current.NativeWindowHandle` 在 FlaUI 5.0 报 CS0234。另：`Select()` 返回 ≠ 界面换完，WinUI 的选中处理排在消息循环里，立刻读标签会拿到旧值，故 `Select` 带「等 settled 元素/短轮询」再断言。
+- **R-13d｜「默认档」用例必须先清偏好**：偏好已落盘，`DefaultRequestsAcrylic_AndLabelIsConsistent` 会被上一条用例（或上一轮手工操作）写进去的 Mica/Solid 污染。给 UI 加 `--reset-prefs`（`UiPrefs.Reset()` → `LocalSettings.Values.Clear()`），默认档与降级两条带着它启动；`PrefsSurviveRestart` 第二次启动**故意不带**它（那才叫「存过又读回来」），收尾把档位选回 Acrylic，不给用户留一台「测试机设成 Mica」。
+- **本轮实测**：Core 策略 9/9、Core.Tests **129 全绿**、UI.Tests **9/9**（backdrop 4 条），`dotnet build ClashAcry.sln -c Release` 0 警告 0 错误。临时抓帧探针（跑完即删，不入库）确认 unpackaged + self-contained 真窗口**确实挂上了亚克力**：设置页读数「Acrylic / 当前实际生效：亚克力」，窗口背景为亚克力整窗。内存：亚克力 WS 中位 **145.6 MB** vs 纯色 **145.9 MB**——外壳阶段亚克力**无可测的额外开销**（成本随 Task 14/15 的真实控件复测，见 §10）。跑完无 `ClashAcry.UI`/`ClashAcry.Tray` 残留，HKCU `ProxyEnable=0x0`、`ProxyServer=127.0.0.1:8090`、`EnableTransparency=0x1` 均未变。
+- **交接给 Task 16**：材质本身 UIA 断不了，本任务只断言「标注说得对」。像素取样时把**亚克力 / 纯色两档的取样**一并纳入判据，顺带补 R-13a 留下的「真机关透明」视差验证。
 
 ---
 

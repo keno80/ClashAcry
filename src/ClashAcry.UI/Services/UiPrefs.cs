@@ -37,6 +37,13 @@ public sealed class UiPrefs
         set => Write(nameof(Theme), value);
     }
 
+    /// <summary>回到「全新安装」：清掉存过的键，下一次读就是各自的默认值（材质回亚克力、主题回跟随系统）。</summary>
+    public void Reset()
+    {
+        try { _store?.Values.Clear(); }
+        catch (Exception) { /* 清不掉也不该拦住窗口起来 */ }
+    }
+
     private string? Read(string key) => _store is not null && _store.Values.TryGetValue(key, out var v) ? v as string : null;
 
     private void Write(string key, string value)

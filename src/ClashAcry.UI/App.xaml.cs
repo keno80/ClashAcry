@@ -21,6 +21,14 @@ public partial class App : Application
     /// <summary>测试启动参数 <c>--tray-absent</c>：跳过拉起、直接走「托盘宿主未运行」那条分支（Step 4 的断言面）。</summary>
     public static bool TrayAbsentRequested { get; private set; }
 
+    /// <summary><c>--reset-prefs</c>：把 LocalSettings 里的界面偏好清空，回到「全新安装」的状态。
+    /// 没有它，上一条用例写进去的 Mica 会让「默认档是亚克力」那条用例永远读不到默认值。</summary>
+    public static bool ResetPrefsRequested { get; private set; }
+
+    /// <summary><c>--force-degrade</c>：把「系统允许透明效果」注入成假。降级那条分支真机上要靠改用户的
+    /// 个性化设置才能复现（R-13a：测试不改别人的机器），所以走 <see cref="BackdropService"/> 的注入点。</summary>
+    public static bool ForceDegradeRequested { get; private set; }
+
     /// <summary>命令行参数的唯一读取口。unpackaged 下 <c>LaunchActivatedEventArgs.Arguments</c> 是应用激活用的，
     /// 从 <c>ProcessStartInfo</c> 传进来的裸参数只能从 <c>Environment.GetCommandLineArgs()</c> 拿（Step 4 实测）。</summary>
     public static bool HasArg(string name) =>
@@ -29,6 +37,8 @@ public partial class App : Application
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
         TrayAbsentRequested = HasArg("--tray-absent");
+        ResetPrefsRequested = HasArg("--reset-prefs");
+        ForceDegradeRequested = HasArg("--force-degrade");
         UnhandledException += OnUnhandled;
 
         if (!SingleInstance.TryAcquire())

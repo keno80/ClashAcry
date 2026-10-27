@@ -112,8 +112,26 @@ public sealed class TrayCommandRouting
     private bool ApplySysProxy(bool enabled)
     {
         var port = _store.Load().MixedPort;             // 硬规矩③：地址来自 settings，不写死 7897
-        if (enabled) SystemProxy.Enable($"127.0.0.1:{port}", "localhost,127.0.0.1,<local>");
-        else SystemProxy.Disable();                     // Disable 只翻开关，绝不抹掉别人写的 ProxyServer（R-7c）
+        var server = $"127.0.0.1:{port}";
+        if (enabled)
+        {
+            // R-20b：先把用户此刻的两键原值留在 settings.json，再动手覆盖。
+            // 只在「当前值不是我们自己的串」时建档：开→关（还原失败）→再开 这条路径上，
+            // 此刻的值已经是上一轮我们写的，再存一次就是把自己伪装成"原值"，那份真原值就永久丢了。
+            var before = SystemProxy.Capture();
+            SystemProxy.Enable(server, SystemProxy.DefaultBypass);
+            if (!string.Equals(before.Server, server, StringComparison.OrdinalIgnoreCase))
+                _store.Update(s => s with { SysProxyBackup = before });
+        }
+        else
+        {
+            // Disable 只翻开关，绝不抹掉 ProxyServer（R-7c）；载荷只在还原条件成立时才回去。
+            SystemProxy.Disable();
+            var backup = _store.Load().SysProxyBackup;
+            if (backup is not null &&
+                SystemProxy.Restore(backup, server, SystemProxy.DefaultBypass))
+                _store.Update(s => s with { SysProxyBackup = null });
+        }
         _pipe.Broadcast(EventTypes.SettingsChanged, Snapshot());   // 事件形状只有一种
         return enabled;
     }

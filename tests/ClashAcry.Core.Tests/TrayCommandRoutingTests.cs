@@ -1,6 +1,7 @@
 using System.Text.Json;
 using ClashAcry.Contracts;
 using ClashAcry.Tray;
+using Microsoft.Win32;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
 
@@ -39,6 +40,49 @@ public class TrayCommandRoutingTests
 
         Assert.True(SystemProxy.IsEnabled());
         Assert.Equal($"127.0.0.1:{h.Store.Load().MixedPort}", SystemProxy.CurrentServer());
+    }
+
+    [Fact]
+    public async Task SysProxy_EnableThenDisable_RestoresTheForeignProxyServer()
+    {
+        // R-20b（第四轮人工冒烟真机吃到）：Enable 覆盖掉的原值必须有人负责还回去。
+        // 这条从路由打通到注册表：开 → 原值进 settings.json；关 → 两键回原值、凭证销账。
+        using var h = new TrayHarness();
+        const string foreignServer = "corp.example:8080";
+        const string foreignBypass = "localhost;127.*";
+        using (var k = Registry.CurrentUser.CreateSubKey(SystemProxy.InternetSettingsKey))
+        {
+            k.SetValue("ProxyServer", foreignServer, RegistryValueKind.String);
+            k.SetValue("ProxyOverride", foreignBypass, RegistryValueKind.String);
+        }
+        var ours = $"127.0.0.1:{h.Store.Load().MixedPort}";
+
+        await h.Routing.Handle(Cmd(CmdTypes.SysProxySet, "c1", JsonUtil.Element(new { enabled = true })));
+        Assert.Equal(ours, SystemProxy.CurrentServer());                     // 前置：确实被我们覆盖了
+        Assert.Equal(foreignServer, h.Store.Load().SysProxyBackup!.Server);  // 快照进的是真原值
+
+        await h.Routing.Handle(Cmd(CmdTypes.SysProxySet, "c2", JsonUtil.Element(new { enabled = false })));
+        Assert.False(SystemProxy.IsEnabled());
+        Assert.Equal(foreignServer, SystemProxy.CurrentServer());            // 还原
+        using var after = Registry.CurrentUser.OpenSubKey(SystemProxy.InternetSettingsKey);
+        Assert.Equal(foreignBypass, (string?)after!.GetValue("ProxyOverride"));
+        Assert.Null(h.Store.Load().SysProxyBackup);                          // 还完就销凭证，不留二次还原的诱饵
+    }
+
+    [Fact]
+    public async Task SysProxy_EnableTwice_KeepsTheTrueOriginal_NotOurOwnLeftover()
+    {
+        // 反证（R-20b 的建档判据）：盘上此刻已是我们上一轮写的串（还原失败 / 用户连开两次），
+        // 第二次 Enable 若照抄当前值建档，真原值就被"我们自己的地址"顶替——那条路走完就永久回不去了。
+        using var h = new TrayHarness();
+        using (var k = Registry.CurrentUser.CreateSubKey(SystemProxy.InternetSettingsKey))
+            k.SetValue("ProxyServer", "corp.example:8080", RegistryValueKind.String);
+
+        await h.Routing.Handle(Cmd(CmdTypes.SysProxySet, "c1", JsonUtil.Element(new { enabled = true })));
+        Assert.Equal("corp.example:8080", h.Store.Load().SysProxyBackup!.Server);
+
+        await h.Routing.Handle(Cmd(CmdTypes.SysProxySet, "c2", JsonUtil.Element(new { enabled = true })));
+        Assert.Equal("corp.example:8080", h.Store.Load().SysProxyBackup!.Server);
     }
 
     [Fact]

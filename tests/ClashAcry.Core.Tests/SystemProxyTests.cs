@@ -66,6 +66,75 @@ public class SystemProxyTests
     }
 
     [Fact]
+    public void Restore_GivesBackForeignValues_WhileServerIsStillOurs()
+    {
+        // R-20b：Enable 覆盖掉的两键由快照还原。这条锁的是"关代理之后，别人的地址回来了"——
+        // 第四轮人工冒烟真机吃到的就是它没做：verge 的 127.0.0.1:8090 被我们冲掉后没人负责换回去。
+        using var _ = new RegistrySnapshot();
+        using (var k = Registry.CurrentUser.CreateSubKey(SystemProxy.InternetSettingsKey))
+        {
+            k.SetValue("ProxyServer", "corp.example:8080", RegistryValueKind.String);
+            k.SetValue("ProxyOverride", "localhost;127.*", RegistryValueKind.String);
+            k.SetValue("ProxyEnable", 0, RegistryValueKind.DWord);
+        }
+
+        var backup = SystemProxy.Capture();
+        SystemProxy.Enable("127.0.0.1:7897", SystemProxy.DefaultBypass);
+        SystemProxy.Disable();
+        Assert.Equal("127.0.0.1:7897", SystemProxy.CurrentServer());        // 前置：确实被我们覆盖过
+
+        Assert.True(SystemProxy.Restore(backup, "127.0.0.1:7897", SystemProxy.DefaultBypass));
+        Assert.Equal("corp.example:8080", SystemProxy.CurrentServer());
+        using var after = Registry.CurrentUser.OpenSubKey(SystemProxy.InternetSettingsKey);
+        Assert.Equal("localhost;127.*", (string?)after!.GetValue("ProxyOverride"));
+    }
+
+    [Fact]
+    public void Restore_WhenSomeoneElseWroteAfterUs_WritesNothing_AndReportsFalse()
+    {
+        // R-20b 的判据是 ProxyServer 而不是 ProxyEnable：第三方可以在我们开着的时候改地址而不动开关。
+        // 那份快照当场过期，写回去就是反向抹掉别人——与 R-7c 同罪，所以一条都不许写。
+        using var _ = new RegistrySnapshot();
+        using (var k = Registry.CurrentUser.CreateSubKey(SystemProxy.InternetSettingsKey))
+            k.SetValue("ProxyServer", "proxy.other:3128", RegistryValueKind.String);
+
+        var backup = new SystemProxy.Backup("corp.example:8080", "localhost;127.*");
+        Assert.False(SystemProxy.Restore(backup, "127.0.0.1:7897", SystemProxy.DefaultBypass));
+        Assert.Equal("proxy.other:3128", SystemProxy.CurrentServer());
+    }
+
+    [Fact]
+    public void Restore_BackupOfAbsence_DeletesValues_NotEmptyStrings()
+    {
+        // 快照里 null = "原本不存在"（R-7b 在夹具那侧立的口径，还原这侧同罪）：
+        // 写成空串会在用户注册表里永久留下一条垃圾 ProxyServer=""。
+        using var _ = new RegistrySnapshot();
+        using (var k = Registry.CurrentUser.CreateSubKey(SystemProxy.InternetSettingsKey))
+        {
+            k.SetValue("ProxyServer", "127.0.0.1:7897", RegistryValueKind.String);
+            k.SetValue("ProxyOverride", SystemProxy.DefaultBypass, RegistryValueKind.String);
+        }
+
+        Assert.True(SystemProxy.Restore(new SystemProxy.Backup(null, null), "127.0.0.1:7897", SystemProxy.DefaultBypass));
+        using var after = Registry.CurrentUser.OpenSubKey(SystemProxy.InternetSettingsKey);
+        Assert.Null(after!.GetValue("ProxyServer"));
+        Assert.Null(after.GetValue("ProxyOverride"));
+    }
+
+    [Fact]
+    public void CleanupIfStale_ReportsWhetherItCleanedOurOwnLeftover()
+    {
+        // R-20b 的返回值判据：调用方只在"真的清掉了我们自己那条"时才动原值快照，
+        // 否则别人的代理会被我们当成残留还原一遍。
+        using var _ = new RegistrySnapshot();
+        SystemProxy.Enable("127.0.0.1:1234", "");
+        Assert.False(SystemProxy.CleanupIfStale(7897, coreAlive: () => false));
+
+        SystemProxy.Enable("127.0.0.1:7897", "");
+        Assert.True(SystemProxy.CleanupIfStale(7897, coreAlive: () => false));
+    }
+
+    [Fact]
     public void RegistrySnapshot_RestoresAbsence_NotEmptyStrings()
     {
         // 裁定 R-7b：夹具是用户系统代理的唯一防线，而这条防线本身此前无测试。

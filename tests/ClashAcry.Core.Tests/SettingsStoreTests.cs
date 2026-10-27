@@ -57,6 +57,25 @@ public class SettingsStoreTests : IDisposable
     }
 
     [Fact]
+    public void SysProxyBackup_RoundTripsUnderTheSpecKeyNames()
+    {
+        // R-20b：这份快照是"欠用户一次还原"的凭证，必须跨重启活下来。键名按 spec §4.3 逐字段显式标注，
+        // 名字漂了 = 老文件里的快照读不回来，用户那份原值就永久留在盘上没人还。
+        var store = Store();
+        store.Update(s => s with { SysProxyBackup = new SystemProxy.Backup("corp.example:8080", "localhost;127.*") });
+
+        var raw = File.ReadAllText(AppPaths.ForTest(_dir).SettingsFile);   // WriteIndented：冒号后有一个空格
+        Assert.Contains("\"sys_proxy_backup\"", raw);
+        Assert.Contains("\"server\": \"corp.example:8080\"", raw);
+        Assert.Contains("\"bypass\": \"localhost;127.*\"", raw);
+        Assert.Equal("corp.example:8080", Store().Load().SysProxyBackup!.Server);
+        Assert.Equal("localhost;127.*", Store().Load().SysProxyBackup!.Bypass);
+
+        store.Update(s => s with { SysProxyBackup = null });
+        Assert.Null(Store().Load().SysProxyBackup);
+    }
+
+    [Fact]
     public void MissingSecretKey_HealsToNewSecret_AndPersistsIt()
     {
         var settings = AppPaths.ForTest(_dir).SettingsFile;

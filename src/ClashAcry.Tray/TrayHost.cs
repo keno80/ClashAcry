@@ -38,7 +38,11 @@ public sealed class TrayHost
         _store = new SettingsStore(_paths);
         var s = _store.Load();
 
-        SystemProxy.CleanupIfStale(s.MixedPort, coreAlive: () => false);       // 第 2 层守卫：冷启动专治上次被强杀
+        // 第 2 层守卫：冷启动专治上次被强杀。强杀没有退出钩子，所以 R-20b 的原值快照只能在这里还回去
+        // ——且只在 CleanupIfStale 真的清掉了**我们自己**那条残留时（返回假 = 那是别人的代理，一律不动）。
+        if (SystemProxy.CleanupIfStale(s.MixedPort, coreAlive: () => false) && s.SysProxyBackup is { } backup &&
+            SystemProxy.Restore(backup, $"127.0.0.1:{s.MixedPort}", SystemProxy.DefaultBypass))
+            _store.Update(x => x with { SysProxyBackup = null });
         if (!File.Exists(_paths.CoreExecutable))                               // 第 3 步：内置内核只在缺失时铺，不覆盖在线更新结果
         {
             var bundled = Path.Combine(AppContext.BaseDirectory, "core", "mihomo.exe");

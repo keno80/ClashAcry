@@ -124,8 +124,11 @@ mixed 端口被占用的真机行为（Task 8 `Running` 判据依据，`-OccupyM
 ```
 { controller_host: "127.0.0.1", controller_port: 9097, secret: "<32hex 首次随机>",
   mixed_port: 7897, core_path: null, delay_test_url: "http://www.gstatic.com/generate_204",
-  last_subscription: "<URL 或本地 yaml 绝对路径>", core_version: "<已装内核 tag>" }
+  last_subscription: "<URL 或本地 yaml 绝对路径>", core_version: "<已装内核 tag>",
+  sys_proxy_backup: { server: "<开启系统代理前的 ProxyServer>", bypass: "<同 ProxyOverride>" } | null }
 ```
+
+**`sys_proxy_backup` 是"欠用户一次还原"的凭证（R-20b，2026-10-27 第四轮加）**，不是引擎设置：它只在 `sysproxy.set(true)` 那一次写入、还原成功即清成 `null`，且**绝不出现在 `settings.get` 的回包里**（与 `secret`/`core_path` 同一口径——UI 拿到的是四字段快照，不是原始文件）。字段为 `null` 的含义是"原本不存在"，还原时按删除处理，不写空串。
 
 **扁平 snake_case，不嵌套 `controller: {host, port}`**（Task 4 落地裁定）：Task 8/10/11 全部用 `with` 改单个端口字段，嵌套会把每处改动变成 `s with { Controller = s.Controller with { Port = p } }`；且 Task 10 的跨进程 `SettingsPatch` 本就是扁平 `controller_port`，两处同形才不留翻译层。键名逐字段显式 `[JsonPropertyName]`，不靠命名策略推断；缺键必须回落到默认值（用户手改 settings.json 是预期通路）。`delay_test_url` 默认 `http://`（Task 1 探针用它调 `/delay` 实测出过延迟值，且与 UI 侧测速地址下拉、`handshake` 下发的 `delay_test_url` 同值）。
 
@@ -262,6 +265,7 @@ docs/superpowers/{specs,plans,checklists}/
 | 状态失真 | mixed 端口被占但 controller 正常，内核活着却不通 | `Running` 判据 = `GET /version` 成功 **且** mixed 端口 TCP 可连；任一不符不进入 `Running`，横幅报"端口 7897 被占用" |
 | API 断连 | secret 不符、controller 未监听、Tray 掉线 | `MihomoClient` 透出真实状态码；UI 顶部横幅态 + 写操作按钮置灰；管道断开则提示一键重启 Tray |
 | 系统代理残留 | UI/Tray 被强杀后注册表悬挂 | 三层：正常退出钩子必清；Tray 启动时校验"注册表代理指向本应用端口且探活失败"才清（指向其他软件的代理**绝不触碰**）；托盘"停止内核"顺带清 |
+| 系统代理**载荷**被我们覆盖 | `Enable()` 无条件写 `ProxyServer`/`ProxyOverride`，关掉开关并不换回去（R-20b，第四轮真机吃到） | 开启前把两键原值快照进 `settings.json` 的 `sys_proxy_backup`，关闭时**只在当前值仍等于我们写的那份**才还原（第三方在我们之后写过就不动，与 R-7c 同向）；强杀那条路由冷启动的 `CleanupIfStale` 返回值触发同一次还原 |
 | 订阅下载失败 | 网络/源站错误/非 yaml 响应 | 保留旧 `config.yaml` + 横幅报错；**永不清空配置** |
 | 内核更新失败 | 下载中断、zip 解不出 exe、目标文件被占用 | 缓存已下载 zip 供重试跳过网络；替换失败退回原 `.exe` 并保持内核运行；全程不阻塞 UI（进度事件推 `core.update.progress`），拒绝阻塞式弹窗 |
 
@@ -444,7 +448,9 @@ Stop-Process -Name ClashAcry.Tray   # 测完必须杀进程，否则污染后续
   ⑧ **geodata 首下**：见 §9「启动窗口分档」——分档修掉了"我们把下载掐死"，但**冷装 + 带 `GEOIP` 规则**的首次启动仍要等一次 8.4 MB 的 `geoip.metadb`（本机 ~45 s，且源站不稳：实测也出现过 90 s 超时 fatal）。v1.1 候选是把 `geoip.metadb` / `geosite.dat` 随包分发并在起核前种进 `runtime\`（与 `BUNDLED.txt` 同一套溯源口径），代价是 zip 再加 ~10 MB。
 - **托盘退出轮暴露的两条（2026-10-27 第四轮人工冒烟）**：
   ⑨ **托盘「退出」后界面窗口还留在屏幕上（已修，裁定 R-20a，见 §3 反向语义）**：退出钩子原本只做「摘图标 → 关代理 → 停内核 → 关管道」，界面于是停在"宿主没了但我还开着"的形态——横幅 `与托盘的连接中断：Pipe is broken.`、控制全置灰、节点列表还显示上一世的「442 ms」。修法是在停内核之后遍历 `ClashAcry.UI` 进程调 `CloseMainWindow()`（**不 Kill**），由 UI 自己的「关窗即退」收尾；机制对真窗口实测：`MainWindowHandle=592352`、`CloseMainWindow()` 回 `True`、3 s 内进程消失。这条没有回归锁——`TrayHost.ShutdownAsync` 以 `Environment.Exit` 结尾、且要真托盘菜单才可达，单元侧无法在不掏空 TrayHost 的前提下钉住，以真机实测代替（同 §3 的 WinExe 退出路实测同一口径）。**仍然留着的相邻形态**：Tray 被强杀/崩溃时界面照旧活着显示断连横幅——那一条的出路是 §12 早就记过的「横幅一键拉起 Tray」按钮，仍未接。
-  ⑩ **`sysproxy.set(true)` 会覆盖别人写的 `ProxyServer` / `ProxyOverride`（本轮真机吃到，是否补救未裁定）**：`SystemProxy.Enable` 无条件写这两键（I-3 只调整了写序，没做快照），`Disable` 依 R-7c 只翻 `ProxyEnable`、不碰载荷。这条**不是暗坑**——清单第 0 条的原话就是「过完第 5 条就回不去了，先把三值抄下来」，并据此要求人工先备份。第四轮实测确认它真的发生了：基线 `ProxyServer=127.0.0.1:8090` / `ProxyOverride=localhost;127.*;<local>`（clash-verge 留下的）变成 `127.0.0.1:7897` / `localhost,127.0.0.1,<local>`，托盘退出的清理链不会把它换回去。当前 `ProxyEnable=0`，流量没被劫走，但与 AGENTS.md 的红线「本机那套 verge 的值必须原样保留」有张力。建议修法（约 30 行 + 两条锁）：`Enable` 前把两键原值快照进 `settings.json`（Tray 写引擎设置，符合两棵真相树），`Disable` 时**只有当前值仍等于我们写进去的那份**才还原快照——第三方在我们之后写过就不动，避免反向抹掉别人的。不阻塞 v1；需要用户点头再做，外加一次手工把本机现值改回基线。
+  ⑩ **`sysproxy.set(true)` 会覆盖别人写的 `ProxyServer` / `ProxyOverride`（本轮真机吃到，已修：R-20b）**：`SystemProxy.Enable` 无条件写这两键（I-3 只调整了写序，没做快照），`Disable` 依 R-7c 只翻 `ProxyEnable`、不碰载荷。这条**不是暗坑**——清单第 0 条的原话就是「过完第 5 条就回不去了，先把三值抄下来」，并据此要求人工先备份。第四轮实测确认它真的发生了：基线 `ProxyServer=127.0.0.1:8090` / `ProxyOverride=localhost;127.*;<local>`（clash-verge 留下的）变成 `127.0.0.1:7897` / `localhost,127.0.0.1,<local>`，托盘退出的清理链不会把它换回去（`ProxyEnable` 回了 0，流量没被劫走，但那两键回不去）。
+  **修法（已落地）**：`Enable` 前 `SystemProxy.Capture()` 取两键原值 → 存进 `settings.json` 的 `sys_proxy_backup`（§4.3；Tray 独占写，符合两棵真相树；不进 `settings.get` 回包）→ `Disable` 调 `Restore(backup, ourServer, ourBypass)`，**判据是当前 `ProxyServer` 仍等于我们写的那份**（不是判 `ProxyEnable`：第三方可以在我们开着时改地址而不动开关）；不成立就一条都不写、快照留着，方向与 R-7c 一致——宁可漏还，不反向抹别人。还原语义含"原本不存在 ⇒ 删除该值"，不写空串（R-7b 同口径）。三条建档/销账规矩：① 只在当前值**不是**我们自己的串时建档，否则「开→还原失败→再开」会把自己写成"原值"、真原值永久丢失（锁 `SysProxy_EnableTwice_KeepsTheTrueOriginal_NotOurOwnLeftover`）；② 冷启动的悬挂清理也触发还原——强杀没有退出钩子，那是唯一还能还的时机，所以 `CleanupIfStale` 改成返回"是否真清掉了我们那条"，返回假绝不碰快照（锁 `CleanupIfStale_ReportsWhetherItCleanedOurOwnLeftover`）；③ 还原成功才销凭证（锁 `SysProxy_EnableThenDisable_RestoresTheForeignProxyServer`）。
+  **本机的现值已手工改回基线**（`ProxyEnable=0` / `ProxyServer=127.0.0.1:8090` / `ProxyOverride=localhost;127.*;<local>`，用户指令「开始吧」）：旧产物没留快照，新代码无从代劳。**「停止内核」这条路径不还原**——它只翻开关（`CoreManager.Stop` → `CleanupIfStale`），载荷留在盘上等下一次 `sysproxy.set(false)` 或冷启动清理，避免"关了代理又开内核"时地址已被换掉。
 - **secret 落盘明文**（同用户可读）：自用容忍；管道 ACL 限当前用户 SID，`handshake` 之外不向其他进程暴露。
 - **yaml 保真度（Task 5 已实测结案，不再是待探针项）**：YamlDotNet 18.1.0 的 `YamlStream`/DOM 通路**保留全部字段值与键序、保留 block/flow 风格与用户锚点别名**（`&x`、`*x`、`<<:`），但**不保留注释**（DOM 不承载 comment token），且会出现三类无害漂移：block 序列压平到父键同列、flow 节点内部空白归一、文档尾部多一行 `...`。因此 v1 的公开承诺只有“不认识的原样透传、只做顶层必需键覆盖、用户手写原件永不被改写”，**UI 文案与导入说明不得声称保留注释或原始格式**；如日后要真保注释，需换库并另立任务。另：`YamlStream.Save` 必须显式 `assignAnchors: false`，否则会给内容重复的节点自动发随机锚点，产物里长出用户没写过的 `&203281033`。
 

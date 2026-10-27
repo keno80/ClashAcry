@@ -20,8 +20,10 @@
 **托盘退出轮（同一天的第四轮，用户亲手点第 4~12 条）**：第 4/5 条真跑通（内核起来 + 系统代理开过），第 12 条的清理链也被真机走了一遍——
 `ProxyEnable` 回到 0、无 `mihomo` 残留，这两条判据成立；**但它暴露出「托盘退出了、界面窗口还在」**（横幅「与托盘的连接中断：Pipe is broken.」+ 控制全置灰 +
 节点页仍显示上一世的延迟），已按裁定 R-20a 修好：退出钩子在停内核后对 `ClashAcry.UI` 调 `CloseMainWindow()`，界面跟着优雅收尾。
-同轮记下的第二条是 `ProxyServer`/`ProxyOverride` 被我们的 `sysproxy.set(true)` 覆盖（第 0 条预警的那件事真发生了），补救与否待拍板，见 spec §12 ⑨⑩。
-**产物已重打包**（`artifacts/publish/ClashAcry-v0.1.0-win-x64.zip`，110.1 MB / 535 文件），第 4~12 条要用新产物重过一遍。
+同轮记下的第二条是 `ProxyServer`/`ProxyOverride` 被我们的 `sysproxy.set(true)` 覆盖（第 0 条预警的那件事真发生了），
+已按裁定 R-20b 修好：开启前把原值快照进 `settings.json` 的 `sys_proxy_backup`，关闭时只在"当前值仍是我们写的那份"时还原（spec §4.3/§12 ⑩）。
+**本机现值已由 agent 手工改回基线**（`ProxyEnable=0` / `ProxyServer=127.0.0.1:8090` / `ProxyOverride=localhost;127.*;<local>`），因为旧产物没留快照、新代码无从代劳。
+测试基线抬到 **Core 166 / UI 28**，构建仍 0 警告。**产物已重打包**（`artifacts/publish/ClashAcry-v0.1.0-win-x64.zip`，110.1 MB / 535 文件），第 4~12 条要用新产物重过一遍。
 
 环境前提（AGENTS.md）：本机 .NET 10 SDK 在 `%LOCALAPPDATA%\Microsoft\dotnet`，Git Bash 里先
 `export PATH=/c/Users/Keno/AppData/Local/Microsoft/dotnet:$PATH`，否则 `dotnet` 会报 "No .NET SDKs were found"。
@@ -31,15 +33,16 @@
 ## 0. 先备份系统代理三值【动手，必须第一个做】
 
 本项目会往 HKCU 写 `ProxyEnable`/`ProxyServer`/`ProxyOverride`。`SystemProxy.Disable()` 只翻开关、
-不抹 `ProxyServer`（裁定 R-7c），但 **`Enable()` 会覆盖它**——机器上如果留着别家客户端写过的
-`ProxyServer`（本机现状是 `127.0.0.1:8090`、`ProxyEnable=0`），过完第 5 条就回不去了。先把三值抄下来：
+不抹 `ProxyServer`（裁定 R-7c），而 **`Enable()` 会覆盖它**——机器上如果留着别家客户端写过的
+`ProxyServer`（本机现状是 `127.0.0.1:8090`、`ProxyEnable=0`），从这份构建起由 `sys_proxy_backup` 快照负责还回去（裁定 R-20b，spec §4.3/§12 ⑩）。
+**但备份照抄**：快照只覆盖"用这份新构建开的那一次"，旧产物留下的覆盖、以及还原判据不成立（第三方在我们之后改过地址）时留在盘上的那份，都只能靠你抄下的原值兜底。先把三值抄下来：
 
 ```powershell
 Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' |
     Select ProxyEnable, ProxyServer, ProxyOverride | Format-List
 ```
 
-跑完清单（第 11 条）按抄下的值原样写回。**注意**：全程不要碰 `verge-mihomo` / `clash-verge` 那套
+跑完清单（第 12 条）按抄下的值原样写回，或按第 5 条的自动化判据确认程序已经自己还了。**注意**：全程不要碰 `verge-mihomo` / `clash-verge` 那套
 （AGENTS.md 红线：指向其他软件的代理绝不触碰）；本项目只用自己的 9097/7897。
 
 ## 1. 自动化全绿【本会话已自测】
@@ -142,7 +145,10 @@ powershell -Command "Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentV
 
 期望：`204`；注册表判据 开=`1` 且 `ProxyServer=127.0.0.1:7897`、`ProxyOverride` 含 `localhost,127.0.0.1,<local>`。
 关掉后再跑一次 curl 期望仍 `204`（直连也拿得到），此时判据只看 `ProxyEnable=0`。
-**别忘了回到第 0 条把 `ProxyServer`/`ProxyOverride` 原样写回。**
+
+**R-20b 的自动化判据（关掉之后多跑这一条）**：`ProxyServer`/`ProxyOverride` 必须回到你第 0 条抄下的原值（本机是 `127.0.0.1:8090` / `localhost;127.*;<local>`），
+`%LOCALAPPDATA%\ClashAcry\settings.json` 里的 `sys_proxy_backup` 变回 `null`。两个方向都要看：
+地址没换回来 = 还原没触发；快照还在 = 销账没做（锁是 `SysProxy_EnableThenDisable_RestoresTheForeignProxyServer`，真机这条走一遍才算闭环）。
 
 ## 6. 关窗即退 + 常驻开销（两格口径）【人眼 + 脚本；数值本会话已自测】
 
@@ -232,7 +238,7 @@ powershell -Command "Get-Process ClashAcry.UI,ClashAcry.Tray -ErrorAction Silent
 
 期望：这条在点完「退出」几秒后**什么都不打印**。第四轮真机测到的是旧行为（窗口留着显示断连横幅），已修；
 关不掉的窗口不阻塞退出（不重试、不硬杀），所以你若看到窗口还在，就是 `CloseMainWindow()` 没送进去——把那次的现象记下来即可。
-最后按第 0 条把 `ProxyServer` / `ProxyOverride` 还原成你抄下的原值。
+最后按第 0 条把 `ProxyServer` / `ProxyOverride` 还原成你抄下的原值——**从这份构建起这一步该由程序自己做**（R-20b：退出钩子发的是 `sysproxy.set(false)`，走的就是带快照还原的那段路由），你只需要核对它确实回去了。
 
 ---
 

@@ -257,6 +257,8 @@ docs/superpowers/{specs,plans,checklists}/
 
 **测试与真机宿主的互斥（同批实测）**：Core 测试用的管名就是生产管名 `clashacry.tray.v1`，真 Tray 宿主在跑时 `PipeRoundTripTests` 的 9 条用例会成片失败（自己的服务端建不起来 / `WaitsUp` 探到了真宿主）。跑套件前先确认没有 `ClashAcry.Tray.exe` 存活；反之，端到端验证也要在同一次跑里避开套件。
 
+**内置内核第一次真跑（Task 17 回写，v1.19.33 + 发布产物）**：`core.start` 起来的是**空默认配置的内核**——它监听 7890、连 `external-controller` 都没有，双探活 `controller=fail mixed(7897)=fail`，5 s 窗口内不落 `Running`，两次尝试后广播 `Crashed`，而内核日志里没有一行错误。根因是默认启动参数写的是 `-d "<paths.Root>"`：mihomo 在 `-d` 目录里找 `config.yaml`，注入产物只写 `AppPaths.ConfigFile`（= `RuntimeDir\config.yaml`），Root 下没有配置它就按内置默认起。§3 的 `spawn(-d <runtime>)` 从第一天起就是这个意思，TrayHost 的注释也这么写，只有实现指错了目录。修在 `CoreManager.DefaultLaunch`（提到 static，`-d "<RuntimeDir>"`），回归锁 `DefaultLaunch_PointsAtTheDirThatActuallyHoldsConfigYaml` 的判据是「从 Arguments 解出来的那个目录里必须真能看见 `config.yaml`」而不是死字符串比对——之前 15 条 `CoreManagerTests` 全部注入假 launchFactory（`.cmd` 脚本，根本不看 `-d`），默认分支一次都没被真配置跑过，这是"假夹具挡住真缺陷"的教科书样本。修完的同一条通路：`RESTful API listening at: 127.0.0.1:9097` + `Mixed(http+socks) proxy listening at: 127.0.0.1:7897`，握手回 `state:"Running"`，`core.stop` 后进程从进程表消失，宿主前后 HKCU 代理两项逐字未变。
+
 ## 10. 常驻开销目标（验收判据）
 
 | 形态 | 目标 | 测量 | 实测（空壳，2026-10-26 / Task 2） |
@@ -294,6 +296,29 @@ Stop-Process -Name ClashAcry.Tray   # 测完必须杀进程，否则污染后续
 另记：本轮**未启动真实 mihomo**（`mihomo: none`），全部界面行为打在 FakeTray + WireMock 上，用户机器上同时在跑的另一个 clash 客户端（verge-mihomo，可能占 7897/9097）与它的系统代理设置全程未被触碰。
 
 **Task 16 复测（改的是 DPI，不是控件；2026-10-27，同一 `--self-contained` 构建产物、各 5 次取中位数）**：Tray 空闲 **WS 34 MB / Private 8.5 MB**，UI 连上后 **WS 150.7 MB / Private 89.8 MB**（对照 Task 15 的 150.6 / 90.1：PerMonitorV2 + 按 DPI 换算窗口尺寸**没有可测代价**，仍在 220 线内）。宿主前后 HKCU `ProxyEnable=0`/`ProxyServer=127.0.0.1:8090`/`ProxyOverride` 逐字未变，真实 mihomo 未启动。**但 Tray 在 UI 会话后读到 WS 42.1 MB / Private 13.4 MB——40 MB 线又被管道活动顶穿**（Task 10 的 45.4 MB 同一现象，Task 15 那次 38.2 MB 是采样时点不同，不是问题消了）。判据不放宽：Task 17 的 trim + ReadyToRun 复测口径就是「连开 5 次管道会话后 Tray ≤ 40 MB」，做不到就停下来报告。
+
+**Task 17 复测（2026-10-27，发布产物 `artifacts/unzipped`，self-contained 未 trim；这一轮第一次真跑内置内核）**：
+
+| 采样点 | Tray WS/Private | mihomo WS/Private | UI WS/Private |
+|---|---|---|---|
+| 空闲（无内核、无界面会话） | 31.4 / 7.2 | — | — |
+| 连开 5 次管道会话后 | 37.4~37.8 / ~10 | — | — |
+| 3 次连续界面会话（每次 20 s，同一 Tray） | 会话中 40.4~42.2 / 11~13.6，会话后 40.2~45.1 / 9.8~15.7 | — | — |
+| **内核在跑，界面不开** | **49.0 / 12.4** | 25.1 / 60.0 | — |
+| 内核在跑 + 界面挂着轮询（3 分钟 soak，每 30 s 采一次） | 49.8→51.5 / 12.2~13.5，**平台不单调** | 26.1→26.5 / 60.5~61.0 | 158~161 / 91~96 |
+| 节点页可见（30 行全落地）+ 刚跑完全组测速（FakeTray+WireMock，构建产物） | — | — | **180.0 / 104.9**，再轮询 20 s 回落 178.3 |
+
+判据结论，三条分开说：
+① **UI ≤ 220 MB 守住**，最坏档（节点页 30 行 + 全组测速刚结束）180 MB，余量 40 MB；Task 15 留的"节点页没打开"那格账补齐了。
+② **Tray+内核 ≤ 80 MB 守住但很紧**：soak 期间合计 74.0~77.5 MB，mihomo 自身 WS 只有 26 MB（Private 60 MB 是 Go 预留的堆，不进 WS 口径）。
+③ **Tray ≤ 40 MB 按字面不过，且这次找到了真正的驱动项**：顶穿 40 线的**不是管道活动**（5 次会话 37.8，界面会话 40~42），而是**内核在 Tray 里跑起来**——`core.start` 之后、界面一个字节都没发的采样点是 **49.0 MB**。此前每一轮（Task 10/15/16）都没启动过真内核，所以这条线一直被误判成"管道顶穿"。归因数据：WS +17.6 MB 而 Private 只 +5.2 MB ⇒ 多出来的是**映像共享页与已触碰未归还的页**，不是托管堆；把 `DOTNET_GCHeapHardLimit` 压到 32 MB 再测，四个采样点 48.9/49.9/49.6/52.4 **一格没动**，证实托管堆不是来源，trim/源生成也救不了它（Task 2 的 trim 空壳实测本来只有 0.5 MB 收益）。
+④ **trim 这条瘦身路线本轮实测判死**：`-p:PublishTrimmed=true` 产物启动即 `InvalidOperationException: Reflection-based serialization has been disabled`（`SettingsStore.Load`，SettingsStore.cs:22）；再加 `-p:JsonSerializerIsReflectionEnabledByDefault=true` 仍以同一异常退出（runtimeconfig 里那条开关确实是 true，但 trim 后的 STJ 反射解析器已被裁掉）。要走通必须给 STJ 上 `JsonSerializerContext` 源生成，再处理 YamlDotNet（同样靠反射）——**收益上限就是 Task 2 量到的 0.5 MB，代价是两棵反射面的手术**，且 ③ 已证明缺口不在托管堆。ReadyToRun 只影响启动耗时，不影响这几个数字，未采用。
+⑤ 系统代理与用户现成的 clash 客户端全程未动：`sysproxy.set` 一次都没调，宿主前后 HKCU `ProxyEnable=0` / `ProxyServer=127.0.0.1:8090` 逐字未变，机器上同时在跑的 `verge-mihomo`（pid 23600）未被连接；本项目的内核用自己的 `core\mihomo.exe`（v1.19.33）与自己的 9097/7897 端口。
+
+**因此 40 MB 这条线要的是拍板，不是再测一轮**：它是在 Task 2 的空壳（16.4 MB，什么都没装）上定的，从未按"Tray 里真的养着一颗内核进程 + 两条重定向日志流 + 输出环"这个形态重新推过。三条处置，按本节的证据排序：
+① **推荐——把口径拆成两格，数字一个都不放宽**：`Tray ≤ 40 MB` 只管**空闲态**（无内核在跑；本轮实测 31.4 MB，连开 5 次管道会话后 37.4~37.8 MB，都在线内），内核在跑的那格由**合计线 `Tray+内核 ≤ 80 MB`** 管（本轮 74.0~77.5 MB）。理由是这两格本来就对应两种形态，把空闲态的线套在满载态上不是严格而是错位；v1 的常驻形态恰恰是"内核一直在跑"，合计线才是它的判据，而它守着。
+② 继续压实现换 40 线——可动的地方是 tooltip 泵每 2 s 的 `_store.Load()`（读盘 + JSON 反序列化，本可用内存里的 Settings）、`StderrTail` 的两次拷贝、两条重定向流；但 ③ 的归因数据（Private 只 +5.2 MB、GC 硬上限无效）说明这些是个位数 MB 的收益，填不平 9 MB。
+③ 认定"Tray 满载 50 MB"是可接受形态并写下这条线——最诚实但最松，且要人接受 40 这条从第一天就没按满载定的数字作废。
 
 
 ## 11. 测试与验收

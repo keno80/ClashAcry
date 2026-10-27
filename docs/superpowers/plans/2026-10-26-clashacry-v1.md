@@ -5043,12 +5043,13 @@ git commit -m "feat(ui): 深色 chrome 逐类控件模板覆盖 + PrintWindow �
 **Files:**
 - Create: `scripts/publish.ps1` `scripts/fetch-bundled-core.ps1`
 - Modify: `.gitignore`（`packaging/core/` 不入库）
+- Modify（实施日补，见 R-17b）: `src/ClashAcry.Core/CoreManager.cs`（默认启动参数 `-d` 从 Root 改指 RuntimeDir，并抽出 `DefaultLaunch`）+ `tests/ClashAcry.Core.Tests/CoreManagerTests.cs`（默认分支的回归锁）
 
 **Interfaces:**
 - Consumes: 全部前置任务
 - Produces: `artifacts/publish/ClashAcry-v<ver>-win-x64.zip`，内含 `ClashAcry.UI.exe`、`ClashAcry.Tray.exe`、`core\mihomo.exe`、`settings.json`（首启生成，不打进包）
 
-- [ ] **Step 1: 写发布脚本**
+- [x] **Step 1: 写发布脚本**
 
 ```powershell
 $ErrorActionPreference = 'stop'
@@ -5067,7 +5068,7 @@ Write-Output "产物：$out.zip"
 
 若 UI 与 Tray 文件互相覆盖导致启动失败，改为**分目录** `ui\` 与 `tray\`，并在 Task 12 `TrayLink` 的路径推导里把候选路径改成 `..\tray\ClashAcry.Tray.exe`（这是本任务唯一允许回头改前序任务的地方，改完要在 spec §3 记一行进程定位方式）。
 
-- [ ] **Step 2: 内置内核走"本机准备"，不入 git**
+- [x] **Step 2: 内置内核走"本机准备"，不入 git**
 
 `.gitattributes` 的 LFS 路线不采用（远端未开 LFS 会直接报错，配额也不值得赌）。`scripts/fetch-bundled-core.ps1` 从 GitHub `MetaCubeX/mihomo/releases/latest` 取 `mihomo-windows-amd64-compatible-<tag>.zip`、解出包内 exe 落成 `packaging/core/mihomo-windows-amd64-compatible.exe`，并把 tag 写进 `packaging/core/BUNDLED.txt`（记录内置版本，spec §6「内置带一个」的可追溯来源）；`packaging/core/` 整目录加进 `.gitignore`。脚本要幂等：目标存在且 `BUNDLED.txt` 与最新 tag 一致就跳过网络。
 
@@ -5081,7 +5082,7 @@ sha256: <下载 zip 的 SHA-256>
 
 `sha256` 由脚本用 `Get-FileHash -Algorithm SHA256` 对**下载的 zip 原文**计算后写入（不是对解出来的 exe；zip 才是 release 页面上的资产）。发布前跑一次 `scripts/publish.ps1` 之前，先按这三行校验本地 `packaging/core` 的来源；校验不过就重新下载。这样任何人重建产物包时能证明里面那颗 `core\mihomo.exe` 来自哪个 release，而不是"某台机器上恰好有个 exe"。
 
-- [ ] **Step 3: 验证产物**
+- [x] **Step 3: 验证产物**
 
 ```bash
 powershell -File scripts/fetch-bundled-core.ps1
@@ -5092,12 +5093,25 @@ powershell -File scripts/measure-residency.ps1 -ProcessName ClashAcry.Tray -Json
 ```
 Expected: 在未装 Windows App Runtime 的干净目录能双击起 UI（本机验证一次即可，`WindowsAppSDKSelfContained=true` 已在 Task 2 的 csproj 里落地）；Tray 常驻数值写进 spec §10 的「实测（发布产物）」列。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add scripts .gitignore docs/superpowers/specs
 git commit -m "build: 自包含发布脚本 + 内置内核本机准备（packaging/core 不入库）"
 ```
+
+实施日回写（Task 17 落地时踩到的，全部有对应代码行或用例作证）：
+
+- **R-17a｜本任务的"验证"必须包含一次真内核，否则它只验证了打包**：`artifacts/unzipped`（535 个文件、zip 110.1 MB）里只起 UI 也能过——`TrayLink` 从同目录拉起 Tray、两边一起活着（`trayProcs=1 uiProcs=1`），看起来一切正常。真按 `sub.import` + `core.start` 走一遍才发现内核起不来（见 R-17b）。计划 Step 3 那五条命令里没有 `core.start`，这是这一步原本的洞。
+- **R-17b｜真 bug：默认启动参数指错目录，内核按空配置起来**（已修，`CoreManager.DefaultLaunch`，spec §9 有整段回写）。`-d "<paths.Root>"` ⇒ Root 下没有 `config.yaml`（注入产物在 `RuntimeDir`）⇒ mihomo 监听 **7890**、`external-controller` 根本没开 ⇒ 双探活 `controller=fail mixed(7897)=fail`，两次尝试后广播 `Crashed`，而内核日志一行错误都没有。Task 8~16 的 15 条 `CoreManagerTests` 全注入假 launchFactory（`.cmd` 脚本不看 `-d`），默认分支从没被真配置跑过。回归锁 `DefaultLaunch_PointsAtTheDirThatActuallyHoldsConfigYaml` 的判据是"从 Arguments 解出来的目录里真能看见 `config.yaml`"，不是死字符串比对。
+- **R-17c｜`dotnet publish` 不带 XAML 产物**：发布目录缺 `App.xbf`/`MainWindow.xbf`/`Views\*.xbf`/`ClashAcry.UI.pri`（构建目录里有），产物里的 UI 双击即 `0xC0000409` 闪退，而构建与测试全绿——因为测试跑的是构建目录。`publish.ps1` ②段显式补拷 + 断言 `.pri` 到位，不是可选步骤；`-o` 与默认发布目录两种写法都复现过。
+- **R-17d｜UI 与 Tray 必须同目录**：`TrayLink.EnsureTrayRunningAsync` 找的是 `AppContext.BaseDirectory\ClashAcry.Tray.exe`（Task 12 的定位方式），所以装配阶段两份 self-contained 运行时合并到同一目录（同名同内容，覆盖无害），**没有**走计划里预留的"分目录 + 改进程定位"那条改道，spec §3 因此不动。
+- **R-17e｜内置内核的来路只靠 `packaging/core/BUNDLED.txt` 三行**：`tag: v1.19.33` / `asset: <zip 的 release URL>` / `sha256: <下载 zip 原文的 SHA-256>`，另加本任务补的第四行 `exe_sha256`（打包进产物的就是这颗 exe，光有 zip 的哈希还得人工对一次）。`fetch-bundled-core.ps1` 幂等（tag 一致就跳过网络）、`-Verify` 模式供 `publish.ps1` 在打包前卡住来路不明的内核；`packaging/core/` 整目录不入库。
+- **R-17f｜trim 这条路实测判死，不是"还没试"**：`-p:PublishTrimmed=true` 产物启动即 `InvalidOperationException: Reflection-based serialization has been disabled`（`SettingsStore.Load` → `TrayHost.RunAsync`）；加 `-p:JsonSerializerIsReflectionEnabledByDefault=true` 重发一次，runtimeconfig 里那条确实是 `true`，仍然同一异常退出（trim 已把反射解析器裁掉）。走通的代价是 STJ 源生成 + YamlDotNet 两套反射面手术，而 Task 2 的 trim 空壳实测只省 **0.5 MB WS**（16.4→15.9）；ReadyToRun 只影响启动耗时。数字与归因见 spec §10 的 Task 17 表。
+- **R-17g｜40 MB 线要的是用户拍板，不是再测一轮**（计划明写"超标停下来报告，不放宽判据"，此处按这条执行）：驱动项此前每一轮都判错了——不是管道活动（连开 5 次会话 37.4~37.8 MB，仍在线内；3 次连续界面会话 40.2~45.1 MB，只压线/微超），而是**内核在 Tray 里跑起来**：`core.start` 之后、界面一个字节都没发的采样点是 **49.0 MB / Private 12.4**，3 分钟 soak 49.8→51.5 **平台不单调**（不是泄漏）。WS +17.6 而 Private 只 +5.2 ⇒ 多出来的是映像共享页与已触碰未归还的页；把 `DOTNET_GCHeapHardLimit` 压到 32 MB 四个采样点 48.9/49.9/49.6/52.4 一格没动，证实托管堆不是来源。**另两条线本轮都守住**：Tray+内核 74.0~77.5 MB（线 80，mihomo 自身 WS 只有 25~26 MB，Private 60 MB 是 Go 预留堆不进 WS 口径），UI 最坏档 180.0 MB（线 220；节点页 30 行全落地 + 刚跑完全组测速，再轮询 20 s 回落 178.3——Task 15 交接项②那格账由此补齐，取样夹具是一次性的 `ResidencyScratch.cs`，量完已删）。
+- **R-17h｜PowerShell 侧的两条坑，写脚本时会再踩**：① 带中文的 `.ps1` 必须 **UTF-8 BOM**，否则 PS 5.1 把字符串字面量切错，表现为 `Start-Process : 系统找不到指定的文件`（文件明明在）；② `NamedPipeClientStream.ReadTimeout` 直接抛"此集不支持超时"，只能靠阻塞 `ReadLine` + 外层 timeout 兜。帧的 `\n` 一定用 `[char]10` 拼，不许写在单引号多行字面量里——那样换行落在 JSON 中间，服务端按坏帧摘除连接，客户端看到的是"管道已被中断"。
+- **全量验证**：`dotnet build ClashAcry.sln -c Release` 0 警告 0 错误；Core.Tests **144/144**（原 143 + R-17b 的回归锁）；UI.Tests **25/25**。产物 zip `artifacts/publish/ClashAcry-v0.1.0-win-x64.zip` 110.1 MB / 535 文件，`core\mihomo.exe` 61,304,320 字节与 `exe_sha256` 对得上。真内核通路：`sub.import` → `core.start` → `RESTful API listening at: 127.0.0.1:9097` + `Mixed(http+socks) proxy listening at: 127.0.0.1:7897` → 握手 `state:"Running"` → `core.stop` 后进程消失。宿主前后 HKCU `ProxyEnable=0` / `ProxyServer=127.0.0.1:8090` 逐字未变，`sysproxy.set` 一次没调，机器上同时在跑的 `verge-mihomo`（pid 23600）未被连接。
+- **交接给 Task 18**：① R-17g 的三个处置选项要用户拍板后才能把 40 MB 写进验收清单的判据；② 清单第 4/5/6 条现在才有真东西可测（内核能起、能过 7897、Tray+内核合计 74~78 MB）；③ 清单第 1 条写 Core 侧条数时按 144，UI 侧 25；④ `DefaultLaunch` 那条回归锁要在清单里点名，防止下次有人把 `-d` 改回 Root"为了让 geo 库跟着 Root 走"。
 
 ---
 

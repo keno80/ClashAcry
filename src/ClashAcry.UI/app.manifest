@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  DPI 档：PerMonitorV2。这条不是可选的美化——实测（Task 16）本机 125% 缩放下没有这份清单时
+  进程按 **unaware** 运行：窗口矩形报 1250x850 物理像素，而 XAML 只画了左上 1000x680，
+  其余由 DWM 位图拉伸，文字发虚；像素取样也因此和 UIA 矩形对不上（PrintWindow 取到全透明区）。
+  WinUI 3 非打包应用不会自动获得这份清单，必须显式挂 <c>ApplicationManifest</c>。
+-->
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <assemblyIdentity version="1.0.0.0" name="ClashAcry.UI" />
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+    </windowsSettings>
+  </application>
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 / 11 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
+    </application>
+  </compatibility>
+</assembly>

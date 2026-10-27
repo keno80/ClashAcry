@@ -4846,23 +4846,26 @@ git commit -m "feat(ui): 节点页（按名合并刷新、并发限 4 测速、�
 - **R-15f｜`history` 取"最新"靠比 `time`，不靠数组端序**：实测抓到的 `history` 长度 ≤1，**没有证据**证明新样本在尾。`NewestSample` 取 `DateTimeOffset` 解析后最大的一条，解析不了才退回"最后一个正样本"；`delay:0`（mihomo 表示未成功）一律跳过。
 - **R-15g｜折叠用 `Visibility=Collapsed`，不用 `Expander`**：`Expander` 收起时内容仍在 UIA 树里，断言会摸到看不见的行、Task 16 的像素取样也会取到弹层外的点；`Collapsed` 才真正离开树。WinUI 3 **不带** `BooleanToVisibilityConverter`（grep `Microsoft.UI.Xaml.winmd` 命中 0），工程内自己写一个，且折 `Collapsed` 不折 `Hidden`（`Hidden` 仍占布局，折叠会留一条空白带）。
 - **R-15h｜三处"计划里有、实现里没有"的差，都是有意的**：① `show_hidden` 没有 `UiPrefs` 开关，`hidden: true` 一律丢弃——不为一条没有入口的偏好扩契约；② `RefreshProviderAsync` 只置 `IsRefreshing` + 发 PUT，**不在 VM 里重拉** `/providers/proxies`（VM 没有 providers 读委托；硬加一个就是第二条真相通路，`updatedAt` 由调用方的轮询纠正）；③ 轮询与测速互斥（`_refreshing || _testing` 时跳过本轮 `/proxies`）——否则一轮全组测速刚盖上去的值会被同时在飞的旧样本擦掉。
-- **交接给 Task 16/17**：① 节点页的取样目标 id 齐了：`TestAllButton`、`Node_{Name}`（`Button`，禁用/选中态可取）、`Node_{Name}_Badge`、`Group_{Name}`、`Node_{Name}_Collapse`、`Group_{Name}_Test`、`Provider_{Name}_Refresh`；**滚动条本身还没有 id**（`ScrollBarTrack`/`ScrollBarThumb` 要模板覆盖，Task 16 第一件事就是补）。② 本轮开销采样**没打开节点页**，Task 17 的 `measure-residency.ps1` 必须在节点页可见、且刚跑过一次全组测速的状态下复测一次。③ `ProxiesPage` 的 2 s 轮询在 `Unloaded` 时停，切页不留后台定时器——Task 18 冒烟时如果看到"离开节点页还在打管道"，那是回归。
+- **交接给 Task 16/17**：① 节点页的取样目标 id 齐了：`TestAllButton`、`Node_{Name}`（`Button`，禁用/选中态可取）、`Node_{Name}_Badge`、`Group_{Name}`、`Node_{Name}_Collapse`、`Group_{Name}_Test`、`Provider_{Name}_Refresh`；**滚动条本身还没有 id**（`ScrollBarTrack`/`ScrollBarThumb` 要模板覆盖，Task 16 第一件事就是补。**Task 16 实测作废**：4 个翻页件自带 id，且 UIA 里根本没有 Thumb 元素，见 R-16e）。② 本轮开销采样**没打开节点页**，Task 17 的 `measure-residency.ps1` 必须在节点页可见、且刚跑过一次全组测速的状态下复测一次。③ `ProxiesPage` 的 2 s 轮询在 `Unloaded` 时停，切页不留后台定时器——Task 18 冒烟时如果看到"离开节点页还在打管道"，那是回归。
 
 ---
 
 ### Task 16: 深色 chrome 像素核对
 
 **Files:**
-- Create: `src/ClashAcry.UI/Themes/FluentDarkOverrides.xaml`
-- Create: `tests/ClashAcry.UI.Tests/Fakes/WindowCapture.cs`
-- Modify: `src/ClashAcry.UI/App.xaml`（合并 `Themes/FluentDarkOverrides.xaml` 到 `MergedDictionaries`）
-- Test: `tests/ClashAcry.UI.Tests/ChromeContrastTests.cs`
+- ~~Create: `src/ClashAcry.UI/Themes/FluentDarkOverrides.xaml`~~（实测否证，未创建，见 R-16a）
+- ~~Modify: `src/ClashAcry.UI/App.xaml`（合并 `Themes/FluentDarkOverrides.xaml`）~~（同上）
+- Create: `tests/ClashAcry.UI.Tests/Fakes/WindowCapture.cs`、`tests/ClashAcry.UI.Tests/Fakes/DpiPrelude.cs`、`src/ClashAcry.UI/app.manifest`（后两个是计划外的，见 R-16d/R-16f）
+- Create: `tests/ClashAcry.UI.Tests/ChromeContrastTests.cs`
+- Modify: `src/ClashAcry.UI/ClashAcry.UI.csproj`（`<ApplicationManifest>`）、`MainWindow.xaml.cs`（`--force-dark` 钉内容面 + 窗口尺寸按 DPI 换算）、`App.xaml.cs`（`ForceDarkRequested`）、`tests/ClashAcry.UI.Tests/Fakes/WindowCapture.cs` 的 `ChromeProbe`（`ScanHorizontal`/`ScanVertical`/`ScanThumb`/`Lum`）
 
 **Interfaces:**
 - Consumes: Task 12–15 的全部可视控件
 - Produces: `static class WindowCapture { static Bitmap Grab(IntPtr hwnd); static RECT WindowRect(IntPtr hwnd); static IntPtr Hwnd(Window w); }`（`PrintWindow` + `PW_RENDERFULLCONTENT`）、`static class ChromeProbe { static (int R, int G, int B) Sample(Bitmap bmp, Rectangle element, RECT window, double fx, double fy); }`（**五个参数**：控件矩形是屏幕坐标，必须减去窗口左上角才是位图坐标，签名里没有 `window` 就换算不了）
 
-- [ ] **Step 1: 写取样夹具（判据是像素，不是肉眼看整体截图）**
+- [x] **Step 1: 写取样夹具（判据是像素，不是肉眼看整体截图）**
+
+实测：夹具比计划的两个类多三件——`ScreenCapture`（弹层 PrintWindow 抓不到，只能整屏）、`Fakes/DpiPrelude.cs`（DPI 感知必须在 `[ModuleInitializer]` 提，晚了会污染后面的用例）、`ChromeProbe.ScanThumb`（滑块不在 `fx=0.5`）。判据改成「双极性三常数」（`DarkMax=110`/`ForegroundMin=140`/`SpanMin=60`），数值来源见 R-16a。下面计划的 `Sample` 签名少了 `window` 参数、返回 `(R,G,B)` 而不是"最不透明且最亮"的完整像素——两点都已在实现里订正。
 
 为什么不用 PowerShell + `CopyFromScreen`：WinUI 3 窗口由 DWM 合成，屏幕抓图会被别的窗口挡住、也抓不到滚动条那几像素宽的部件；`PrintWindow` 带 `PW_RENDERFULLCONTENT(2)` 是对 WinUI 窗口唯一稳定的抓取方式。所以取样器放进 C# 测试夹具，控件矩形仍从 FlaUI 的 `BoundingRectangle` 取（它在屏幕坐标，`PrintWindow` 的位图是窗口相对坐标——用窗口左上角做减法，这一步错了整份断言就全错位）。
 
@@ -4998,11 +5001,11 @@ public class ChromeContrastTests : IClassFixture<UiAppHarness>
 
 （`BoundingRectangle` 是 FlaUI 直接给出的 `System.Drawing.Rectangle`，屏幕坐标；`rect` 是窗口矩形，`Sample` 内部做减法换算到位图坐标。夹具侧要 `using System; using System.Drawing; using System.Drawing.Imaging; using System.Runtime.InteropServices; using System.Threading; using System.Linq; using FlaUI.Core; using FlaUI.Core.Automation; using FlaUI.Core.AutomationElements; using Xunit;`。测试项目要 `<ItemGroup>` 加 `System.Drawing.Common`（包版本随 xUnit 传递依赖即可，Windows-only），这只进测试夹具，**app 侧仍然禁 `System.Drawing`**（spec §3 的 Tray 40 MB 线）。）
 
-- [ ] **Step 2: 逐类补齐模板覆盖**
+- [x] ~~**Step 2: 逐类补齐模板覆盖**~~ —— **实测否证，一步没做（见 R-16a）**：默认 Fluent 深色模板下逐类取样全部已经是深色（39~88），`FluentDarkOverrides.xaml` 与逐类 `ControlTemplate` 都不需要写。本步骤的**意图由 Step 1/3 的回归锁承接**：判据固化成像素阈值，将来任何改动引入浅色残留都会被这 5 条用例拦下。
 
 对 `Button`、`ComboBox`、`ComboBoxItem`、`ListBoxItem`/`ItemsView` 行、`ScrollBar`（含 `Track.Thumb` 与翻页 `RepeatButton`）各自提供 `ControlTemplate`，颜色全部取自 `FluentDarkOverrides.xaml` 的 `SolidColorBrush` 资源（`ChromeBackgroundBrush`、`ChromeBorderBrush`、`ThumbBrush`、`SubtleHoverBrush`），并给每个被取样的部件补上上面用到的 `AutomationProperties.AutomationId`。只设 `Background` 改不动默认模板；把 `VerticalScrollBarVisibility` 从 `Visible` 改成 `Auto` **不算修复**（内容必然溢出时只是把"永远白"变成"需要时白"）。
 
-- [ ] **Step 3: 跑取样断言，记录前后数值**
+- [x] **Step 3: 跑取样断言，记录前后数值**
 
 ```bash
 dotnet build ClashAcry.sln -c Release
@@ -5010,14 +5013,28 @@ dotnet test tests/ClashAcry.UI.Tests --filter ChromeContrastTests
 ```
 Expected: 5 条极性分支 + 1 条滑块/槽对比 = **6/6 全 PASS**。把每条的实际 RGB 数值贴进 `docs/superpowers/checklists/v1-acceptance.md` 的「深色 chrome」小节（数值来自断言消息，PASS 时在取样后加一行 `Console.WriteLine($"{id}: {px}")` 并用 `--logger "console;verbosity=detailed"` 收出来），这样下次改 UI 不用重跑也能看出改了什么。
 
+实测：**5/5 全 PASS**（不是 6 条——计划的 5 条 `Theory` 极性分支落地时按页面折成 4 条 `Fact` + 1 条滚动条，见 R-16b）。逐类数值表**先进本节末 R-16a、Task 18 建 checklist 时原样搬过去**（本任务不提前建文件，同 R-15 的处置）。`Console.WriteLine` 那条没用：xUnit 里 `IUnitTestOutputHelper` 才收得到，且判据消息已经带数值。
+
 `--force-dark` 是 UI 的测试启动参数（Task 13 落地）：检测到它就把 `RootPage.RequestedTheme` 钉在 `Dark`，不受系统主题影响。**不许为了让断言好看而让 app 忽略用户主题设置**——它只在带该参数时生效。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add src/ClashAcry.UI/Themes src/ClashAcry.UI/App.xaml tests/ClashAcry.UI.Tests docs/superpowers/checklists
 git commit -m "feat(ui): 深色 chrome 逐类控件模板覆盖 + PrintWindow 像素取样断言"
 ```
+
+实施日回写（Task 16 落地时踩到的，全部有对应代码行或用例作证）：
+
+- **R-16a｜默认模板没有浅色残留，逐类模板覆盖是多余的**：`--force-dark` + FakeTray/WireMock 下逐类取样（3x3 邻域最亮像素，灰度取三通道最大值）：页面底/卡片 46~57、`Button` 边框 46~71 而文字 255、`RadioButton` 51~87、`TextBox` 35、`ComboBox` 底 61 / chevron 203、`ComboBoxItem` 行底 45~58 而文字 255、节点行与组行 46~57、`ScrollBar` 轨道 48 / 滑块芯 161 / 翻页件 46。**没有一类需要覆盖**，`Themes/FluentDarkOverrides.xaml` 与 `App.xaml` 的合并都没建。所以本任务的产物从"改样式"变成**回归锁**：判据固化成像素阈值，将来引入浅色残留由 `ChromeContrastTests` 拦下。阈值留了余量：`DarkMax=110`（实测上沿 88）、`ForegroundMin=140`（实测下沿 160）、`SpanMin=60`（实测差 113）。
+- **R-16b｜极性必须分开判，一张表混判会逼人放宽阈值**：计划那 5 条 `Theory` 用同一条 `AssertDark`/`AssertForegroundVisible` 按极性分支——落地的 5 条 `Fact` 保留这个分支，但**按页面聚合**（概览卡+按钮+日志 / 设置 ComboBox+输入框+单选 / 弹层项 / 节点行 / 滚动条）。原因是每条都要自己摆窗口状态（展开日志面板、滚到设置页底部、展开 ComboBox 弹层、滚轮显形滚动条），`Theory` 每次重启窗口会把这四件事重复四遍。计划的 `PageBackground`/`LogPanelBackground`/`ScrollBarTrack`/`ScrollBarThumb` 四个 id **一半取不到**：挂在 `Grid`/`Border` 上的 id 在 UIA 里不出现（`Shape`/无 peer 的布局元素不进树），滚动条根本没有 Thumb 元素——取样目标全改成"现成控件的 id + 相对落点"。
+- **R-16c｜`PrintWindow` 抓不到 WinUI 的 `Popup`，弹层只能整屏取**：`PW_RENDERFULLCONTENT(2)` 只渲主窗自己的合成面，ComboBox 下拉落在 `Microsoft.UI.Content.DesktopChildSiteBridge` 里（实测顶层 HWND 只有主窗一个，弹层不是独立窗口），抓出来是背后的页面——**看着像"下拉项是白的"，其实那一片根本没渲**。`ScreenCapture.Grab`（`CopyFromScreen` 虚拟屏）才是 `ComboBoxItem` 的唯一通路，夹具 docstring 里写明了这条，免得下次又拿主窗位图去量弹层。
+- **R-16d｜DPI 感知不一致＝整份像素断言错位，而且能假通过**：本机 125% 缩放（物理 2560x1440 / unaware 视角 2048x1152）。UIA 的 `BoundingRectangle` 是**物理**坐标，抓取进程若 unaware 则拿到**虚拟化**位图，两边差 1.25 倍：`ComboBoxItem` 全部读成同一个暗值（44/48），像"深色合格"，实际每格取的都是错位后的别的像素。修法是测试进程 `[ModuleInitializer]` 调 `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`——**不能放静态构造函数**：进程中途翻转感知会让后面的用例取到全透明像素（第一次踩就是这么坏的）。产品侧顺带查出**真 bug**：`ClashAcry.UI` 原来没有清单，进程按 unaware 跑，125% 屏上窗口矩形 1250x850 而 XAML 只画左上 1000x680、其余 DWM 拉伸（文字发虚、PrintWindow 边缘透明）。补 `src/ClashAcry.UI/app.manifest`（PerMonitorV2）+ csproj 的 `<ApplicationManifest>`，并让 `ScreenCapture.Grab` 在缩放比≠1 时**直接判失败**，把"环境不对"变成显式红而不是假绿。
+- **R-16e｜滚动条：没有 `Thumb` 元素、滑块不在条身正中**：UIA 只给 4 个 `RepeatButton`，且 `VerticalScrollBarVisibility="Auto"` 下整条显形前报 `0x0 off=True`。显形判据实测要：指针落在**页面右缘 −2 px** 的感应带、停留 ~700 ms、再加一次滚轮（同向滚轮在顶/底不产生滚动，所以 `RevealScrollBar` 来回换向）。15px 宽的条身里滑块只占中间约 6px，横向剖面 `48 48 48 48 48 48 48 62 118 161 161 161 118 62 48`——**`fx=0.5` 读到的是半透明边缘 62**，直接按它定阈值会把"滑块看得见"误判成失败（第一版就是这么红的）。`ChromeProbe.ScanThumb` 先粗扫 15 列找最亮列、再沿该列竖扫，顺带数滑块达前景的行数（判据 ≥6，实测约 30），防的是"量到 1px 抗锯齿边"那种假通过。R-15 交接项①里"`ScrollBarTrack`/`ScrollBarThumb` 要模板覆盖补 id"这条**作废**：部件自带 id（`VerticalSmallDecrease` 等），不需要覆盖模板。
+- **R-16f｜`--force-dark` 只钉内容面，绝不写 `UiPrefs`**：`App.ForceDarkRequested` → `Root.RequestedTheme = Dark` 后按**当前偏好**重挂材质；写进 LocalSettings 等于用一条测试参数改用户的界面偏好，下一条读默认档的用例会被它污染（R-13a 同一类地雷）。另外 `AppWindow.Resize` 吃**物理像素**：PerMonitorV2 之后按字面写 1000x680 会变成 800x544 DIP（界面比设计稿小一圈），现按 `GetDpiForWindow` 换算，让 1000x680 保持 DIP 意图。
+- **开销复测（每次改 UI 的硬指标，数值已回写 spec §10）**：Tray 空闲 WS 34 MB / Private 8.5 MB，UI WS **150.7 MB / Private 89.8 MB**（对照 Task 15 的 150.6 / 90.1，DPI 改动无可测代价）。**Tray 在 UI 会话后顶到 WS 42.1 MB——40 MB 线再次被管道活动顶穿**（Task 10 的 45.4 MB 同一现象，Task 15 的 38.2 是采样时点不同，不是问题消了）。判据不放宽，trim + ReadyToRun 归 Task 17，复测口径「连开 5 次管道会话后 Tray ≤ 40 MB」。
+- **全量验证**：`dotnet build ClashAcry.sln -c Release` 0 警告 0 错误；Core.Tests **143/143**；UI.Tests **25/25**（原 20 + 本任务 5）。取样期间未启动真实 mihomo，宿主前后 HKCU `ProxyEnable=0` / `ProxyServer=127.0.0.1:8090` / `ProxyOverride` 逐字未变。
+- **交接给 Task 17/18**：① 人眼项仍欠（本环境看不见窗口）：真实内核下肉眼再确认一次"下拉项/滚动条在深色里没有糊成一片"，Task 18 checklist 里列成一条；② 亚克力档下**窗口边缘与卡片薄层的取样会受透明影响**——本轮 5 条判据全在 `--force-dark` + 默认（亚克力）材质下取到 alpha=255 的实底像素，若哪天抓到 alpha=0 就是夹具坏了，`ChromeProbe.Sample` 已经把它写成硬失败；③ 计划本任务的 Step 2 若因未来某次 WinUI 升级变成"真的出现浅色残留"，先按 R-16a 的表定位是哪一类，再只覆盖那一类的模板，不要一上来就整套重写。
 
 ---
 

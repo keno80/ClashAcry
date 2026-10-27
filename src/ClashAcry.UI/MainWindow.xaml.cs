@@ -32,6 +32,9 @@ public sealed partial class MainWindow : Window
     /// <summary>窗口句柄：系统选择器（FileOpenPicker）要挂在它上面，否则 unpackaged 应用点了没反应。</summary>
     public nint Handle => WinRT.Interop.WindowNative.GetWindowHandle(this);
 
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(nint hwnd);
+
     /// <summary>
     /// 页面实例按 Tag 复用。每次切页都新建意味着重新握手 + 重拉 <c>/proxies</c>，
     /// 整页白一下——正是「轮询/切换不得有可见抖动」那条红线的第一现场。
@@ -42,7 +45,11 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
         Title = "ClashAcry";                       // FlaUI 的 ShellTests 断言这个字符串
-        AppWindow.Resize(new Windows.Graphics.SizeInt32(1000, 680));
+        // AppWindow.Resize 吃的是**物理像素**：125% 缩放上直接写 1000x680 会缩成 800x544 DIP，
+        // 界面比设计稿小一圈（自测时靠这个把 UIA 矩形和位图对齐了，见 app.manifest 的 PerMonitorV2）。
+        var dpi = (int)GetDpiForWindow(Handle);
+        if (dpi == 0) dpi = 96;                    // 窗口还没落位时返回 0，按 1x 兜底，别把尺寸算成 0
+        AppWindow.Resize(new Windows.Graphics.SizeInt32(1000 * dpi / 96, 680 * dpi / 96));
 
         Overview = new OverviewViewModel(Link, DispatcherQueue.GetForCurrentThread());
         Overview.Changed += RenderBanner;
@@ -52,8 +59,17 @@ public sealed partial class MainWindow : Window
         Closed += (_, _) => Overview.Dispose();
 
         if (App.ResetPrefsRequested) Prefs.Reset();
-        ApplyTheme(ThemeFromPref(Prefs.Theme));
-        ApplyBackdrop(BackdropFromPref(Prefs.Backdrop));
+        if (App.ForceDarkRequested)
+        {
+            // 只钉内容面，不写偏好（写了就是拿一条测试参数改用户的界面设置，下一条默认档用例会被它污染）。
+            // 材质自己会跟根元素明暗走（R-13b），这里仍按当前偏好重挂一次，保证色调与界面一致。
+            Root.RequestedTheme = ElementTheme.Dark;
+            ApplyBackdrop(BackdropFromPref(Prefs.Backdrop));
+        }
+        else
+        {
+            ApplyTheme(ThemeFromPref(Prefs.Theme));      // ApplyTheme 内部会重挂材质
+        }
 
         Nav.SelectedItem = Nav.MenuItems[0];       // 默认页 = 概览（SelectionChanged 会把它 Show 出来）
         Show("overview");                          // 事件在窗口可见后才起效的话，这里兜一次底（同一实例，无副作用）

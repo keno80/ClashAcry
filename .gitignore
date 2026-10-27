@@ -5,3 +5,4 @@ artifacts/
 *.user
 TestResults/
 packaging/core/
+.superpowers/

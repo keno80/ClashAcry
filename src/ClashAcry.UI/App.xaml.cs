@@ -29,6 +29,11 @@ public partial class App : Application
     /// 个性化设置才能复现（R-13a：测试不改别人的机器），所以走 <see cref="BackdropService"/> 的注入点。</summary>
     public static bool ForceDegradeRequested { get; private set; }
 
+    /// <summary><c>--force-dark</c>：把内容面钉在深色，让像素取样不受系统主题影响。
+    /// <b>不写 <see cref="UiPrefs"/></b>——写进去就等于用一条测试参数改了用户的界面偏好，
+    /// 下一条读默认档的用例会被它污染（R-13d 同一类地雷）。</summary>
+    public static bool ForceDarkRequested { get; private set; }
+
     /// <summary>命令行参数的唯一读取口。unpackaged 下 <c>LaunchActivatedEventArgs.Arguments</c> 是应用激活用的，
     /// 从 <c>ProcessStartInfo</c> 传进来的裸参数只能从 <c>Environment.GetCommandLineArgs()</c> 拿（Step 4 实测）。</summary>
     public static bool HasArg(string name) =>
@@ -39,6 +44,7 @@ public partial class App : Application
         TrayAbsentRequested = HasArg("--tray-absent");
         ResetPrefsRequested = HasArg("--reset-prefs");
         ForceDegradeRequested = HasArg("--force-degrade");
+        ForceDarkRequested = HasArg("--force-dark");
         UnhandledException += OnUnhandled;
 
         if (!SingleInstance.TryAcquire())

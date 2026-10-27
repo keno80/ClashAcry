@@ -19,6 +19,7 @@
 | 界面 | WinUI 3（C# / XAML） | 原生 Fluent 控件与 backdrop 是硬需求；XAML 体系只有 C# 与 C++/WinRT 两条路，后者开发成本对自用工具不划算 |
 | 运行时 | .NET 10，Windows App SDK **2.5.1**（stable，2026-09-16） | 2.0.1 起有 `SystemBackdropElement`（backdrop 可置于 XAML 树任意位置并带 `CornerRadius`）；2.2.0 起有 `ApplicationData.GetForUnpackaged()`，免打包也能拿到 per-user 数据目录 |
 | 部署 | unpackaged（免 MSIX），`--self-contained` + `WindowsAppSDKSelfContained=true` | 自用免安装；不赌目标机已装 Windows App Runtime |
+| DPI | UI 进程带 `app.manifest` 声明 `PerMonitorV2`（Task 16 实测补，见 §8 末） | 缺它时进程按 unaware 跑：125% 屏上窗口矩形是 1250x850 而 XAML 只画左上 1000x680，其余由 DWM 拉伸——文字发虚、像素取样全错位 |
 | 常驻宿主 | 独立轻量进程 `ClashAcry.Tray`（纯 Win32，零 XAML，手写 `Shell_NotifyIcon`） | 不用 WinForms 托盘：那会把整套 WinForms 运行时请进常驻进程，直接顶爆 §10 的开销线 |
 | 后台能力 | `ClashAcry.Core` 托管类库，被 Tray 与 UI **in-proc 复用** | 无数据面代码，全部是胶水级 OS/HTTP 调用；拆 Rust/AOT 均无收益 |
 | 内核 | 原版 mihomo Go 二进制，随包内置一个 + 应用内在线更新 | 不 fork、不魔改，行为跟随上游 |
@@ -191,7 +192,7 @@ docs/superpowers/{specs,plans,checklists}/
 - **backdrop 三档**：`Acrylic`（默认，整窗亚克力——**实际装的是 XAML 层 `DesktopAcrylicBackdrop`，见本节末 Task 13 回写 ①**）· `Mica` · `纯色`。设置页单选即时生效，不重启：换 `Window.SystemBackdrop` 实例并触发一次重挂。
 - **强制降级**：系统"个性化 → 颜色 → 透明效果"关闭、远程桌面会话、`DesktopAcrylicController.IsSupported()` 返回假这三种情况下，一律自动落纯色，并在设置项上明写"当前实际生效：纯色（系统透明已关闭）"。绝不静默假装还是亚克力。探测逻辑（读 `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\EnableTransparency` + `IsSupported()`）由任务 0 探针实测确认可行性，不成立则改用等价的系统事件监听。
 - **层级材质**：卡片/浮层用 `SystemBackdropElement` 或 `AcrylicBrush`（薄层），内容层保持 `SolidBackgroundFillColorBase` 系，保证文字对比度不靠猜。
-- **主题**：`ElementTheme` 三档跟随系统/light/dark。深色下控件 chrome **逐类核对**（`Button`/`ComboBox`/`ComboBoxItem`/`ListBoxItem`/`ScrollBar` 含 `Track.Thumb` 与翻页 `RepeatButton`，每类都要检查默认模板是否残留浅色），验收判据用像素取样而非肉眼看图。
+- **主题**：`ElementTheme` 三档跟随系统/light/dark。深色下控件 chrome **逐类核对**（`Button`/`ComboBox`/`ComboBoxItem`/`ListBoxItem`/`ScrollBar` 含 `Track.Thumb` 与翻页 `RepeatButton`，每类都要检查默认模板是否残留浅色），验收判据用像素取样而非肉眼看图。**Task 16 实测：默认模板没有浅色残留，逐类模板覆盖不需要写；判据固化成 `ChromeContrastTests` 的像素阈值，见本节末回写。**
 - **动效范围**：v1 只做 `ThemeTransition` + 页面切换转场 + 按钮 pressed/pointerover 默认态。connected animation、弹簧自定义曲线推迟。
 
 **backdrop 落地形态与降级证据（Task 13 回写，2026-10-27 / win-x64 / Windows App SDK 2.5.1）**：
@@ -201,7 +202,33 @@ docs/superpowers/{specs,plans,checklists}/
 ③ **探测判据实测**：HKCU `…\Themes\Personalize\EnableTransparency` 可读（本机 0x1，测试全程只读），**缺键按"允许"处理**——老系统或被策略删键不等于用户关了透明，判成关会让默认亚克力凭空降级。
 ④ **降级分支靠注入驱动，不改用户机器**：`BackdropService` 的三个 `Func<bool>` 是可注入缝，UI 的 `--force-degrade` 把"系统允许"注成假，用来断言降级文案；真机上手动关闭透明效果的那项目视仍留在验收清单。**远程桌面会话没有单独判据**：v1 依赖 `IsSupported()` 在 RDP 下的表现（本机未实测），Task 18 冒烟若发现 RDP 下仍挂上材质，则回本节补显式判据。
 
+**深色 chrome 逐类实测（Task 16 回写，2026-10-27 / win-x64 / 125% 缩放 2560x1440）**：
+
+本节要求"检查默认模板是否残留浅色"这条**实测为否证**：Windows App SDK 2.5.1 的默认 Fluent 深色模板下，逐类取样全部已经是深色，`Themes/FluentDarkOverrides.xaml` 与逐类 `ControlTemplate` **一个都没写**（计划 Step 2 划掉）。实测灰度（3x3 邻域最亮像素，`ChromeContrastTests` 5 条用例的判据即由此定）：
+
+| 部件 | 底色 | 前景 |
+|---|---|---|
+| 页面底 / 卡片（`OverviewPage`·`SettingsPage`·`ProxiesPage`） | 46~57 | — |
+| `Button`（更新/导入/全组测速）边框 46~71，中心 | — | 255（文字） |
+| `RadioButton`（模式三档、材质三档、主题三档） | 51~87 | — |
+| `TextBox` 输入区 | 35 | — |
+| `ComboBox` 底 61 · chevron | — | 255（文字）· **203 @fx=0.94**（不是计划写的 0.92） |
+| `ComboBoxItem` 行（弹层） | 45~58 | 255 |
+| 节点行 / 组行 | 46~57 | 255 |
+| `ScrollBar` 轨道 48 · 翻页 `RepeatButton`（`VerticalSmallDecrease` 等 4 件）46 | — | 滑块芯 **161** |
+
+阈值三常数（`ChromeContrastTests`）：`DarkMax=110`（实测深色 39~88，留余量）、`ForegroundMin=140`（实测前景 160~255）、`SpanMin=60`（滑块-轨道实测差 113）。**极性必须分开判**：底色要求"最亮处仍暗"，前景要求"最亮处够亮"——一条 `AssertDark` 通吃会把正确的深色主题里白色的箭头/文字误判成浅色残留。
+
+四条落地约束（都是踩出来的，下次改 UI 直接照做）：
+
+① **`PrintWindow(PW_RENDERFULLCONTENT)` 抓不到 WinUI 的 `Popup`**：ComboBox 下拉、Flyout 落在独立的 `Microsoft.UI.Content.DesktopChildSiteBridge` 里、不是独立顶层 HWND，PrintWindow 只渲主窗合成面 → 弹层项抓出来是背后的页面。弹层类（`ComboBoxItem`）只能整屏 `CopyFromScreen`，且判据要先断言"屏幕坐标来自 UIA、换算零偏移"。
+② **DPI 一致性是像素核对的前置条件**：UIA 矩形是物理像素，抓取进程若 unaware 则拿到虚拟化位图，125% 下差 1.25 倍——`ComboBoxItem` 全部读成同一个暗值、看似通过实则错位。测试进程用 `[ModuleInitializer]` 调 `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`（**不能放静态构造**：进程中途翻转感知会让后面的用例取到全透明像素）；产品侧 `ScreenCapture.Grab` 直接按缩放比断言失败，把"环境不对"变成显式失败而不是假绿。
+③ **滚动条没有 `Thumb` 元素**：UIA 只暴露 4 个 `RepeatButton`（`VerticalSmallDecrease`/`VerticalLargeDecrease`/`VerticalLargeIncrease`/`VerticalSmallIncrease`，**已自带 AutomationId，无需模板补 id**——计划 R-15 交接项①里"滚动条本身还没有 id"这条作废），且 `VerticalScrollBarVisibility="Auto"` 下整条在显形前报 `0x0 off=True`：显形需要指针进右缘 2px 感应带停留 ~700 ms + 一次滚轮。滑块在 15px 宽的条身里只占中间约 6px，横向剖面是 `48 48 48 48 48 48 48 62 118 161 161 161 118 62 48`——**fx=0.5 落在半透明边缘（62）**，所以量法是 `ChromeProbe.ScanThumb`：先粗扫 15 列找最亮列，再沿该列竖扫量轨道（48）/滑块芯（161）/滑块行数（约 30 行）。
+④ **`AppWindow.Resize` 吃物理像素**：PerMonitorV2 之后按字面写 `1000x680` 会变成 800x544 DIP（界面小一圈）。现按 `GetDpiForWindow` 换算，设计稿的 1000x680 保持为 **DIP** 意图。
+
 ## 9. 错误处理
+
+
 
 | 类别 | 场景 | 策略 |
 |---|---|---|
@@ -265,6 +292,8 @@ Stop-Process -Name ClashAcry.Tray   # 测完必须杀进程，否则污染后续
 **Task 15 复测（真实控件落地后，即上面留的账）**：同一 self-contained 产物、同一采样法。Tray 空闲 **WS 33.6 MB / Private 8.3 MB**，UI 连上并跑过节点页轮询后 **WS 38.2 MB / Private 9.6 MB**；UI **WS 150.6 MB / Private 90.1 MB**（对照 Task 12 外壳基线 140.4 / 86.5，装了三个页面 + 亚克力的总代价 +10.2 MB WS）。三条线全部守住：Tray 40（Task 10 那次被管道顶穿到 45 的现象本轮没有复现，但**管道活动后的采样口径仍欠**，见下）、Tray+内核 80（38.2 + mihomo ≈ 25 ≈ 63）、UI 220（余量 ~69 MB）。
 本轮采样的**两处口径不足，Task 17 必须补齐**：① 采 UI 时节点页**没有打开**，即"真实控件 + 一屏几十行节点 + 一次全组测速"这一档还没进过账；② 采 Tray 时**没有跑管道风暴**（Task 10 顶穿到 45.4 MB 的那一档）。发布产物与 trim 一并处理，届时以「节点页可见且刚测速完的 UI ≤ 220 MB」+「连开 5 次管道会话后 Tray ≤ 40 MB」双口径复测。
 另记：本轮**未启动真实 mihomo**（`mihomo: none`），全部界面行为打在 FakeTray + WireMock 上，用户机器上同时在跑的另一个 clash 客户端（verge-mihomo，可能占 7897/9097）与它的系统代理设置全程未被触碰。
+
+**Task 16 复测（改的是 DPI，不是控件；2026-10-27，同一 `--self-contained` 构建产物、各 5 次取中位数）**：Tray 空闲 **WS 34 MB / Private 8.5 MB**，UI 连上后 **WS 150.7 MB / Private 89.8 MB**（对照 Task 15 的 150.6 / 90.1：PerMonitorV2 + 按 DPI 换算窗口尺寸**没有可测代价**，仍在 220 线内）。宿主前后 HKCU `ProxyEnable=0`/`ProxyServer=127.0.0.1:8090`/`ProxyOverride` 逐字未变，真实 mihomo 未启动。**但 Tray 在 UI 会话后读到 WS 42.1 MB / Private 13.4 MB——40 MB 线又被管道活动顶穿**（Task 10 的 45.4 MB 同一现象，Task 15 那次 38.2 MB 是采样时点不同，不是问题消了）。判据不放宽：Task 17 的 trim + ReadyToRun 复测口径就是「连开 5 次管道会话后 Tray ≤ 40 MB」，做不到就停下来报告。
 
 
 ## 11. 测试与验收

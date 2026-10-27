@@ -344,6 +344,19 @@ Stop-Process -Name ClashAcry.Tray   # 测完必须杀进程，否则污染后续
 ② 继续压实现换 40 线——可动的地方是 tooltip 泵每 2 s 的 `_store.Load()`（读盘 + JSON 反序列化，本可用内存里的 Settings）、`StderrTail` 的两次拷贝、两条重定向流；但归因数据（Private 只 +5.2 MB、GC 硬上限无效）说明这些是个位数 MB 的收益，填不平 9 MB。不采用。
 ③ 认定"Tray 满载 50 MB"是可接受形态并写下这条线——最诚实但最松，且要人接受 40 这条从第一天就没按满载定的数字作废。不采用（① 已经把 40 留在它唯一被验证过的形态上）。
 
+**合并后复测（2026-10-27，`main` 的产物：`publish.ps1` 重打包 → 解包 → 真 Tray + 真内核 + 真窗口，agent 脚本自测那半程）**：三格全部复核，数字与本节上面的实测同档、线一条没碰——
+
+| 采样点 | Tray | mihomo | UI |
+| --- | --- | --- | --- |
+| 冷启动 5 s（无内核、无界面） | WS **33.4** / Private — | 未起 | 未起 |
+| 内核在跑（`core.start` 后、REST 跑过一轮） | WS **48.0** | WS **27.0** / Private 60.2 ⇒ 合计 **75.0 ≤ 80** | 未起 |
+| `core.stop` 后沉淀 60 s | WS **49.0** / Private **12.3** | 进程已消失、9097/7897 无监听 | 未起 |
+| 界面连上并跑过握手 + 轮询 | WS **40.4** / Private **10.5** | — | WS **152.3** / Private **89.7** ≤ 220 |
+
+两处口径要在验收时讲清楚，否则会被读成"超标"：① **`core.stop` 不归还工作集**——停掉内核后 60 s 再采仍是 49.0（Private 只有 12.3），所以 40 那一格只能在**这一进程生命周期里没起过内核**的新 Tray 上读（本轮冷启动 33.4），跑过内核之后那格由合计线 80 判；这与上面 Task 17 的裁定同源，但清单第 6 条原话「内核已停或没起」是错的，已按此订正。② 界面连着轮询时 Tray 读到 40.4，压在 40 线上而不是线内——与 Task 10 的 45.4、Task 16 的 42.1 同一现象（映像共享页 + 已触碰未归还），判据不因它改动，验收时按"这一格以冷启动新进程为准"执行。
+
+同批自测过的非开销项（都算清单第 3/4 条的脚本半程）：`handshake` 回 `state:"Running"` 且 `secret` 只在 handshake 回包里（`settings.get` 回包实测三字段、无 secret、无 `core_path`）；`sub.import` 两条通路（loopback HTTP URL 与本地 path）都回 `config_file`、原件按哈希落 `imports\`、**源 yaml mtime 与字节数逐字未变**；`/version` 无 token **401**、带 token **200** 回 `v1.19.33`；`/proxies/t1..t3/delay` 三条 200（72/62/60 ms）；HKCU 代理三值全程未动（`0` / `127.0.0.1:8090` / `localhost;127.*;<local>`，与清单第 0 条抄下的原值一致）。
+
 
 ## 11. 测试与验收
 
@@ -390,6 +403,7 @@ Stop-Process -Name ClashAcry.Tray   # 测完必须杀进程，否则污染后续
   ③ `PipeServer`：`AcceptLoop` 的 `using var linked` 在循环因产线故障抛出而死时，会把令牌 dispose 给还在跑的 `Pump`（`ObjectDisposedException` 不在它的 catch 过滤器里 → 未观察的任务异常）；`DrainAsync` 的裸 `catch` 只停写半边、连接仍留在 `_clients` 里。两条都是窄窗口的控制通道退化，不是常态路径。
   ④ 三条宿主生命周期侧的宽限期缺失：`CoreManager.KillProcess` 的 `WaitForExitAsync()` 无超时（卡住的 mihomo 会楔死 `StopAsync`/退出钩子，5 s 预算后硬杀 → 孤儿内核 + 代理留在开启态）；`SubscriptionImport.ImportFromUrl` 是 sync-over-async + 无上限 `ReadToEnd` 且 `ct=default`（慢发订阅源能把它拖过 `HttpClient.Timeout`）；`TrayHost` 托盘分支的 `MessageLoop` 返回后不跑 `ShutdownAsync`（只有 `--no-tray` 分支跑）。
   另：`settings.update` 改端口后界面会把新端口写进系统代理而内核仍听旧端口（下次起核才刷新）；spec §4.4 里 `window.{width,height,x,y,maximized}` 与 `proxies.show_hidden` **未实现**（前者从未被裁定延后，属文档回写欠账）。
+  ⑤ **概览页「内核版本」在冷装后恒显示"未知"（合并后复测发现，2026-10-27）**：`settings.core_version` 只有走过一次在线更新才会被写（`TrayCommandRouting` 在 `core.update` 成功路径里读 `/version` 落盘），而 Tray 把内核从 `Stopped` 带到 `Running` 之后**不回读一次 `/version`**——于是握手回 `core_version:null`，界面按 `hs.CoreVersion ?? "未知"` 显示（`OverviewViewModel:136`）。实测：真机起核后握手 `state:"Running"`、REST `/version` 带 token 明明回 `v1.19.33`，握手那格仍是空。修法是一行级别的：`CoreManager` 进 `Running` 后由 Tray 读一次 `/version` 写进 store（读失败保持 null，别把展示值当故障）。**不阻塞 v1**：版本号在 §6 只承担展示，启停/测速都不依赖它；但它会让冒烟的人第一眼以为"没连上"。
 - **secret 落盘明文**（同用户可读）：自用容忍；管道 ACL 限当前用户 SID，`handshake` 之外不向其他进程暴露。
 - **yaml 保真度（Task 5 已实测结案，不再是待探针项）**：YamlDotNet 18.1.0 的 `YamlStream`/DOM 通路**保留全部字段值与键序、保留 block/flow 风格与用户锚点别名**（`&x`、`*x`、`<<:`），但**不保留注释**（DOM 不承载 comment token），且会出现三类无害漂移：block 序列压平到父键同列、flow 节点内部空白归一、文档尾部多一行 `...`。因此 v1 的公开承诺只有“不认识的原样透传、只做顶层必需键覆盖、用户手写原件永不被改写”，**UI 文案与导入说明不得声称保留注释或原始格式**；如日后要真保注释，需换库并另立任务。另：`YamlStream.Save` 必须显式 `assignAnchors: false`，否则会给内容重复的节点自动发随机锚点，产物里长出用户没写过的 `&203281033`。
 

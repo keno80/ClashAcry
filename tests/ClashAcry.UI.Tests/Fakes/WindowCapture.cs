@@ -139,6 +139,48 @@ public static class ChromeProbe
         return best;
     }
 
+    /// <summary>
+    /// 元素（或其中一段 x 波段）的**亮度分布**：返回「底」（第 25 百分位）、「前景特征」（最大值）与最小值。
+    /// 为什么不用单点：控件矩形里文字带与底色带往往只隔几个像素——实测 ImportUrlBox 的占位符字脊 238、
+    /// 字段底 35，两者相隔 5 px；节点行名字的字脊宽只有 7 px。页面刚切换/刚滚完时画面还会相对 UIA 矩形
+    /// 漂移几像素，于是同一条单点断言一会儿读到底、一会儿读到字（Task 18 全量套件里随机翻脸的两条就是它）。
+    /// 分位数把「底」定义成**区域里的主导面**（几个字脊撼不动），把「前景」定义成**该区域里最亮的那一下**，
+    /// 两条合起来仍然是「暗底 + 亮特征」的极性判据，只是不再赌某一个像素。
+    /// x 方向步长固定 1（箭头/圈这类特征只有 2~3 px 宽，跨步会整个漏掉）；y 方向按元素高度收，
+    /// 整页那种 800 px 高的大块取样点数控制在 ~200 行以内。
+    /// </summary>
+    public static (int p25, int max, int min) BandStats(Bitmap bmp, Rectangle element, WindowCapture.RECT window,
+        double xFrom = 0, double xTo = 1)
+    {
+        Assert.True(element.Width > 0 && element.Height > 0,
+            $"控件矩形为空（{element}）——它多半没在屏幕上，取样等于没跑");
+        var x0 = Math.Clamp((int)(element.Width * xFrom), 0, element.Width - 1);
+        var x1 = Math.Clamp(Math.Max(x0 + 1, (int)(element.Width * xTo)), x0 + 1, element.Width);
+        var yStep = Math.Max(1, element.Height / 200);
+        var lums = new List<int>(x1 - x0);
+        var max = int.MinValue;
+        var min = int.MaxValue;
+        for (var y = 0; y < element.Height; y += yStep)
+        {
+            var px = element.Left - window.Left + x0;
+            var py = element.Top - window.Top + y;
+            Assert.InRange(px, 0, bmp.Width - 1);
+            Assert.InRange(py, 0, bmp.Height - 1);
+            for (var x = x0; x < x1; x++, px++)
+            {
+                var c = bmp.GetPixel(px, py);
+                // 全透明＝没渲染，判暗会假通过，必须当场失败（同 Sample 的口径）。
+                Assert.True(c.A != 0, $"窗口坐标 ({px},{py}) 取到全透明像素——换算或渲染有问题，这块核对没跑成");
+                var lum = Lum(c);
+                lums.Add(lum);
+                max = Math.Max(max, lum);
+                min = Math.Min(min, lum);
+            }
+        }
+        lums.Sort();
+        return (lums[(int)(lums.Count * 0.25)], max, min);
+    }
+
     public static string Describe(Color c) => $"RGBA({c.R},{c.G},{c.B},{c.A})";
 
     /// <summary>灰度取三通道最大值：判「暗」要按最亮的那一路，否则纯红/纯绿会蒙混过关。</summary>

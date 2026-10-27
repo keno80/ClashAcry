@@ -5249,6 +5249,11 @@ Expected: 三条命令全绿，构建无警告。
 - **R-19c 启动窗口分档**：带 `GEOIP` 规则的订阅要先下 8.4 MB 的 `geoip.metadb`（mihomo 自留 90 s），我们的 5 s 窗口每次都在下载中途 `KillProcess`，留下半截库文件、下次重下再被砍 ⇒ "导入成功、内核永远起不来"。改成按证据分档：controller 未应答且进程活着 = 仍在启动，宽限 120 s 并广播一条带原因的 `Starting`；controller 应答而 mixed 不跟进 = 带病存活，仍 5 s 判死（锁 `Start_SlowBoot_PastFastWindow_…` / `Start_ControllerNeverBoots_GraceExpires_…`，前者已实测把宽限档退回快档就变红）。
 本轮结束时 **Tray + 真内核活着**（真订阅 25 个节点已加载、`🇭🇰香港1` 走 `/proxies/{name}/delay` 回 `{"delay":450}`），HKCU 三值仍与第 0 条抄下的原值逐字一致。第 4~12 条的人眼动作交给用户，v1.1 又厚了一格：geodata 随包分发（spec §12 ⑧）。
 
+派发状态（2026-10-27 第四轮，**用户亲手过第 4~12 条**）：用户报告「其他都没问题，可是托盘都退出了，页面怎么还在」——第 4/5/12 条的判据本身都成立（`ProxyEnable` 回 0、无 `mihomo` 残留），暴露的是退出链少一格。
+- **R-20a｜托盘「退出」= 整个应用退出**：`TrayHost.ShutdownAsync` 在停内核之后、关管道之前对 `Process.GetProcessesByName("ClashAcry.UI")` 逐个 `CloseMainWindow()`，由 UI 自己的「关窗即退」把进程带走（spec §3 新增「反向语义」段）。**只用 `CloseMainWindow()`、绝不 `Kill()`**：对真窗口实测 `MainWindowHandle=592352`、返回 `True`、3 s 内进程消失；强杀会吞掉 `App.OnUnhandled` 的崩溃落盘，也可能连带杀掉 UI.Tests 的 FlaUI 窗口。关不掉的不重试、不硬来，退出照旧完成。
+  **这条没有回归锁**（记录一下口径）：`ShutdownAsync` 以 `Environment.Exit` 收尾、且真机只有托盘菜单那一条路可达（§3 的 WinExe 实测），单元侧要钉它就得把 TrayHost 抽空——本轮以"对当前那扇真窗口直接调 `CloseMainWindow()` 并观测进程消失"的实测代替，写进 spec §12 ⑨ 与清单第 12 条。
+- **同轮第二项（未动代码，待用户拍板）**：`sysproxy.set(true)` 把 clash-verge 留下的 `ProxyServer=127.0.0.1:8090` / `ProxyOverride=localhost;127.*;<local>` 覆盖成了我们自己的值，`Disable` 依 R-7c 不还原——清单第 0 条早就警告过这件事，本轮它真发生了，快照/还原的补法记进 spec §12 ⑩。
+
 - [x] **Step 4: 回写 spec 并合并**
 
 把 §4.2 端点表、§10 实测列、§12 已消解的风险条目全部定稿。

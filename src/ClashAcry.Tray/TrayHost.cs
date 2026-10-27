@@ -105,7 +105,7 @@ public sealed class TrayHost
     }
 
     /// <summary>
-    /// 退出钩子（R-10j①）：清代理 → 停内核 → 摘图标 → 关掉管道服务并**观察它的死因** → Exit。
+    /// 退出钩子（R-10j①）：清代理 → 停内核 → 关界面 → 关掉管道服务并**观察它的死因** → Exit。
     /// `Pipe.DisposeAsync()` 只调一次（Task 9 的遗留 Minor：第二次会再抛同一个异常），
     /// 且必须 await——不 await 就永远看不见「就绪之后 accept 循环死了」那条唯一去处（评审 I-1）。
     /// </summary>
@@ -116,9 +116,28 @@ public sealed class TrayHost
         _icon?.Dispose();                                                       // NIM_DELETE 先走：人最先关心的就是图标还在不在
         await Routing.Handle(Cmd(CmdTypes.SysProxySet, new SysProxyRequest(false)));   // 复用路由：托盘退出与 UI 关代理走同一段代码
         await Core.StopAsync(default);
+        CloseUiWindows();                                                       // 裁定 R-20a：托盘是宿主，「退出」= 整个应用走
         try { await Pipe.DisposeAsync(); }
         catch (Exception) { /* 管道服务此前已故障：Completion 的续接已经把 tooltip 写成「服务异常」，这里不重复发明日志（spec/计划里没有 Tray 日志这一项） */ }
         Environment.Exit(0);
+    }
+
+    /// <summary>
+    /// 裁定 R-20a（用户实测提出，2026-10-27）：托盘「退出」之后界面还留在屏幕上——它只是显示
+    /// 「与托盘的连接中断」加一格置灰，用户眼里这是"退没退干净"，不是降级可用状态。
+    /// 关掉的方式是 <c>CloseMainWindow()</c>（= WM_CLOSE），由 UI 自己的「关窗即退」（spec §3）把进程带走：
+    /// 真机实测 <c>MainWindowHandle</c> 有值、返回 true、3 s 内进程消失。**绝不 <c>Kill()</c>**——
+    /// 强杀会在退出钩子里吞掉界面自己的未处理异常落盘（App.OnUnhandled），也可能连带杀掉 UI.Tests 的 FlaUI 窗口。
+    /// 关不掉的（窗口正忙）照旧留着显示断连横幅，不因此卡住退出。
+    /// </summary>
+    private static void CloseUiWindows()
+    {
+        foreach (var p in Process.GetProcessesByName("ClashAcry.UI"))
+        {
+            try { p.CloseMainWindow(); }
+            catch (Exception) { /* 进程正在消失 / 句柄已失效：退出钩子不为它发明第二种失败表达 */ }
+            finally { p.Dispose(); }
+        }
     }
 
     private void PumpTooltip(CancellationToken ct)

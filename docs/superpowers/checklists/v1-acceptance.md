@@ -17,6 +17,12 @@
 这条通路原先被我们的 5 s 窗口反复掐死（留下半截库文件），现在按证据分档、宽限到 120 s（spec §9）。
 测试基线抬到 **Core 159 / UI 28**，构建仍 0 警告。这轮结束时 **Tray 与内核是活着的**（真订阅已加载），界面归用户按第 4~12 条继续。
 
+**托盘退出轮（同一天的第四轮，用户亲手点第 4~12 条）**：第 4/5 条真跑通（内核起来 + 系统代理开过），第 12 条的清理链也被真机走了一遍——
+`ProxyEnable` 回到 0、无 `mihomo` 残留，这两条判据成立；**但它暴露出「托盘退出了、界面窗口还在」**（横幅「与托盘的连接中断：Pipe is broken.」+ 控制全置灰 +
+节点页仍显示上一世的延迟），已按裁定 R-20a 修好：退出钩子在停内核后对 `ClashAcry.UI` 调 `CloseMainWindow()`，界面跟着优雅收尾。
+同轮记下的第二条是 `ProxyServer`/`ProxyOverride` 被我们的 `sysproxy.set(true)` 覆盖（第 0 条预警的那件事真发生了），补救与否待拍板，见 spec §12 ⑨⑩。
+**产物已重打包**（`artifacts/publish/ClashAcry-v0.1.0-win-x64.zip`，110.1 MB / 535 文件），第 4~12 条要用新产物重过一遍。
+
 环境前提（AGENTS.md）：本机 .NET 10 SDK 在 `%LOCALAPPDATA%\Microsoft\dotnet`，Git Bash 里先
 `export PATH=/c/Users/Keno/AppData/Local/Microsoft/dotnet:$PATH`，否则 `dotnet` 会报 "No .NET SDKs were found"。
 
@@ -218,7 +224,14 @@ powershell -Command "(Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\Current
 powershell -Command "Get-Process mihomo -ErrorAction SilentlyContinue"
 ```
 
-期望：`ProxyEnable` 为 0；无 `mihomo` 残留进程（`DisposeAsync_KillsCoreAndLeavesStopped` 已在测试侧钉过真 PID 消失）。
+期望：`ProxyEnable` 为 0；无 `mihomo` 残留进程（`DisposeAsync_KillsCoreAndLeavesStopped` 已在测试侧钉过真 PID 消失）；**界面窗口一起消失**（裁定 R-20a：退出钩子对 `ClashAcry.UI` 调 `CloseMainWindow()`，由 UI 自己的「关窗即退」把进程带走）。
+
+```bash
+powershell -Command "Get-Process ClashAcry.UI,ClashAcry.Tray -ErrorAction SilentlyContinue | Select-Object Name,Id"
+```
+
+期望：这条在点完「退出」几秒后**什么都不打印**。第四轮真机测到的是旧行为（窗口留着显示断连横幅），已修；
+关不掉的窗口不阻塞退出（不重试、不硬杀），所以你若看到窗口还在，就是 `CloseMainWindow()` 没送进去——把那次的现象记下来即可。
 最后按第 0 条把 `ProxyServer` / `ProxyOverride` 还原成你抄下的原值。
 
 ---

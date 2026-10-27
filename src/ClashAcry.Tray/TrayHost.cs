@@ -16,6 +16,11 @@ public sealed class TrayHost
     private AppPaths _paths = null!;
     private SettingsStore _store = null!;
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(30) };
+    /// <summary>
+    /// 更新通路单独一个 client：内核包是 10 MB 量级的**整包下载**，30 s 的 REST 超时会在慢link上
+    /// 把正常的下载掐死成 DownloadFailed。不复用 _http 还有一条好处——两边的默认头互不污染（R-6a 纪律）。
+    /// </summary>
+    private readonly HttpClient _updateHttp = new() { Timeout = TimeSpan.FromMinutes(5) };
     public CoreManager Core { get; private set; } = null!;
     public PipeServer Pipe { get; private set; } = null!;
     public TrayCommandRouting Routing { get; private set; } = null!;
@@ -41,11 +46,13 @@ public sealed class TrayHost
         var client = new MihomoClient(_http, s.ControllerHost, s.ControllerPort, s.Secret);
         var probe = new CoreProbe(client);
         Core = new CoreManager(_paths, _store, client, probe);                  // 默认 launchFactory：mihomo -d <runtime>，Tray 侧不自己拼参数
+        // Task 11：更新器只交出「怎么换文件」这段回调，停核/换文件/起核与 Updating 状态迁移全在
+        // CoreManager.SwapExecutableAsync 的生命周期锁里做（spec §3 禁令 1：更新器不碰进程）。
+        var updater = new CoreUpdater(_paths, new ReleaseClient(_updateHttp));
         Pipe = new PipeServer(f => Routing.Handle(f));
         Routing = new TrayCommandRouting(Core, _store, client, _paths, _http,
-            // 裁定 R-10a：Task 11 之前这里是诚实的桩——报错而不是返回 AlreadyLatest 装「已是最新」，
-            // 否则 core.update 在 Task 11 之前会静默地骗人。Task 11 只替换这一行为真 CoreUpdater，路由与测试零改动。
-            (p, ct2) => Task.FromException<UpdateResult>(new InvalidOperationException("内核在线更新在 Task 11 落地")),
+            // 裁定 R-10a 的落点：这里换成真更新器，路由与测试零改动。
+            (p, ct2) => updater.InstallLatestAsync(p, Core.SwapExecutableAsync, ct2),
             Pipe, FocusUi);
         Core.StateChanged += e => Pipe.Broadcast(EventTypes.CoreStateChanged, e);
         await Pipe.StartAsync(ct);                                              // 常驻任务：不能 await 到底

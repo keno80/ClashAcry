@@ -120,6 +120,18 @@ mixed 端口被占用的真机行为（Task 8 `Running` 判据依据，`-OccupyM
 
 `backdrop` = `acrylic`(默认) · `mica` · `solid`；`theme` = `system` · `light` · `dark`；`window.{width,height,x,y,maximized}`；`proxies.show_hidden` = false。与 `settings.json` 分家，按写者划界，两棵真相树，不存在并发写。
 
+### 4.5 更新源（GitHub releases）契约实测（Task 11 回写，2026-10-27 / win-x64）
+
+`GET https://api.github.com/repos/MetaCubeX/mihomo/releases/latest`，真机核实：
+
+- **带 `User-Agent` 是 GitHub API 文档要求，但"无 UA 直接 403"这条计划里的说法本机未复现**：`curl -H "User-Agent;"`（彻底不发该头）与默认 UA 两次请求都返回 **200**（2026-10-27）。UA 仍然带上、值 `ClashAcry`，作用是合规与标识来源，不是"没它就取不到"。**且 UA 按逐请求头设置、绝不挂 `DefaultRequestHeaders`**——沿用 §4.2 的 R-6a 纪律，避免污染共享 `HttpClient` 的其他通路。
+- 真值样本（tag `v1.19.33`）：资产名形态 `mihomo-<os>-<arch>[-<go变体>]-<tag>.zip`。同一 tag 下 windows-amd64 一族有 **23 个**变体（`-v1-go120-` … `-v3-go125-`、`-compatible-`、裸 `-v1.19.33.zip`）。
+  ⇒ 选包**必须按整名相等**匹配 `mihomo-windows-amd64-compatible-{tag}.zip`，回退 `mihomo-windows-amd64-{tag}.zip`；任何前缀/包含式匹配都会误选工具链变体（那一族体积还更大）。
+- 资产 `size` 与真实字节数一致（compatible 包 `22543546`），`browser_download_url` 走 `302` → `objects.githubusercontent.com`，终响应 **`Content-Length: 22543546`、无 `Content-Encoding`**。⇒ 进度分母优先取响应的 `Content-Length`，缺失（分块传输 / 代理抹头）时回落到元数据 `size`。
+- zip 内**不是** `mihomo.exe`：把 compatible 包整份取下来核对（22,543,546 字节压缩 / 解压后 61,304,320 字节），里面**只有一个条目**，名 `mihomo-windows-amd64-compatible.exe`——条目名跟随资产名。⇒ 解包按"首个 `.exe` 条目"定位，写入**调用方给定的目标路径**，绝不拿条目名拼路径（源站数据当路径 = 路径穿越面）。也⇒ 进度百分比只能按**压缩后的下载字节**算（见 §9）。
+
+测试夹具的坑（同批实测）：WireMock.Net 2.20 的 `WithBody(byte[])` 会声明一个与实发字节数无关的 `Content-Length`（2,000,767 字节的包报成 `3987`），带 `contentType` 的重载则干脆不发这个头。夹具因此保留"无声明长度"形态，让分母走 `size` 那条回落路径。
+
 ## 5. 分层与目录
 
 ```
@@ -185,6 +197,10 @@ docs/superpowers/{specs,plans,checklists}/
 **取消语义（Task 8 回写）**：`StartAsync` 的 `CancellationToken` 一旦被调用方触发，**不算启动失败**——不落 `Crashed`、不进"自动重试一次"的循环。行为固定为三步，顺序不可换：① 杀掉本已 spawn 的 mihomo 进程（绝不留孤儿内核）；② `Transition(Stopped)` 并保留"启动被取消"作为原因；③ 原样抛 `OperationCanceledException`（吞掉就等于伪造业务结论，让调用方以为还能重试）。实现上这条 catch 必须在通用 `catch (Exception)` **之前**，否则取消会被归类成启动异常。
 
 **探活成本实测（Task 8 回写，2026-10-26 / win-x64）**：mixed 端口的 TCP 探活对**没人监听的 loopback 端口**发起 connect，本机约 **2.03 s** 才拿到拒绝（控制器独立复现：`TcpClient.ConnectAsync` 与同步 `Socket.Connect` 各三次，2027~2044 ms，无预热效应；**真在听的端口 0 ms**）。原写法 `for (i < 20) { Delay(250); ... TcpAlive(1s 预算) }` 里"每轮 250 ms"只是**间隔**、不是预算——每轮还要付一次探活，于是名义 5 s 的窗口实测 25 s/次尝试、50 s/两次尝试（回归用例 `Start_DoesNotReachRunning_WhenControllerAliveButMixedPortDead` 实测 50 s）。这不是慢而是**说谎**：本节承诺"5 s 内未就绪"，实现给了 25 s，UI 会把"内核起不来"渲染成 25 秒假死。**裁定 R-8i**：① 探活窗口按**墙上时间**计（`Stopwatch` 起表、`Elapsed < 5 s` 继续轮），不许用固定轮数当预算——轮数 × 间隔在任何一次探活变慢时都会失真；② `TcpAlive` 单次超时 **250 ms**（loopback 上活监听者 0 ms 应答，250 ms 是三个数量级余量），这同时把 controller 占用预检的最坏成本从 1 s 压到 250 ms；③ 失败文案仍写"5 s 内未就绪"，改完它才名副其实。净效果：单次探活一轮 ≤ ~500 ms、窗口 5 s 封顶；一次失败的 `StartAsync`（自动重试一次 = 两个 5 s 窗口串在同一次调用里）实测 ~10.3 s，取代原来的 ~50 s。回归用例 `Start_DoesNotReachRunning_...` 用 `Stopwatch` 夹住 `StartAsync` 断言 **`elapsed < 12 s`**（阈值不是 8 s：8 s 漏算了"失败自动重试一次"会把两个窗口串联，正确实现下也要 ~10.3 s，会被自己的锁判红）。全套 Core.Tests 时长随之从 1 m 5 s 降到 25 s。双探活判据本身不改；`Starting` 期间 UI 仍必须显示"正在探活"（§11 与 AGENTS.md：长耗时操作必须有进行中反馈），只是不再有失真窗口。**遗留**：`KillProcess` 的 `catch { }` 理论上能吞掉"树杀没成功"却广播 `Stopped`（可能留下占端口的孤儿内核）；v1 不加特判——同一用户同一安全上下文下 `Kill(entireProcessTree)` 对自己子进程返回拒绝访问无可达路径，且回归用例 `DisposeAsync_KillsCoreAndLeavesStopped` 已用真 PID 在进程表里等它消失，把"说 Stopped 就得真没了"钉成可执行断言。若将来引入提权运行或外部看管进程，这条重开。
+
+**进度语义（Task 11 回写，裁定 R-11c 落地口径）**：`core.update.progress` 的百分比是**下载进度**，不是"解包/替换"进度——分母优先取响应 `Content-Length`，缺失时回落到 release 元数据的资产 `size`（§4.5），两者都拿不到就**不报中间档**，只在读满后补一次 100% 收尾。节流判据是"整数百分比变了没有"：同一档位只发一帧，2 MB 包实测 25 帧、`pct` 单调不减且去重（回归用例 `Progress_IsMonotonic_Throttled_AndEndsAt100`）。缓存命中（`core\downloads\<资产名>` 存在**且能解出 `.exe` 条目**）完全跳过网络、也就没有进度帧——这不是缺反馈，那条路径本来就是瞬时的。结果帧 `core.update.result` 必发，UI 的"…中"才有终点。
+
+**失败分类（Task 11 回写）**：源站取不到 / 没有匹配当前平台的资产 / 传输失败 → `DownloadFailed`；包能下下来却解不出 `.exe` 条目 → `ExtractFailed`（两种失败不混，否则"源站挂了"和"上游发了个空包"在 UI 上是同一句话）；目标 exe 被运行中的内核占用 → 备份已落 `.bak`、换文件抛 `IOException` → `InUseRolledBack`，**`version.txt` 不写**（写了下次就以为已是新版本，用户永久卡在坏版本）。`AlreadyLatest` 在任何联网动作之前判定，零下载零换文件。更新器全程不碰内核进程、不改 `CoreState`（§3 禁令 1）：停核 / 换文件 / 起核由 `CoreManager.SwapExecutableAsync` 在生命周期锁内完成。
 
 ## 10. 常驻开销目标（验收判据）
 

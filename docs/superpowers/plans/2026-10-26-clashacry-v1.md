@@ -3665,7 +3665,32 @@ git commit -m "feat(tray): Win32 托盘宿主与命令路由（零 XAML/零 WinF
     `static ReleaseAsset? PickAsset(Release r)`
   - `delegate Task<SwapOutcome> SwapAsync(Func<Task> replaceFiles, CancellationToken ct)`（值与 `CoreManager.SwapExecutableAsync` 一致；更新器**不碰内核进程**，只把换文件动作交给它，见 Task 8）
 
-- [ ] **Step 1: 写失败的测试**
+派发前控制器裁定（样例里有两处**照写必红**、一处断言为空、一处节流测不到，先裁掉再派发）：
+
+- **R-11a（阻断级）：`Progress<T>` 在测试里是异步投递，样例的进度用例自己会炸。** `new Progress<T>` 的回调是 `SynchronizationContext.Post`（无上下文时落线程池），`InstallLatestAsync` 返回时一条回调都可能还没跑，`seen.Last()` 直接 `InvalidOperationException: Sequence contains no elements`。裁定：测试用**自写的同步记录器**
+  `private sealed class InlineProgress : IProgress<UpdateProgress> { public List<int> Pcts { get; } = new(); public void Report(UpdateProgress p) => Pcts.Add(p.Pct); }`
+  （`CoreUpdater` 侧不许为可测性改签名——`IProgress<T>?` 就是要收外部实现）。生产侧继续用 `Progress<T>`：路由在管道线程上广播，投递语义不是问题。
+- **R-11b（Important）：`AlreadyLatest_SwapsNothing` 名字里的三件事一件都没断。** 它只断返回值，等于「返回 AlreadyLatest 就行，换没换文件、下没下载、有没有落缓存全不管」。裁定：补三条——swap 委托被调 **0** 次（用计数版 swap，见 R-11i）、`CoreExecutable` 字节与调用前一致、`CoreDownloadsDir` 里**没有**新增文件（`/dl` 干脆不注册，走通即证明没联网）。
+- **R-11c（Important）：`Progress_IsMonotonic_Throttled_AndEndsAt100` 的 1 MB 全零会被压成 ~1 KB，节流根本没进测试。** `ZipArchive` 默认 Optimal，`new byte[1_000_000]` 全零压完约 1 KB；而进度按**下载流的压缩后字节**算，`Content-Length` 只有 1 KB 时 `pct` 一步就到 100，`seen.Count < 100` 与「无重复档位」两条都白过。裁定：条目内容换成**不可压缩的随机字节**（`RandomNumberGenerator.Fill`，2 MB 量级足够），并加一条下限断言 `Assert.True(seen.Count >= 5)`——否则「一次都没回调」也能满足 `< 100`。同时把语义写进 spec §9：进度百分比是**下载**进度（压缩后），不是解压后大小。
+- **R-11d（阻断级）：`InUseTarget_RollsBackAndReportsInUseRolledBack` 的夹具自相矛盾，照写必红。** 它用 `FileShare.None` 独占 `mihomo.exe`，而换文件动作的第一步是 `File.Copy(exe, exe+".bak")`——**读**源文件。`FileShare.None` 下这一步就抛 IOException，`.bak` 永远不会产生，末尾那句 `Assert.True(File.Exists(... + ".bak"))` 必红。裁定：占用句柄改成 `FileShare.Read`（别人能读、不能写）。这不只是让测试变绿的改法，它才是真机形态：跑着的 mihomo 由操作系统以 `FILE_SHARE_READ` 映射自己的镜像，读得动、覆盖不掉；只有这样才能同时成立「备份成功 → 覆盖失败 → 回滚有据」这三件事。夹具注释里写清这条。
+- **R-11e（Minor，但省一轮返工）：`core\downloads` 既不在 `AppPaths` 上，也不被 `EnsureCreated()` 创建。** 样例在测试里自己 `Path.Combine(Paths().CoreDir, "downloads", ...)` 拼字符串、又自己 `Directory.CreateDirectory`。裁定：给 `src/ClashAcry.Core/Paths.cs` 加 `public string CoreDownloadsDir => Path.Combine(CoreDir, "downloads");` 并把它加进 `EnsureCreated()` 的目录数组（Task 4 的文件，本任务授权改这两行），更新器与测试一律从这里取路径。
+- **R-11f：`DefaultLatestUrl` 作为 `const` 住在 `ReleaseClient`，`TrayHost` 装配处只引用常量，不再抄第二遍字符串；UA 逐请求带 `ClashAcry`。** ~~GitHub API 无 UA 直接 403~~ —— **本条的 403 前提实施日撤回**：`curl -H "User-Agent;"`（彻底不发该头）对 `api.github.com/repos/MetaCubeX/mihomo/releases/latest` 实测 **200**（2026-10-27，本机出网）。UA 仍然带，理由是 GitHub API 文档要求 + 标识来源，不是"没它就取不到"；且只挂在 `HttpRequestMessage` 上、绝不进 `DefaultRequestHeaders`（同 R-6a 纪律）。实测已回写 spec §4.5。
+- **R-11g（Important，跨任务接线）：Step 5 只换 `TrayHost` 那一行诚实桩**——`new CoreUpdater(paths, new ReleaseClient(http, ReleaseClient.DefaultLatestUrl)).InstallLatestAsync(p, core.SwapExecutableAsync, ct)`。路由的委托缝（R-10a）与 13 条路由用例零改动。`UpdateCoreAsync` 成功后调 `GetVersionAsync` 回写版本号那条分支不动：内核没跑时它返回 `null`，`if (v is not null)` 已经吞了，**不要**为它加新分支或新事件。
+- **R-11h（裁定空白）：`SwapOutcome.Done(false)`（换文件成功、但内核重启失败）映射成什么？** `UpdateResult` 是 Contracts 里给 UI 的契约（`Updated/AlreadyLatest/DownloadFailed/ExtractFailed/InUseRolledBack`），不许为它加第六个值（加值要过 spec §4.1）。裁定：`Done(false)` → 返回 `UpdateResult.Updated`，重启失败由 `CoreManager` 自己的 `core.state`（`Crashed` + reason）广播表达——更新器只负责「包换上了没有」，进程语义归状态机（spec §3 禁令 3）。测试锁一条：`swap` 返回 `Done(false)` 时结果仍是 `Updated` 且 `version.txt` 已写新 tag。
+- **R-11i（补一条空白覆盖）：`ExtractFailed` 至今零用例。** 加 `ZipWithoutExeEntry_ReportsExtractFailed_KeepsOldExe`：zip 里只放 `.txt` 条目 → `UpdateResult.ExtractFailed`、旧 exe 字节不变、swap 调用次数 0（与 R-11b 共用那个计数版 swap）。缓存命中「存在**且能解出 .exe**」的否定分支（缓存里是个坏/无 exe 的包 → 回落到下载）也一并锁在这条旁边。
+
+实施日回写（Task 11 Step 1–4 落地时踩到的，全部有对应用例或代码行作证）：
+
+- **R-11j（阻断级，派发样例的两处 API 用错）**：① `Response.Create().WithBody(zip, isBase64Encoded: false)` 不存在那个参数——WireMock.Net 2.20 `IResponseBuilder` 的 `byte[]` 重载第二个参数是 `contentType`，照抄直接 CS1739；② `seen.Zip(seen.Skip(), …)` 的 `Skip()` 没有 0 参重载（CS1501），单调断言要写 `pct.Skip(1)`。
+- **R-11k（阻断级，夹具的 Content-Length 是假的 → 进度用例必红）**：`WithBody(byte[])` 声明的长度与实发字节数无关（2,000,767 字节的包报成 **3987**），于是第一个块就「100%」、全程只 1 帧，`>= 5` 那条下限断言判红；换成 `WithBody(zip, "application/octet-stream")` 后服务端**干脆不发** `Content-Length`（`Content.Headers.ContentLength == null`），分母变 0 同样只有收尾一帧。裁定：`TryDownloadAsync` 增加 `totalHint` 参数，分母取 `Content-Length`（只有 >0 才信），缺失时回落到 `release` 元数据的资产 `size`；夹具保留「无声明长度」形态走这条回落路径，`size` 由 `/latest` 桩填成真实 zip 字节数。真源站两头都对得上（§4.5），这条回落是给分块传输/代理抹头留的。
+- **R-11l（Important，失败分类不许糊）**：下载成功后**不要**再判一次 `HasExecutable(cacheZip)` 才继续——那样「包能下下来但没有 `.exe` 条目」会被折进 `DownloadFailed`，`ExtractFailed` 永不可达，R-11i 那条用例直接红。传输失败与解包失败是两句话，`CorruptCache_FallsBackToDownload` 已经证明坏缓存会在**下一轮**被判不可用并重下，缓存命中判据（存在且能解出 exe）保持原样。
+- **R-11m（真机体积决定，接线级）**：真包 `22,543,546` 字节（§4.5），`TrayHost` 那个 `Timeout = 30 s` 的 `_http` 是给 REST 调用的预算，用它下载内核会把正常下载掐死成 `DownloadFailed`。裁定：更新通路用**独立的 `HttpClient`（`Timeout = 5 min`）**，顺带保持「不给共享实例挂默认头」的纪律；这也让 Task 17 的产物审计少一个耦合点。
+- **R-11n（Minor，别谎报占用）**：`IOException → InUseRolledBack` 的兜底只包住 `await swap(…)` 那一句，不许罩住整个 try——否则 `File.WriteAllText(version.txt)` 的盘上异常也会被报成「目标被占用」，把一种没发生过的失败说给用户。
+
+
+样例的 `Paths()` 每次调用都 `new AppPaths` + `EnsureCreated()`，`EnsureCreated` 用 `Directory.CreateDirectory`（对已存在目录是 no-op，实测不抛），这条不用改；但 `CachedZip_SkipsNetworkEntirely` 里那句手搓 `Directory.CreateDirectory(Path.GetDirectoryName(...)!)` 按 R-11e 删掉。
+
+- [x] **Step 1: 写失败的测试**
 
 ```csharp
 using System.IO.Compression;
@@ -3828,12 +3853,12 @@ public class CoreUpdaterTests
 
 文件头补 `using System.IO.Compression;`、`using System.Text.Json;`（`ZipArchive` / `JsonSerializer` 都靠它），其余 using 同 Task 6 的测试文件。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter CoreUpdaterTests`
 Expected: FAIL（类型不存在）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 要点（不是可选）：
 - `ReleaseClient(HttpClient http, string latestUrl)`：生产传 `ReleaseClient.DefaultLatestUrl`（就是 `const string DefaultLatestUrl = "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest";`，Task 10 的 `TrayHost` 装配处只引用这个常量、不再抄一遍字符串），测试传 WireMock 地址（**URL 走构造参数，不写死**，否则本任务全部测试无法落地）。请求带 `User-Agent: ClashAcry`（GitHub API 无 UA 直接 403，这是实测约束，回写 spec §4.2）。非 2xx / 超时 / 断网 → `CheckLatestAsync` 返回 `null` 静默，不抛。
@@ -3846,12 +3871,12 @@ Expected: FAIL（类型不存在）
 - 换文件动作（交给 `swap` 委托执行的那段）：**先 `File.Copy(CoreExecutable, CoreExecutable + ".bak", overwrite: true)` 再 `File.Copy(temp, CoreExecutable, overwrite: true)`**。不要用 `File.Replace`——目标被内核占用时它会直接失败、不产生 `.bak`，回滚就无据可依；备份先行则 `InUseTarget_RollsBackAndReportsInUseRolledBack` 的 `.bak` 断言成立。IOException 从委托里抛出 → `SwapOutcome.Rollback` → 返回 `InUseRolledBack`，**旧内核继续跑**。
 - 状态：更新期间的 `CoreState.Updating` 迁移由 `CoreManager.SwapExecutableAsync` 在生命周期锁内完成（Task 8 已实现），`CoreUpdater` **不得自己改状态、不得碰进程**（spec §3 禁令 1/3）。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter CoreUpdaterTests`
 Expected: PASS，9/9
 
-- [ ] **Step 5: 接进 Tray 路由**
+- [x] **Step 5: 接进 Tray 路由**
 
 `core.update` → `TrayCommandRouting` 调 `updater.InstallLatestAsync(progress, _core.SwapExecutableAsync, ct)`——**更新器拿到的是 `CoreManager` 的换文件入口，不是进程控制权**（spec §3 禁令 1：内核生命周期只归 Tray，且替换动作必须落在 `_lifecycle` 锁内，避免"边下载边点启动"）。进度回调里把 `UpdateProgress` 转成 `core.update.progress` 事件广播；UI 断开时不发（`PipeServer.ClientCount > 0`）。结果 `UpdateResult` 也要广播（`core.update.result`），否则 UI 的「…中」没有终点（用户红线：长耗时操作必须有进行中反馈）。
 

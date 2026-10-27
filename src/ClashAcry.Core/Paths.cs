@@ -10,6 +10,9 @@ public sealed class AppPaths
     public string ConfigFile => Path.Combine(RuntimeDir, "config.yaml");
     public string CoreExecutable => Path.Combine(CoreDir, "mihomo.exe");
     public string CoreVersionFile => Path.Combine(CoreDir, "version.txt");
+    /// R-11e：下载缓存目录归 Paths 管（更新器与测试都从这里取路径，不许各自拼字符串），
+    /// 并和其余目录一样由 <see cref="EnsureCreated"/> 建出来。
+    public string CoreDownloadsDir => Path.Combine(CoreDir, "downloads");
 
     private AppPaths(string root) => Root = root;
 
@@ -19,7 +22,7 @@ public sealed class AppPaths
 
     public void EnsureCreated()
     {
-        foreach (var d in new[] { Root, RuntimeDir, ImportsDir, CoreDir })
+        foreach (var d in new[] { Root, RuntimeDir, ImportsDir, CoreDir, CoreDownloadsDir })
             Directory.CreateDirectory(d);
     }
 }

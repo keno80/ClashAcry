@@ -20,15 +20,20 @@ public class ConfigInjectorTests
         Assert.Contains("secret: abcd", output);
         Assert.Contains("allow-lan: false", output);
         Assert.Contains("unified-delay: true", output);
-        Assert.Contains("port: 7890", output);          // 已有端口字段 → 不补 mixed-port
-        Assert.DoesNotContain("mixed-port", output);
+        Assert.Contains("port: 7890", output);          // 其余端口字段仍原样透传
+        Assert.Contains("mixed-port: 7897", output);    // 但 mixed-port 是必需键，见下一条
     }
 
     [Fact]
-    public void Inject_AddsMixedPort_OnlyWhenNoPortFieldPresent()
+    public void Inject_ForcesMixedPort_EvenWhenSubscriptionShipsOne()
     {
-        var output = ConfigInjector.Inject("mode: rule\n", S);
-        Assert.Contains("mixed-port: 7897", output);
+        // 真机踩到的洞（2026-10-27，用户机场）：订阅头部第一行就是 `mixed-port: 7890`。
+        // 旧规则「原文有任何端口键就不补 mixed-port」让内核听 7890，而 Tray 把系统代理与双探活
+        // 都指向设置里的 7897 —— 界面全绿、流量全断。mixed-port 因此是无条件覆盖的必需键。
+        var output = ConfigInjector.Inject("mixed-port: 7890\nmode: rule\n", S);
+
+        Assert.Equal("mixed-port: 7897", Match(output, "mixed-port:").Single());
+        Assert.Contains("mode: rule", output);
     }
 
     [Fact]

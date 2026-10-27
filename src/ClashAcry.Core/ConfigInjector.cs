@@ -8,10 +8,9 @@ namespace ClashAcry.Core;
 /// </summary>
 public static class ConfigInjector
 {
-    /// <summary>注入器可能写下的顶层键全集；`mixed-port` 只在原文没有任何端口字段时才写（spec §7）。</summary>
+    /// <summary>注入器**无条件**写下的顶层键（spec §7）。`mixed-port` 在这份名单里是有理由的：
+    /// 系统代理与内核探活用的都是设置里那个端口，订阅自带的端口透传进去就等于让两者指向不同的门。</summary>
     public const string RequiredKeys = "external-controller, secret, allow-lan, unified-delay, mixed-port";
-
-    private static readonly string[] PortKeys = ["port", "socks-port", "mixed-port", "tproxy"];
 
     public static string Inject(string yaml, Settings s)
     {
@@ -26,9 +25,11 @@ public static class ConfigInjector
             ["secret"] = new YamlScalarNode(s.Secret),
             ["allow-lan"] = new YamlScalarNode("false"),
             ["unified-delay"] = new YamlScalarNode("true"),
+            // 真机踩到的洞（2026-10-27，用户机场）：订阅头部就是 `mixed-port: 7890`。
+            // 早先的规则是「原文有任何端口键就不补 mixed-port」，于是内核听 7890，
+            // 而 Tray 按设置把系统代理指向 7897、双探活也查 7897 —— 界面全绿、流量全断。
+            ["mixed-port"] = new YamlScalarNode(s.MixedPort.ToString()),
         };
-        bool AnyPortKey() => root.Children.Any(c => c.Key is YamlScalarNode k && PortKeys.Contains(k.Value ?? ""));
-        if (!AnyPortKey()) overrides["mixed-port"] = new YamlScalarNode(s.MixedPort.ToString());
 
         // 未触及的键值对原样搬走（复用同一个 YamlNode 实例），只对必需键换值节点，
         // 这样键序与缩进风格都不受我们影响。

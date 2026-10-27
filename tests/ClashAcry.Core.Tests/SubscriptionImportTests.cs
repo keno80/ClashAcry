@@ -1,4 +1,5 @@
 using System.Text;
+using WireMock.Matchers;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
 using WireMock.Server;
@@ -16,6 +17,63 @@ public class SubscriptionImportTests : IDisposable
         var p = AppPaths.ForTest(Dir); p.EnsureCreated();
         File.WriteAllText(p.ConfigFile, original);                 // 先有一份可用的旧配置
         return (p, new SettingsStore(p));
+    }
+
+    [Fact]
+    public void ImportFromUrl_SendsAUserAgent_SoUaSniffingPanelsDoNotFourZeroThree()
+    {
+        // 真机现象（2026-10-27，用户机场）：面板对**没有 User-Agent 头**的请求一律 403。而 .NET 的裸
+        // `new HttpClient()` 根本不发 UA，于是导入失败文案成了「订阅下载失败：… 403 (Forbidden)」。
+        // 值同样是指令的一部分：自家 `ClashAcry/1.0` 会拿到 200 + `proxies: []` 的空模板，
+        // `clash.meta` 才给完整节点列表——所以断言锁的是常量本身，不是「有 UA」这件事。
+        var yaml = "mode: rule\nproxies:\n  - { name: n1, type: ss, server: 1.2.3.4 }\n";
+        var wire = WireMockServer.Start();
+        wire.Given(Request.Create().WithPath("/sub").UsingGet().WithHeader("User-Agent", new RegexMatcher(".+")))
+            .RespondWith(Response.Create().WithStatusCode(200).WithBody(yaml, "text/plain"));
+        wire.Given(Request.Create().WithPath("/sub").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(403).WithBody("forbidden"));
+        var (p, s) = Fixture("mode: old\n");
+
+        var r = new SubscriptionImport(p, s).ImportFromUrl(wire.Url + "/sub", Http, default);
+
+        Assert.Equal("", r.ReasonIfFailed);
+        var req = wire.LogEntries.Select(l => l.RequestMessage!).Single(m => m.Path == "/sub");
+        Assert.Equal(SubscriptionImport.UserAgent, string.Join("|", req.Headers!["User-Agent"]));
+        Assert.Equal("clash.meta", SubscriptionImport.UserAgent);
+        // 裁定 R-6a：这个 HttpClient 在 Tray 里与 controller / GitHub 共用，UA 只能逐请求带。
+        Assert.Empty(Http.DefaultRequestHeaders.UserAgent);
+        wire.Dispose();
+    }
+
+    [Fact]
+    public void Import_EmptyProxiesTemplate_FailsLoudly_WritesNothing()
+    {
+        // 真机踩到的第二种失败：面板认不出客户端时不给 403，而是回一份 `proxies: []` 的完整模板
+        // （自家 UA 10457 字节 0 个节点）。当成成功导入的话，界面显示「已导入」而节点页是空的。
+        var body = "mode: rule\nproxies: []\nproxy-groups:\n  - { name: \u8282\u70b9, type: select, proxies: [DIRECT] }\n";
+        var wire = WireMockServer.Start();
+        wire.Given(Request.Create().WithPath("/sub").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(200).WithBody(body, "text/plain"));
+        var (p, s) = Fixture("mode: old\n");
+
+        var r = new SubscriptionImport(p, s).ImportFromUrl(wire.Url + "/sub", Http, default);
+
+        Assert.Equal(SubscriptionImport.EmptySubscriptionReason, r.ReasonIfFailed);
+        Assert.Empty(Directory.GetFiles(p.ImportsDir, "*.yaml"));              // 连原件都不落，别留一份没用的订阅
+        Assert.Equal("mode: old\n", File.ReadAllText(p.ConfigFile));           // 旧配置一个字节不动（spec §9）
+        wire.Dispose();
+    }
+
+    [Fact]
+    public void Import_ProvidersOnlyConfig_IsAccepted()
+    {
+        // 反证：机场用 proxy-providers 分发（没有 proxies 键或 proxies 为空）时不该被空模板判据误伤。
+        var yaml = "mode: rule\nproxies: []\nproxy-providers:\n  p1: { type: http, url: http://x/y }\n";
+        var (p, s) = Fixture("mode: old\n");
+
+        var r = new SubscriptionImport(p, s).ImportFromText(yaml);
+
+        Assert.Equal("", r.ReasonIfFailed);
     }
 
     [Fact]

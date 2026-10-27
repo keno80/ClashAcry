@@ -68,7 +68,7 @@ public sealed partial class MainWindow : Window
         {
             page = tag switch
             {
-                "proxies" => new ProxiesPage(),
+                "proxies" => new ProxiesPage(this),
                 "settings" => new SettingsPage(this),
                 _ => new OverviewPage(this),
             };

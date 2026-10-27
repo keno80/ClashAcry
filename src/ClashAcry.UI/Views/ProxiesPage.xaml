@@ -2,9 +2,127 @@
 <Page x:Class="ClashAcry.UI.Views.ProxiesPage"
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:svc="using:ClashAcry.UI.Services"
       AutomationProperties.AutomationId="ProxiesPage">
-  <!-- Task 15 填内容（组树 + 测速 + 不抖动更新）。 -->
-  <StackPanel Padding="24" Spacing="8">
-    <TextBlock Text="节点" Style="{ThemeResource TitleTextBlockStyle}"/>
-  </StackPanel>
+  <!-- 这一页的每个文本判据都来自 VM 的派生属性（绑定），页面代码只写 hint 一类"只有页面知道"的状态。
+       用 {Binding} 而不是 x:Bind OneTime：容器复用的是同一个 VM 实例，一次性绑定会把第一轮的值焊死在行上，
+       于是"数值就地更新"这条红线在界面上直接失效。 -->
+  <Page.Resources>
+    <svc:BoolToVisibilityConverter x:Key="BoolToVis" />
+    <Style x:Key="Card" TargetType="Border">
+      <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
+      <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Padding" Value="16" />
+    </Style>
+    <!-- 行本体的按钮：去掉边框与底色，让整行读起来像一行而不是一颗按钮；点击区仍在行上（选中节点是主操作）。 -->
+    <Style x:Key="RowButton" TargetType="Button">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Padding" Value="4,2" />
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="HorizontalContentAlignment" Value="Left" />
+    </Style>
+  </Page.Resources>
+
+  <Grid AutomationProperties.AutomationId="PageBackground" Background="Transparent">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="*" />
+      <RowDefinition Height="Auto" />
+    </Grid.RowDefinitions>
+
+    <!-- 整页只有这一个 ScrollViewer（计划 Step 4）：嵌套滚动容器会让内层自己重建可视树，抖动就回来了。 -->
+    <ScrollViewer Grid.Row="0">
+      <StackPanel Padding="24" Spacing="12">
+        <Grid>
+          <TextBlock Text="节点" Style="{ThemeResource TitleTextBlockStyle}" />
+          <Button x:Name="TestAllButton" Content="全部测速" AutomationProperties.AutomationId="TestAllButton"
+                  HorizontalAlignment="Right" Click="OnTestAllClick" />
+        </Grid>
+        <!-- 空 = 一切正常；内核没起来 / 读不到 controller 时只有这一行说话，不弹阻塞框（spec §9）。 -->
+        <TextBlock x:Name="ProxiesHintLabel" AutomationProperties.AutomationId="ProxiesHintLabel"
+                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+
+        <ItemsControl AutomationProperties.AutomationId="ProxyGroups" ItemsSource="{Binding Groups}">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate>
+              <Border Style="{StaticResource Card}">
+                <StackPanel>
+                  <Grid ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="Auto" />
+                      <ColumnDefinition Width="*" />
+                      <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <!-- 折叠只认这个尖角按钮（id = Node_{组名}_Collapse）：组行本体不设点击，否则一次点击会同时
+                         命中"折叠"和"选中"两个语义相反的操作。 -->
+                    <Button Grid.Column="0" Style="{StaticResource RowButton}" Width="32"
+                            AutomationProperties.AutomationId="{Binding CollapseId}" Click="OnCollapseClick">
+                      <FontIcon Glyph="{Binding CollapseGlyph}" FontSize="12" />
+                    </Button>
+                    <TextBlock Grid.Column="1" AutomationProperties.AutomationId="{Binding GroupId}"
+                               Text="{Binding HeaderText}" FontWeight="SemiBold" VerticalAlignment="Center"
+                               TextTrimming="CharacterEllipsis" />
+                    <Button Grid.Column="2" AutomationProperties.AutomationId="{Binding TestId}" Content="测速"
+                            Click="OnTestGroupClick" />
+                  </Grid>
+
+                  <ItemsControl ItemsSource="{Binding Nodes}" Margin="0,8,0,0"
+                                Visibility="{Binding MembersVisible, Converter={StaticResource BoolToVis}}">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate>
+                        <Grid ColumnSpacing="8">
+                          <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="20" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                          </Grid.ColumnDefinitions>
+                          <!-- 高亮是"刚点过这一条"的视觉指认，不是选中态：Opacity 平时为 0，容器与布局一律不动。 -->
+                          <Border Grid.ColumnSpan="3" Background="{ThemeResource AccentFillColorTertiaryBrush}"
+                                  CornerRadius="4" Opacity="{Binding HighlightOpacity}" />
+                          <TextBlock Grid.Column="0" Text="{Binding SelectedMark}" VerticalAlignment="Center"
+                                     Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                          <Button Grid.Column="1" Style="{StaticResource RowButton}"
+                                  AutomationProperties.AutomationId="{Binding RowId}"
+                                  Content="{Binding DisplayText}" Click="OnNodeClick" />
+                          <TextBlock Grid.Column="2" AutomationProperties.AutomationId="{Binding BadgeId}"
+                                     Text="{Binding TestBadge}" VerticalAlignment="Center"
+                                     Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </Grid>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                </StackPanel>
+              </Border>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </StackPanel>
+    </ScrollViewer>
+
+    <Border Grid.Row="1" Style="{StaticResource Card}" Margin="24,0,24,24">
+      <StackPanel Spacing="8">
+        <TextBlock Text="订阅（Provider）" Style="{ThemeResource SubtitleTextBlockStyle}" />
+        <ItemsControl AutomationProperties.AutomationId="ProviderPanel" ItemsSource="{Binding ProviderRows}">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate>
+              <Grid ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" AutomationProperties.AutomationId="{Binding RowId}"
+                           Text="{Binding DisplayText}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                <!-- 进行中标记就写在按钮自己那：文案与可点性同源于 IsRefreshing，不会出现"能点但写着刷新中"。 -->
+                <Button Grid.Column="1" AutomationProperties.AutomationId="{Binding RefreshId}"
+                        Content="{Binding RefreshLabel}" IsEnabled="{Binding CanRefresh}"
+                        Click="OnRefreshProviderClick" />
+              </Grid>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </StackPanel>
+    </Border>
+  </Grid>
 </Page>

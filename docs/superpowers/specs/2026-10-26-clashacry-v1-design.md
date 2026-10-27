@@ -104,6 +104,14 @@ provider 形态的两条硬结论（详证见 §12）：
 
 组内聚合整个 provider 的写法（夹具已用，实测有效）：`proxy-groups` 条目里用 `use: [PROBE-PROV]`；在 `proxies:` 列表里直接写 provider 名会被 v1.19.33 拒绝并在启动时 fatal（`proxy group[1]: PROBE-SELECT: 'PROBE-PROV' not found`）。file 型 provider 的 `url` 字段实测**可省略**（仅 `type/path/interval` 即可加载），填不可达占位 URL 也接受且不会被抓取；夹具保留 `url` 以贴近真实订阅形态。
 
+**Task 15 回写（节点页按实测形状实现，四条都会让"用例全绿但真机全废"）**：
+
+- **`type` 字符串是 Go 的类型名，不是配置文件里的值**：实测 `/proxies` 与 `/providers/proxies` 里的组是 `"Selector"` / `"URLTest"`，成员是 `"Shadowsocks"` / `"Direct"` / `"Reject"`——与配置文件里的 `select` / `url-test` **不是同一套字符串**。因此"是不是组"的判据取**结构**：带非空 `all` 即组（实测只有组对象带 `all`，成员条目一律没有）。按 type 名单判组的写法在真机上一条都命中不了。
+- **非订阅成员条目的 `provider-name` 是空串**（实测 `"provider-name":""`，不是缺键）。不折成 `null` 就会被判成"订阅成员"，于是全组测速一条都不发——而这条判据同时是"成员不许打 `/proxies/{成员}/delay`"那一条的开关，两边一起坏。
+- **同一个成员名会同时出现在真 provider 与各组的 Compatible 伪 provider 里**（`default` 表就是这样），伪条目不带 `provider-name` 也不带健康样本。把 provider 表按成员名摊平时**不能"先到先赢"**：要留信息量大的那条（有 `provider-name` 优先，其次有 `history` 样本），否则真成员被伪条目占位，既测不了也读不到延迟。
+- **`history` 里哪一端是最新没有实测依据**（探针只抓到长度 ≤1 的数组），因此不赌列表位置：按样本 `time` 取最大，全部时间戳解析不了才退回末位。
+
+
 mixed 端口被占用的真机行为（Task 8 `Running` 判据依据，`-OccupyMixedPort` 实测）：预绑 7897 再起内核——内核**不退出**，controller 照常 `GET /version` **200**，日志打一行 `level=error msg="Start Mixed(http+socks) server error: listen tcp 127.0.0.1:7897: bind: Only one usage of each socket address (protocol/network address/port) is normally permitted."` 后继续完成初始化（provider 启动日志照常出现，controller 全部端点仍应答）；且此时 `GET /configs` 报 `"mixed-port":0`。结论：**controller 应答不能证明代理可用**，`Running` 判据必须包含 mixed 端口 TCP 连接探活（与计划 Task 8 的双探活签名一致）。
 
 ### 4.3 `settings.json`（Tray 独占写）
@@ -253,6 +261,10 @@ Stop-Process -Name ClashAcry.Tray   # 测完必须杀进程，否则污染后续
 处理：不放宽判据，瘦身归到 Task 17（发布产物）一起做——`PublishTrimmed`（§11 探针第 4 条本来就要求它）+ ReadyToRun + `JsonSerializer` 源生成，届时以「管道活动后 WS ≤ 40 MB」为复测口径。
 
 **Task 13 复测（整窗亚克力的成本，本节上一版留的账）**：同一 UI 外壳、同一采样法（各 5 次取中位数），**亚克力档 WS 145.6 MB / 纯色档 WS 145.9 MB** ⇒ 外壳阶段整窗亚克力**测不出额外开销**，差值在噪声内；UI 的内存账基本全是 XAML/WinUI 运行时本身，不是材质。与 Task 12 的 140.4 MB 不矛盾：那是还没装设置页与材质时的同一外壳。220 MB 线守住（余量 ~75 MB），真实控件（Task 14/15）落地后复测。
+
+**Task 15 复测（真实控件落地后，即上面留的账）**：同一 self-contained 产物、同一采样法。Tray 空闲 **WS 33.6 MB / Private 8.3 MB**，UI 连上并跑过节点页轮询后 **WS 38.2 MB / Private 9.6 MB**；UI **WS 150.6 MB / Private 90.1 MB**（对照 Task 12 外壳基线 140.4 / 86.5，装了三个页面 + 亚克力的总代价 +10.2 MB WS）。三条线全部守住：Tray 40（Task 10 那次被管道顶穿到 45 的现象本轮没有复现，但**管道活动后的采样口径仍欠**，见下）、Tray+内核 80（38.2 + mihomo ≈ 25 ≈ 63）、UI 220（余量 ~69 MB）。
+本轮采样的**两处口径不足，Task 17 必须补齐**：① 采 UI 时节点页**没有打开**，即"真实控件 + 一屏几十行节点 + 一次全组测速"这一档还没进过账；② 采 Tray 时**没有跑管道风暴**（Task 10 顶穿到 45.4 MB 的那一档）。发布产物与 trim 一并处理，届时以「节点页可见且刚测速完的 UI ≤ 220 MB」+「连开 5 次管道会话后 Tray ≤ 40 MB」双口径复测。
+另记：本轮**未启动真实 mihomo**（`mihomo: none`），全部界面行为打在 FakeTray + WireMock 上，用户机器上同时在跑的另一个 clash 客户端（verge-mihomo，可能占 7897/9097）与它的系统代理设置全程未被触碰。
 
 
 ## 11. 测试与验收

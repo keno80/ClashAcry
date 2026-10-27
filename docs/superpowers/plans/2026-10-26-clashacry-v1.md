@@ -4551,7 +4551,7 @@ git commit -m "feat(ui): 概览页（内核/模式/系统代理开关与内核�
     `Task RefreshProviderAsync(string providerName, CancellationToken ct)`（spec §6 的 Provider 手动刷新入口；把对应 `ProviderRowVm.IsRefreshing` 置真再发 PUT，完成后 `RefreshAsync` 重拉纠正——刷新中的行也要有进行中反馈）
     构造：`ProxiesViewModel(Func<CancellationToken, Task<ProxiesResponse>> fetch, Func<string, string, CancellationToken, Task> putProxy, Func<string, CancellationToken, Task<int>> measure, Func<string, CancellationToken, Task> refreshProvider, string delayTestUrl)`
 
-- [ ] **Step 1: 写失败的测试（含不抖动判据）**
+- [x] **Step 1: 写失败的测试（含不抖动判据）**
 
 放在 Core 测试集有两个理由：`ObservableCollection` 属于 `System.ObjectModel`，不需要 UI 工程；而**合并逻辑是"不抖动"这条红线的唯一可实现处**，它在 UI 里的话就只能靠人眼盯窗口，那是验收不是测试。
 
@@ -4715,19 +4715,20 @@ public class ProxiesViewModelTests
 
 （本文件顶部只要 `using ClashAcry.Core;`——`System.Linq`、`System.Collections.Generic`、`System.Threading.Tasks` 由 `Directory.Build.props` 的 `ImplicitUsings` 带进来，xUnit 的 `using Xunit;` 若模板的 `GlobalUsings.cs` 没带就自己补一行；`ProxyDetail`/`ProvidersResponse`/`ProviderInfo`/`DelaySample` 与 `ProxiesViewModel`/`ProviderRowVm` 同在 `ClashAcry.Core`（Task 6 的 `MihomoModels.cs` 用的是 `namespace ClashAcry.Core`），本文件不需要 `using ClashAcry.Contracts;`。）
 
-`Group`/`Node` 混在同一个 `Resp(...)` 数组里时，合并逻辑靠 `Type` 区分：`select`/`url-test`/`relay`/`fallback` 当组，其余当节点。`ProxyDetail.Delay`（实时值）优先于 `History` 最新样本，两者皆无才是 `超时`。
+`Group`/`Node` 混在同一个 `Resp(...)` 数组里时，合并逻辑靠 `Type` 区分：`select`/`url-test`/`relay`/`fallback` 当组，其余当节点。`ProxyDetail.Delay`（实时值）优先于 `History` 最新样本，两者皆无才是 `超时`。（**实施日否证**：真机 `/proxies` 的 `type` 是 Go 的 `"Selector"`/`"URLTest"`，这套名单一条都命中不了；组的判据改成"带非空 `all`"这一结构判据，见 R-15a。）
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `dotnet test tests/ClashAcry.Core.Tests --filter ProxiesViewModelTests`
 Expected: FAIL（类型不存在）→ 实现后 PASS，8/8（新增 Providers_AreProjectedAsRowsWithNameTimeAndCount 锁 spec §6 的 Provider 展示面）
+实测：首轮红在 `CS0246 ProxiesViewModel`（类型不存在，正如计划预期）；实现后 **12/12**——比计划多 4 条，全部是把上面那句"实施日否证"钉住的回归锁：`GroupsAreDetectedByMembers_AndProviderMembersMayBeAbsentFromTopLevel`（结构判据 + provider 成员不在顶层表）、`SampleFromProvidersWins_WhenTopLevelEntryCarriesNothing`（同名条目真/伪 provider 并存时取信息多的一条），以及把 `ProviderName` 的 `""`/空白折成 `null` 的归一化断言。Core.Tests 全量 **143/143**。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 关键约束（逐条对应测试）：
 - `RefreshAsync` 合并而非替换：`Groups` 按组名查/建，`Nodes` 按 `Name` 查/建，只更新属性；**只有成员增减才 `Add`/`Remove`**。这是「不抖动」的实现点——整表重置会让 `ListView` 重挂容器，滚动条跳回顶部，用户一眼就看出"每 2 秒闪一次"。
 - 延迟文本三档：实时值 → `NN ms`；无实时值但有 history → `上次 NN ms`；都没有 → `超时`。`-1` 一律视为"无实时值"（`MihomoClient.GetDelayAsync` 已把 409/超时折成 -1）。
-- provider 成员详情来自 `ProvidersResponse[*].Proxies`：合并时按 `Name` 覆盖/补齐节点，`ProviderName` 一并带上；`show_hidden`（`UiPrefs`）决定是否隐藏 `hidden: true` 成员，默认隐藏。
+- provider 成员详情来自 `ProvidersResponse[*].Proxies`：合并时按 `Name` 覆盖/补齐节点，`ProviderName` 一并带上；`show_hidden`（`UiPrefs`）决定是否隐藏 `hidden: true` 成员，默认隐藏。（**实施日订正**：`hidden: true` 一律丢弃、无开关——`UiPrefs` 里没有 `ShowHidden` 这一项，Task 12 的本地设置也没有；为一条没有入口的偏好去扩契约不值当，见 R-15h。）
 - **provider 成员不许走 `GET /proxies/{name}/delay`**（Task 1 实测 v1.19.33 对成员名与 provider 名一律 **404** `{"message":"Resource not found"}`，spec §4.2 已把它写成既定实现要求）。成员延迟只从 `ProvidersResponse[*].Proxies[i]` 的 `history` / `extra` 健康样本取，取不到落「上次/超时」档；`measure` 委托与 `TestAllAsync` 只对非 provider 成员（`ProviderName` 为空）调用——全组测速时对 provider 成员直接跳过（它们已有 history 样本），别调了拿 404 再静默吞错。
 - `ProviderRows` 在每次 `RefreshAsync` 里整体按 `Name` 排序后**就地更新**（同 `Groups` 的查/建手法：行存在就改属性，只有 provider 增减才 `Add`/`Remove`）；`UpdatedAtText` 取 `ProviderInfo.UpdatedAt`，`MemberCount` 取 `Proxies.Count`，`Proxies` 为 null 记 0。provider 列表本来不常变，整表重建等于给自己埋一次抖动。
 - **`ProviderRows` 必须先按 `vehicleType` 过滤**（Task 1 实测：`GET /providers/proxies` 的 `providers` 表里混有每个策略组自动生成的 `"Compatible"` 伪 provider 和一个 `"default"`，只留 `"File"`/`"Http"`）。不过滤的话节点页底部会多出十几个假 provider 行，还能对它们发 PUT 刷新。**过滤只作用于行**：成员详情合并仍吃整张表——`Compatible` 伪 provider 里列的就是组内节点，按 `Name` 覆盖是无操作，不会污染数据。
@@ -4735,12 +4736,12 @@ Expected: FAIL（类型不存在）→ 实现后 PASS，8/8（新增 Providers_A
 - 测速并发：`SemaphoreSlim(TestConcurrency = 4)`；`IsTesting` 在拿到许可时置真、释放时置假，`DelayText` 只在有值时改。
 - `INotifyPropertyChanged` 只给真正会变的属性（`DelayText`/`Selected`/`IsTesting`/`Highlight`），`Name`/`ProviderName` 设为 `init`——少一个通知就少一次重绘机会。
 
-- [ ] **Step 4: UI 页绑定 + 不抖动的窗口侧断言**
+- [x] **Step 4: UI 页绑定 + 不抖动的窗口侧断言**
 
-`ProxiesPage.xaml`：`NavigationView` 内容区放一个 `ItemsView`/`ListView`（`ItemsSource="{x:Bind Vm.Groups}"`），组用 `Expander` 或层级 `IsExpanded` 绑定，成员行三列（名称、延迟、选中点）。**AutomationId 命名约定（窗口侧断言全靠它，必须逐字一致）**：
+`ProxiesPage.xaml`：`NavigationView` 内容区放一个 `ItemsView`/`ListView`（`ItemsSource="{x:Bind Vm.Groups}"`），组用 `Expander` 或层级 `IsExpanded` 绑定，成员行三列（名称、延迟、选中点）。（**实施日订正**：容器用 `ItemsControl` + `DataContext = _vm` + 普通 `{Binding}`，不是 `x:Bind`。理由两条：① `x:Bind` 的默认 OneTime 会把 `Groups` 之外的属性更新吞掉，而这条红线的全部实现点就是"属性就地更新"；② `Expander` 折叠时其内容**仍在 UIA 树里**，断言会读到隐藏行，改用 `Visibility=Collapsed`（`BoolToVisibilityConverter`——WinUI 3 不自带这个转换器，`Microsoft.UI.Xaml.winmd` 里 grep 为 0，得工程内自己写）才让折叠态真正离开树，见 R-15f/g。）**AutomationId 命名约定（窗口侧断言全靠它，必须逐字一致）**：
 
-- 行标识 `Node_{Name}` 挂在**承载整行文本的那个 `TextBlock`** 上，内容形如 `日本 01 · 11 ms`——即"UIA Name 里同时有节点名和延迟值"。挂在外层容器上不成立：WinUI 里 `ListViewItem`/`StackPanel` 的 `Name` 不会自动聚合子元素文本，断言会读到空串。
-- 折叠箭头 `Node_{Name}_Collapse` 挂在组行首的 `Button`（chevron）上，**行本体不设点击**（Task 15 Step 1 的 `GroupCollapse_TapsChevronNotRow` 就是锁这一条：点整行会撞上"选中节点"这个主操作）。
+- 行标识 `Node_{Name}` 挂在**承载整行文本的那个 `TextBlock`** 上，内容形如 `日本 01 · 11 ms`——即"UIA Name 里同时有节点名和延迟值"。挂在外层容器上不成立：WinUI 里 `ListViewItem`/`StackPanel` 的 `Name` 不会自动聚合子元素文本，断言会读到空串。（**实施日订正**：承载文本的是行本体的 `Button`（`Content="{Binding DisplayText}"`，`DisplayText` = `{Name} · {DelayText}`），不是裸 `TextBlock`——选中节点是这一行的主操作，必须有可点击元素，而 `Button` 的 UIA `Name` 正是它的 `Content` 文本，读取点仍然只有一个。「测速中…」另挂 `Node_{Name}_Badge`，不进行文本，否则测速那两秒 Name 每次刷新都在变，断言追不上。见 R-15g。）
+- 折叠箭头 `Node_{Name}_Collapse` 挂在组行首的 `Button`（chevron）上，**行本体不设点击**（Task 15 Step 1 的 `GroupCollapse_TapsChevronNotRow` 就是锁这一条：点整行会撞上"选中节点"这个主操作。实施日这条落在窗口侧，用例名 `GroupCollapse_HidesMembers_ViaChevronOnly`——断言点箭头后成员整批离开 UIA 树、再点回来又回来，同时证明 `CollapseGlyph` 用的是 MDL2 尖角而不是文字。）
 - 组行标识 `Group_{Name}`，同样挂在承载组名 + 当前选择的 `TextBlock` 上。
 
 `ProxiesViewModel` 由 UI 侧组装：`fetch` 指向 `MihomoClient.GetProxiesAsync`、`putProxy` 指向 `SetProxyAsync`、`measure` 指向 `GetDelayAsync(name, _link.DelayUrl, 5000, ct)`、`refreshProvider` 指向 `RefreshProviderAsync`（内核直连地址、secret 与 `DelayTestUrl` 全部来自 `handshake`，secret 不进任何界面文本）。**滚动容器整页只放一个**，合并逻辑保住了容器，页面别再自己重建。
@@ -4814,7 +4815,9 @@ public class ProxiesNoJitterTests : IClassFixture<UiAppHarness>, IDisposable
 
 （`WaitUntil` 与 `FakeTray` 是 Task 14 引入的共享夹具，放在 `tests/ClashAcry.UI.Tests/Fakes/` 下供两个测试文件共用；`using System.Text.Json;` 供序列化 stub 响应。）
 
-- [ ] **Step 5: 跑测试 + 手动确认**
+（**实施日订正四处**：① 上面这段示例把 stub 写成匿名对象 + `JsonSerializer.Serialize`——C# 匿名对象写不出带横线的键，`provider-name` 需要一个 `JsonPropertyName` 之外的把戏，所以全部响应改成原始 JSON 字符串；同一条 JSON 里 `{{"proxies":{` 紧贴 `}}` 在 `$$"""` 里是 `CS9007`，两个右花括号必须分行。② `FakeTray` 的入口是属性 `Handshake = new HandshakeReply(...)`（Task 14 落地后的形状，没有 `HandshakeWith`），`WaitUntil` 叫 `WaitUntilAsync`。③ 判据从计划的"边界宽度相等"换成 **`element.Properties.RuntimeId.Value` 前后相等**——`BoundingRectangle.Width` 在文本变长时本就会变（`11 ms`→`99 ms` 不是同宽），拿它当"容器没重建"的证据是假判据，真机第一轮就误报；`RuntimeId` 才是 UIA 侧的容器身份。④ `_wire.LogEntries` 可能混有 WireMock 自己的 admin 请求，按 `Path` 过滤后再取，不用 `.Last()` 赌时序。）
+
+- [x] **Step 5: 跑测试 + 手动确认**
 
 ```bash
 dotnet test tests/ClashAcry.Core.Tests --filter ProxiesViewModelTests
@@ -4822,13 +4825,28 @@ dotnet build ClashAcry.sln -c Release
 dotnet test tests/ClashAcry.UI.Tests --filter ProxiesNoJitterTests
 ```
 Expected: 逻辑 8/8、窗口 1/1。然后接真实内核跑一次全组测速，肉眼看滚动条与列表**无整表闪烁、滚动位置不跳顶**（这条是用户红线，必须人眼确认一次）。
+实测：逻辑 **12/12**、窗口 **5/5**（比计划多 4 条逻辑与 4 条窗口用例，见 Step 2 与 R-15）；`dotnet build ClashAcry.sln -c Release` 0 警告 0 错误；UI.Tests 全量 **20/20**、Core.Tests 全量 **143/143**。
+开销复测（每次改 UI 后的硬指标，本轮数字已回写 spec §10）：Tray 空闲 `WS=33.6MB Private=8.3MB`，UI 连上后 Tray `WS=38.2MB Private=9.6MB`，UI `WS=150.6MB Private=90.1MB`（Task 12 基线 140.4/86.5）。三条线（Tray ≤40 / Tray+内核 ≤80 / UI ≤220）都没越。测速期间 **未启动真实 mihomo**（`mihomo: none`，用户的 verge-mihomo 全程没被碰），采样窗口也没打开节点页——这两条一起进 Task 18 的复测项。
+**人眼一步未打**：本环境不能替用户看窗口。滚动位置不跳顶这条已由 `RuntimeId` 前后相等的自动断言兜住（R-15d），"整表闪烁"仍需用户接真实内核肉眼确认一次；该条已登记为 **Task 18 人工项**（`docs/superpowers/checklists/v1-acceptance.md` 在 Task 18 才创建，本任务不提前建文件）。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add src/ClashAcry.Core src/ClashAcry.UI tests/ClashAcry.Core.Tests/ProxiesViewModelTests.cs tests/ClashAcry.UI.Tests
 git commit -m "feat(ui): 节点页（按名合并刷新、并发限 4 测速、上次值不冒充实时、Provider 手动刷新）"
 ```
+
+实施日回写（Task 15 落地时踩到的，全部有对应代码行或用例作证）：
+
+- **R-15a｜组的判据是结构（带非空 `all`），不是 `type` 字符串**：Task 1 的 `probe-run1-raw.txt` 里 `/proxies` 的 `type` 是 Go 侧的 `"Selector"`/`"URLTest"`/`"Shadowsocks"`/`"Direct"`/`"Reject"`，计划给的 `select`/`url-test`/`relay`/`fallback`（配置文件里的名字）**一条都命中不了**——照计划写，真机上所有条目都被当成成员、`Groups` 全空，节点页是一片空白而 12 条单测全绿（单测喂的正是那套假名字）。改成 `d?.All is { Count: > 0 }`：只有组会带 `all`，这是 mihomo 自己的结构不变量，比任何名字表都稳。回归锁 `GroupsAreDetectedByMembers_AndProviderMembersMayBeAbsentFromTopLevel` 用 `"Selector"` 喂进去。
+- **R-15b｜provider 成员不在 `/proxies` 顶层表**：实测顶层只有组与非订阅成员；订阅成员只出现在组的 `all` 与 `/providers/proxies` 的成员表里。所以成员行必须**按 `all` 的名字建**，`/proxies` 里查不到也要建（查不到只是没有实时值，不是没有这个节点）。计划 Step 3 那句"合并时按 Name 覆盖/补齐"里的"补齐"就是这条，实现成 `Top is null` 也照样建一行。
+- **R-15c｜非成员条目的 `provider-name` 是空串不是缺键**：实测 `"provider-name":""`。若不归一化，`ProviderName` 对所有直接成员都非空 → `MeasurableNodes` 恒空 → **测速按钮对全组都是无操作**，而且 `IsGroup`/覆盖逻辑全被"这是 provider 成员"误导。`NormalizeProvider` 把空白折成 `null`，`MeasurableNodes => Nodes.Where(n => n.ProviderName is null)` 才真的等价于"非订阅成员"。
+- **R-15d｜不抖动的两半判据分别是 VM 实例复用与 UIA 容器身份**：Core 侧 `Assert.Same(first, vm.Groups[0].Nodes[0])`（同实例，属性就地改），UI 侧 `RuntimeId` 前后相等（容器没重挂，滚动条没有理由跳）。计划给的 `BoundingRectangle.Width` 相等是**假判据**：文本 `11 ms`→`99 ms` 本就更宽，第一轮就误报。另外 `ProxyNodeVm.ApplyDelay` 会把首次见到的 health 样本**记住**（`_lastSample`）——provider 成员的样本只在 `/providers/proxies` 里有，下一轮 `/proxies` 什么都不带，不记住就是「上次 12 ms → 超时 → 上次 12 ms」每 2 秒抖一次。
+- **R-15e｜同名条目真/伪 provider 并存时按信息量取胜者**：`/providers/proxies` 的表里同一个成员名既在真 provider（`sub-a`，带 `history`）又在 `Compatible` 伪 provider（`default`，什么都不带）里出现。摊平覆盖时必须让**信息多的那条赢**（`CarriesMore`），否则遍历顺序决定读数，样本会被假条目擦成 `超时`。锁在 `SampleFromProvidersWins_WhenTopLevelEntryCarriesNothing`。
+- **R-15f｜`history` 取"最新"靠比 `time`，不靠数组端序**：实测抓到的 `history` 长度 ≤1，**没有证据**证明新样本在尾。`NewestSample` 取 `DateTimeOffset` 解析后最大的一条，解析不了才退回"最后一个正样本"；`delay:0`（mihomo 表示未成功）一律跳过。
+- **R-15g｜折叠用 `Visibility=Collapsed`，不用 `Expander`**：`Expander` 收起时内容仍在 UIA 树里，断言会摸到看不见的行、Task 16 的像素取样也会取到弹层外的点；`Collapsed` 才真正离开树。WinUI 3 **不带** `BooleanToVisibilityConverter`（grep `Microsoft.UI.Xaml.winmd` 命中 0），工程内自己写一个，且折 `Collapsed` 不折 `Hidden`（`Hidden` 仍占布局，折叠会留一条空白带）。
+- **R-15h｜三处"计划里有、实现里没有"的差，都是有意的**：① `show_hidden` 没有 `UiPrefs` 开关，`hidden: true` 一律丢弃——不为一条没有入口的偏好扩契约；② `RefreshProviderAsync` 只置 `IsRefreshing` + 发 PUT，**不在 VM 里重拉** `/providers/proxies`（VM 没有 providers 读委托；硬加一个就是第二条真相通路，`updatedAt` 由调用方的轮询纠正）；③ 轮询与测速互斥（`_refreshing || _testing` 时跳过本轮 `/proxies`）——否则一轮全组测速刚盖上去的值会被同时在飞的旧样本擦掉。
+- **交接给 Task 16/17**：① 节点页的取样目标 id 齐了：`TestAllButton`、`Node_{Name}`（`Button`，禁用/选中态可取）、`Node_{Name}_Badge`、`Group_{Name}`、`Node_{Name}_Collapse`、`Group_{Name}_Test`、`Provider_{Name}_Refresh`；**滚动条本身还没有 id**（`ScrollBarTrack`/`ScrollBarThumb` 要模板覆盖，Task 16 第一件事就是补）。② 本轮开销采样**没打开节点页**，Task 17 的 `measure-residency.ps1` 必须在节点页可见、且刚跑过一次全组测速的状态下复测一次。③ `ProxiesPage` 的 2 s 轮询在 `Unloaded` 时停，切页不留后台定时器——Task 18 冒烟时如果看到"离开节点页还在打管道"，那是回归。
 
 ---
 

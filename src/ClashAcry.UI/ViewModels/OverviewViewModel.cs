@@ -65,7 +65,18 @@ public sealed class OverviewViewModel : IDisposable
     public bool UpdateEnabled => _state is not null && !Busy;
     public string CoreVersion => _coreVersion;
     public string LogText => _logText;
-    public string DelayUrl => _delayUrl;
+
+    /// <summary>
+    /// 测速地址：优先 <c>settings.get</c> 的快照（那是引擎侧事实源），快照还没回来时退回握手带的值。
+    /// 退回不是兜底偏好——节点页可能比第一轮快照更早打开，读空串就等于发一个 <c>?url=</c> 的废请求。
+    /// </summary>
+    public string DelayUrl => _delayUrl.Length > 0 ? _delayUrl : _restSource?.DelayTestUrl ?? "";
+
+    /// <summary>
+    /// 按最近一次成功握手建出的 controller 客户端（未握手成功时为 null）。
+    /// 节点页要直连 REST 读 <c>/proxies</c>，客户端在这里出、secret 就只有一处去处（R-14d 同一理由）。
+    /// </summary>
+    public MihomoClient? Rest => _rest;
 
     /// <summary>连接级故障的行内文案（空 = 一切正常）。它是状态横幅唯一的文本来源——横幅只有一个写者，
     /// 否则外壳与页面会各写一份、互相盖掉对方（R-14e）。</summary>

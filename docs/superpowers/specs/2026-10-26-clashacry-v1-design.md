@@ -194,7 +194,8 @@ docs/superpowers/{specs,plans,checklists}/
 
 - UI 不镜像节点状态：任何写操作后重新 `GET /proxies` 全量重拉，并对刚操作项做乐观高亮。
 - 自动测速、URL-test 间隔、分组、订阅解析一律交给 `config.yaml` 原生字段，客户端不重复实现。
-- 注入最小化：只覆盖 `external-controller`、`secret`、`allow-lan: false`、`unified-delay: true`；原文没有任何端口字段时补 `mixed-port`；其余字段不动、不排序、不格式化重写。
+- 注入最小化：只覆盖 `external-controller`、`secret`、`allow-lan: false`、`unified-delay: true`、`mixed-port`；其余字段不动、不排序、不格式化重写。
+  **`mixed-port` 是无条件覆盖，不是"缺了才补"**（2026-10-27 真机回写，见 §12 ⑥）：系统代理与内核 mixed 探活用的都是 `settings.mixed_port`，订阅自带的端口一旦透传，就是"内核听 A、系统代理指 B"。
 - 轮询/自动刷新不得产生可见抖动：列表 key 用节点名，数据无变化不重建可视树，数值就地更新。
 
 ## 8. Fluent / Acrylic 视觉方案
@@ -253,7 +254,7 @@ docs/superpowers/{specs,plans,checklists}/
 
 | 类别 | 场景 | 策略 |
 |---|---|---|
-| 内核启动失败 | controller 端口占用、yaml 语法错 | 内核输出环形缓冲（stdout+stderr），UI 展示 Go 原文**不翻译**；仅启动时自动重试一次，重试仍失败落 `Crashed` 并保留原因 |
+| 内核启动失败 | controller 端口占用、yaml 语法错 | 内核输出环形缓冲（stdout+stderr），UI 展示 Go 原文**不翻译**；仅启动时自动重试一次，重试仍失败落 `Crashed` 并保留原因。**窗口分两档**：controller 未应答且进程还活着 = 仍在启动（下 geodata 属于这一档），宽限 120 s；controller 已应答而 mixed 不跟进 = 带病存活，仍 5 s 判死——见下面「启动窗口分档」 |
 | 状态失真 | mixed 端口被占但 controller 正常，内核活着却不通 | `Running` 判据 = `GET /version` 成功 **且** mixed 端口 TCP 可连；任一不符不进入 `Running`，横幅报"端口 7897 被占用" |
 | API 断连 | secret 不符、controller 未监听、Tray 掉线 | `MihomoClient` 透出真实状态码；UI 顶部横幅态 + 写操作按钮置灰；管道断开则提示一键重启 Tray |
 | 系统代理残留 | UI/Tray 被强杀后注册表悬挂 | 三层：正常退出钩子必清；Tray 启动时校验"注册表代理指向本应用端口且探活失败"才清（指向其他软件的代理**绝不触碰**）；托盘"停止内核"顺带清 |
@@ -277,6 +278,14 @@ docs/superpowers/{specs,plans,checklists}/
 ④ `InUseRolledBack` 的回滚依据不是"用 `.bak` 还原"，而是**第二次 Copy 失败 ⇒ 旧 exe 从头到尾没被动过**；`.bak` 只是留证。
 
 **测试与真机宿主的互斥（同批实测）**：Core 测试用的管名就是生产管名 `clashacry.tray.v1`，真 Tray 宿主在跑时 `PipeRoundTripTests` 的 9 条用例会成片失败（自己的服务端建不起来 / `WaitsUp` 探到了真宿主）。跑套件前先确认没有 `ClashAcry.Tray.exe` 存活；反之，端到端验证也要在同一次跑里避开套件。
+
+**启动窗口分档（真机回写，2026-10-27 / 用户机场订阅 + v1.19.33）**：上面那条 5 s 窗口被真实订阅打穿了，而且打穿的方式不是"内核起不来"，是**我们把它掐死了再判它起不来**。链路：订阅里一条 `GEOIP,CN,DIRECT` ⇒ mihomo 必须先有 `geoip.metadb` 才继续解析配置 ⇒ 本机没有就当场从 geodata 源站下载，**实测它自己给这次下载留的截止正好是 90 s**（`17:49:52` 打 `Can't find MMDB, start download`，`17:51:22` 抛 `can't download MMDB: context deadline exceeded` 后 fatal 退出）⇒ 我们的窗口是 5 s，于是第 5 秒 `KillProcess` 砍掉正在下载进程，留下 1–3 MB 的半截 `geoip.metadb` ⇒ 下一次启动读到 `MMDB invalid, remove and download`，重下、再被砍。两次尝试 × 5 s 全砍在同一位置，用户看到的是"导入成功、内核永远起不来"，而日志一行错误都没有（错误行是 fatal 才出现的，我们根本没活到那一刻）。
+**裁定**：窗口按**证据**分两档，而不是把 5 s 单纯放宽——**controller 应答 = 配置已经解析完**，这是唯一能区分"还在启动"和"带病存活"的信号。
+① controller **未**应答且内核进程还活着 ⇒ 仍在启动期，宽限到 `_startGrace`（默认 **120 s** = mihomo 自留的 90 s + 余量）；跨过原 5 s 快档时广播一次 `Starting` 带原因（"内核仍在启动……首次要下 geo 数据库"），这是 §11 的进行中反馈要求，不许让界面停在"启动中…"三个字上什么都不说。
+② controller **已**应答而 mixed 端口不跟进 ⇒ 就是本节上面那条"带病存活"，仍按 `_fast_window`（5 s）判死，**不放宽**——这时候没有任何"还在忙"的解释。
+③ 宽限到期或进程自己退出 ⇒ 照旧 `Crashed` + `KillProcess`，不留孤儿。失败文案里的秒数取**实际生效的那一档**（`controller=ok` 时报 5 s，否则报 120 s），不再硬写 "5s"。
+回归锁：`Start_SlowBoot_PastFastWindow_KeepsWaiting_AndReachesRunning`（快档 300 ms / 宽限 5 s，controller 在 900 ms 才应答 ⇒ 必须走到 `Running` 且 `SpawnCount==1`；把宽限档退回快档这条立刻变红，已实测）与 `Start_ControllerNeverBoots_GraceExpires_CrashesWithGraceInReason`（钉住"宽限不是无限等"）。`Start_DoesNotReachRunning_WhenControllerAliveButMixedPortDead` 的 `< 12 s` 判据不受影响：它走的是②档，controller 从一开始就应答。**代价记账**：一条 `core.start` 命令在最坏情况下会占住这条管道连接 2×120 s（`PipeServer` 同连接串行，§12 遗留②的同一口径），期间 UI 的 2 s 轮询排队等待——首次下库是一次性成本，且界面靠广播仍在动，v1 接受；日后要么 geodata 随包分发（§12 ⑦），要么把 `core.start` 改成"立即回执 + 状态广播"。
+**同源的一条**：`SubscriptionImport` 现在会拒掉 `proxies: []` 且无 `proxy-providers` 的订阅（见 §12 ⑥），半截 metadb 那个坑则靠上面的分档消除；本机那份完整文件是 8,426,776 字节。
 
 **内置内核第一次真跑（Task 17 回写，v1.19.33 + 发布产物）**：`core.start` 起来的是**空默认配置的内核**——它监听 7890、连 `external-controller` 都没有，双探活 `controller=fail mixed(7897)=fail`，5 s 窗口内不落 `Running`，两次尝试后广播 `Crashed`，而内核日志里没有一行错误。根因是默认启动参数写的是 `-d "<paths.Root>"`：mihomo 在 `-d` 目录里找 `config.yaml`，注入产物只写 `AppPaths.ConfigFile`（= `RuntimeDir\config.yaml`），Root 下没有配置它就按内置默认起。§3 的 `spawn(-d <runtime>)` 从第一天起就是这个意思，TrayHost 的注释也这么写，只有实现指错了目录。修在 `CoreManager.DefaultLaunch`（提到 static，`-d "<RuntimeDir>"`），回归锁 `DefaultLaunch_PointsAtTheDirThatActuallyHoldsConfigYaml` 的判据是「从 Arguments 解出来的那个目录里必须真能看见 `config.yaml`」而不是死字符串比对——之前 15 条 `CoreManagerTests` 全部注入假 launchFactory（`.cmd` 脚本，根本不看 `-d`），默认分支一次都没被真配置跑过，这是"假夹具挡住真缺陷"的教科书样本。修完的同一条通路：`RESTful API listening at: 127.0.0.1:9097` + `Mixed(http+socks) proxy listening at: 127.0.0.1:7897`，握手回 `state:"Running"`，`core.stop` 后进程从进程表消失，宿主前后 HKCU 代理两项逐字未变。
 
@@ -386,6 +395,8 @@ Stop-Process -Name ClashAcry.Tray   # 测完必须杀进程，否则污染后续
 > ③ 两条新回归锁 **必须在去掉修复后跑红过才算数**（已做：`UpdateInterruptedByTrayDeath_*` 超时、`TrayRestarts_*` 报"界面没重连上新的托盘"）。
 >
 > **合并实况（2026-10-27）**：v1 已进 `main`，合并提交 `2b21483`（`--no-ff`，树内容与修复轮末位提交 `ca7bf8c` 完全相同），合并前在 main 的树上重跑三件套全绿。仓库上从未开过 PR（匿名 API `pulls?state=all` 返空），所以这一步走的是 git 而非 `gh`；远端分支 `feat/clashacry-v1` 保留未删。过程细节与「为什么没装 gh」记在计划 Task 18 Step 4。
+>
+> **真订阅轮（2026-10-27 第三轮，同批实测）**：用户拿真机场 URL 报"导入失败 403"，挖出三条假夹具测不到的缺陷（UA 准入与空模板、`mixed-port` 透传、geodata 首下被探活窗口掐死），全部修 + 上锁，基线抬到 **Core 159/159、UI 28/28、构建 0 警告**。三条的细节分别记在 §12 ⑥、§12 ⑦ + §7、§9「启动窗口分档」；冒烟侧的观感与等待时长记在清单第 3/4 条。**假夹具的盲区样本再补一条**：`SubscriptionImportTests` 十条与 `ConfigInjectorTests` 全部用"我们自己写的 yaml + WireMock 随意回的 200"，所以"200 但零节点"和"订阅自带端口"这两种**真面板才会造出来的形状**一次都没暴露过。
 
 
 ## 12. 风险与开放问题
@@ -404,6 +415,21 @@ Stop-Process -Name ClashAcry.Tray   # 测完必须杀进程，否则污染后续
   ④ 三条宿主生命周期侧的宽限期缺失：`CoreManager.KillProcess` 的 `WaitForExitAsync()` 无超时（卡住的 mihomo 会楔死 `StopAsync`/退出钩子，5 s 预算后硬杀 → 孤儿内核 + 代理留在开启态）；`SubscriptionImport.ImportFromUrl` 是 sync-over-async + 无上限 `ReadToEnd` 且 `ct=default`（慢发订阅源能把它拖过 `HttpClient.Timeout`）；`TrayHost` 托盘分支的 `MessageLoop` 返回后不跑 `ShutdownAsync`（只有 `--no-tray` 分支跑）。
   另：`settings.update` 改端口后界面会把新端口写进系统代理而内核仍听旧端口（下次起核才刷新）；spec §4.4 里 `window.{width,height,x,y,maximized}` 与 `proxies.show_hidden` **未实现**（前者从未被裁定延后，属文档回写欠账）。
   ⑤ **概览页「内核版本」在冷装后恒显示"未知"（合并后复测发现，2026-10-27）**：`settings.core_version` 只有走过一次在线更新才会被写（`TrayCommandRouting` 在 `core.update` 成功路径里读 `/version` 落盘），而 Tray 把内核从 `Stopped` 带到 `Running` 之后**不回读一次 `/version`**——于是握手回 `core_version:null`，界面按 `hs.CoreVersion ?? "未知"` 显示（`OverviewViewModel:136`）。实测：真机起核后握手 `state:"Running"`、REST `/version` 带 token 明明回 `v1.19.33`，握手那格仍是空。修法是一行级别的：`CoreManager` 进 `Running` 后由 Tray 读一次 `/version` 写进 store（读失败保持 null，别把展示值当故障）。**不阻塞 v1**：版本号在 §6 只承担展示，启停/测速都不依赖它；但它会让冒烟的人第一眼以为"没连上"。
+- **真订阅第一次打通暴露的三条（2026-10-27 合并后复测，⑥⑦⑧ 已修，代码与回归锁同批落地）**：
+  ⑥ **机场面板按 User-Agent 发人，而且"200"不等于"给了节点"**。同一个订阅地址（`apa.dyljstar.sbs/s/…`）在本机实测的准入矩阵：
+  | 请求 User-Agent | 状态 | 正文 |
+  |---|---|---|
+  | （无 UA 头 = .NET 裸 `new HttpClient()`） | **403** | `forbidden` |
+  | `ClashAcry/1.0`、`ClashforWindows` | 200 | **10457 字节，`proxies: []`，0 个节点** |
+  | `clash.meta`、`Meta/v1.19.33` | 200 | 17061 字节，25 个 anytls 节点 + url-test/fallback/select |
+  | `clash-verge/v2.3.1`、`NekoBox` | 200 | 17060 字节（同一份节点） |
+  | `stash` | 200 | 16749 字节 |
+  | `surge` | 200 | 24528 字节（另一套格式，不是 Clash yaml） |
+  | `v2rayN/6.0`、浏览器 UA | 200 | 4864 字节（套餐信息页，不是配置） |
+  | `clash`（裸一个词） | 200 | **0 字节** |
+  裁定：订阅通路的 UA 常量取 **`clash.meta`**——覆盖面最广的那一档，且我们跑的本来就是 mihomo（clash.meta 的延续），报这个名字属实。它仍**逐请求带**（R-6a：那颗 `HttpClient` 与 controller REST、GitHub API 共用）。第二层防御：`SubscriptionImport` 现在拒掉"`proxies` 明确为空**且**没有 `proxy-providers`"的正文，报 `订阅里一个节点都没有…`（锁 `Import_EmptyProxiesTemplate_FailsLoudly_WritesNothing`，反证 `Import_ProvidersOnlyConfig_IsAccepted` 不许误伤 provider 分发）——只报"已导入"而节点页空着，比一句明确的失败坏得多。**没做**：按响应头 `profile-update-*` 或面板 URL 参数自适应 UA；用户换机场如果再撞到"200 但空模板"，现在至少能看见一句明确的话。
+  ⑦ **注入必须无条件覆盖 `mixed-port`**（§7 已改）：真订阅第一行就是 `mixed-port: 7890`，旧的"有端口键就不补"让内核听 7890，而系统代理与双探活用设置里的 7897 → 界面全绿、流量全断。锁 `Inject_ForcesMixedPort_EvenWhenSubscriptionShipsOne`；真机旁证是起核后 `GET /configs` 回 `mixed-port: 7897`。**遗留同族**：订阅若写了 `port: 7897` 或 `socks-port: 7897`（撞我们那个 mixed 端口），mihomo 先绑走、mixed 绑不上 ⇒ 回到"带病存活"档，5 s 判死。v1 不去猜、不改用户的端口键，撞上了由 §9 的②档文案指出来。
+  ⑧ **geodata 首下**：见 §9「启动窗口分档」——分档修掉了"我们把下载掐死"，但**冷装 + 带 `GEOIP` 规则**的首次启动仍要等一次 8.4 MB 的 `geoip.metadb`（本机 ~45 s，且源站不稳：实测也出现过 90 s 超时 fatal）。v1.1 候选是把 `geoip.metadb` / `geosite.dat` 随包分发并在起核前种进 `runtime\`（与 `BUNDLED.txt` 同一套溯源口径），代价是 zip 再加 ~10 MB。
 - **secret 落盘明文**（同用户可读）：自用容忍；管道 ACL 限当前用户 SID，`handshake` 之外不向其他进程暴露。
 - **yaml 保真度（Task 5 已实测结案，不再是待探针项）**：YamlDotNet 18.1.0 的 `YamlStream`/DOM 通路**保留全部字段值与键序、保留 block/flow 风格与用户锚点别名**（`&x`、`*x`、`<<:`），但**不保留注释**（DOM 不承载 comment token），且会出现三类无害漂移：block 序列压平到父键同列、flow 节点内部空白归一、文档尾部多一行 `...`。因此 v1 的公开承诺只有“不认识的原样透传、只做顶层必需键覆盖、用户手写原件永不被改写”，**UI 文案与导入说明不得声称保留注释或原始格式**；如日后要真保注释，需换库并另立任务。另：`YamlStream.Save` 必须显式 `assignAnchors: false`，否则会给内容重复的节点自动发随机锚点，产物里长出用户没写过的 `&203281033`。
 

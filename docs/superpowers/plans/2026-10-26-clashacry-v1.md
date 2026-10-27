@@ -5243,6 +5243,12 @@ Expected: 三条命令全绿，构建无警告。
 剩下的才是人的活：第 0 条抄三值、第 3 条的行内文案与 `FileOpenPicker`、第 4/5 条的观感与拨系统代理、第 6 条的关窗即退、第 7 条托盘「打开界面」、第 8 条在线更新的进度、第 9~11 条的材质/抖动/真实数据下的深色、第 12 条托盘「退出」的清理链（本轮 Tray 是硬杀收尾，那条链没走过）。
 顺带测出两条口径与新缺陷，都已回写 spec：① `core.stop` **不归还工作集**（停核 60 s 后 Tray 仍读 49.0 / Private 12.3），所以清单第 6 条「内核已停或没起 ≤40」这句是错的，已订正成「只在没起过内核的新 Tray 上读」（清单同步改了）；② 概览页「内核版本」冷装后恒"未知"（Tray 带内核进 `Running` 后不回读 `/version`，`settings.core_version` 只有走过在线更新才落值），记进 spec §12 ⑤、属 v1.1，不阻塞。
 
+派发状态（2026-10-27 第三轮，**真订阅**）：用户把设置页的报错截图丢回来（`导入失败：订阅下载失败：… 403 (Forbidden)`），这一轮把假夹具测不出来的三条真缺陷挖干净了，全部修 + 上锁，基线抬到 **Core 159 / UI 28、构建 0 警告**：
+- **R-19a 订阅 UA**：面板对无 UA 头的请求 403；而**认不出的 UA 给的是 200 + `proxies: []` 的空模板**（`ClashAcry/1.0` 10457 B/0 节点 vs `clash.meta` 17061 B/25 节点，完整矩阵在 spec §12 ⑥）。订阅通路逐请求带 `clash.meta`（R-6a 的纪律不变），并且空模板现在**明确失败**而不是"已导入"（锁 `Import_EmptyProxiesTemplate_FailsLoudly_WritesNothing` + 反证 `Import_ProvidersOnlyConfig_IsAccepted`）。
+- **R-19b `mixed-port` 无条件覆盖**：订阅第一行就是 `mixed-port: 7890`，旧的"有端口键就不补"让它透传 ⇒ 内核听 7890、系统代理与探活指 7897，界面全绿流量全断（锁 `Inject_ForcesMixedPort_EvenWhenSubscriptionShipsOne`；真机旁证 `GET /configs` 回 7897）。§7 的必需键名单同步改了。
+- **R-19c 启动窗口分档**：带 `GEOIP` 规则的订阅要先下 8.4 MB 的 `geoip.metadb`（mihomo 自留 90 s），我们的 5 s 窗口每次都在下载中途 `KillProcess`，留下半截库文件、下次重下再被砍 ⇒ "导入成功、内核永远起不来"。改成按证据分档：controller 未应答且进程活着 = 仍在启动，宽限 120 s 并广播一条带原因的 `Starting`；controller 应答而 mixed 不跟进 = 带病存活，仍 5 s 判死（锁 `Start_SlowBoot_PastFastWindow_…` / `Start_ControllerNeverBoots_GraceExpires_…`，前者已实测把宽限档退回快档就变红）。
+本轮结束时 **Tray + 真内核活着**（真订阅 25 个节点已加载、`🇭🇰香港1` 走 `/proxies/{name}/delay` 回 `{"delay":450}`），HKCU 三值仍与第 0 条抄下的原值逐字一致。第 4~12 条的人眼动作交给用户，v1.1 又厚了一格：geodata 随包分发（spec §12 ⑧）。
+
 - [x] **Step 4: 回写 spec 并合并**
 
 把 §4.2 端点表、§10 实测列、§12 已消解的风险条目全部定稿。

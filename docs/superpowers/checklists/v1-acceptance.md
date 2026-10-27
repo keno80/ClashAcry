@@ -11,6 +11,12 @@
 第 5 条**没动**：agent 全程没发 `sysproxy.set`，HKCU 三值与第 0 条抄下的原值逐字一致（拨系统代理这件事归人眼，见下）。
 第 12 条也**没做**：这轮的 Tray 是硬杀收尾（`--no-tray` 的 CI 形态没有优雅出口），托盘「退出」的清理链仍要你亲手点一次。
 
+**真订阅轮（同一天的第三轮，用户机场 URL，修掉三条真缺陷）**：第 3 条的操作 A 用真订阅打通（25 个节点、原件 17061 字节按哈希入库），
+过程中抓到「无 UA → 403」「自家 UA → 200 但 `proxies: []`」「订阅自带 `mixed-port: 7890` 把系统代理指空门」两条真缺陷，均已修 + 锁；
+第 4 条在内核侧从 `Running` 走到真节点测速 `{"delay":450}`，但**第一次起核要下 8.4 MB 的 `geoip.metadb`**，
+这条通路原先被我们的 5 s 窗口反复掐死（留下半截库文件），现在按证据分档、宽限到 120 s（spec §9）。
+测试基线抬到 **Core 159 / UI 28**，构建仍 0 警告。这轮结束时 **Tray 与内核是活着的**（真订阅已加载），界面归用户按第 4~12 条继续。
+
 环境前提（AGENTS.md）：本机 .NET 10 SDK 在 `%LOCALAPPDATA%\Microsoft\dotnet`，Git Bash 里先
 `export PATH=/c/Users/Keno/AppData/Local/Microsoft/dotnet:$PATH`，否则 `dotnet` 会报 "No .NET SDKs were found"。
 
@@ -34,7 +40,7 @@ Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Setti
 
 ```bash
 dotnet build ClashAcry.sln -c Release              # 期望：0 警告 0 错误
-dotnet test  tests/ClashAcry.Core.Tests -c Release # 期望：154/154
+dotnet test  tests/ClashAcry.Core.Tests -c Release # 期望：159/159
 dotnet test  tests/ClashAcry.UI.Tests  -c Release  # 期望：28/28
 ```
 
@@ -80,9 +86,17 @@ start artifacts\unzipped\ClashAcry.UI.exe          # UI 不在时会自己拉起
   `FileOpenPicker` 是系统对话框，不在 FlaUI 覆盖范围内（Task 14 Step 3），所以这条只能人工。
 
 期望落盘：`%LOCALAPPDATA%\ClashAcry\runtime\config.yaml` 出现且含 `external-controller: 127.0.0.1:9097`、
-`secret`、`allow-lan: false`、`unified-delay: true`；`%LOCALAPPDATA%\ClashAcry\imports\` 留有原件；
+`secret`、`allow-lan: false`、`unified-delay: true`、**`mixed-port: 7897`**；`%LOCALAPPDATA%\ClashAcry\imports\` 留有原件；
 **你贴/选的那个原始 yaml 文件本身未被改写**（用文件修改时间核一次）。订阅源如果本来就有 `dns`/`geodata-mode`
 等键，产物里必须原样透传（spec §7 注入最小化）。
+
+> **真订阅复测（2026-10-27 第三轮，用户机场 `apa.dyljstar.sbs/s/…`，本会话已自测操作 A）**：
+> 这一条第一次打真订阅时连吃两个坑，都已修并有回归锁——
+> ① 面板**没有 UA 头就 403**、认不出的 UA（`ClashAcry/1.0`）会给 **200 + `proxies: []` 的空模板**：
+> 订阅通路现在固定报 `clash.meta`（spec §12 ⑥ 的准入矩阵），且空模板会被明确拒掉而不是"已导入"；
+> ② 订阅自带 `mixed-port: 7890`，注入器旧规则"有端口键就不补"让它透传了 ⇒ 内核听 7890、系统代理指 7897。
+> 现在 `mixed-port` 是无条件覆盖的必需键（spec §7）。实测结果：原件 17061 字节 25 个节点，
+> 产物五条必需键齐、`mixed-port: 7897`，起核后 `GET /configs` 回的也是 7897。
 
 ## 4. 起内核 + 节点闭环【人眼；管道那半程本会话已自测】
 
@@ -102,6 +116,14 @@ curl -s -m 3 http://127.0.0.1:9097/version            # 期望 401（说明 secr
 > **如果这里看到的是 `Crashed` 而内核日志一行错误都没有**：先查 `mihomo -d` 指的是不是 `runtime` 目录
 > ——指错成数据根目录时内核找不到 `config.yaml`，会按内置默认配置起来（监听 7890、连 controller 都没开），
 > 双探活于是全 fail。这是 Task 17 真机跑出来的第一个缺陷，回归锁 `DefaultLaunch_PointsAtTheDirThatActuallyHoldsConfigYaml`。
+>
+> **真订阅下的第一次起核会慢，而且是设计内的慢**（2026-10-27 第三轮实测）：订阅里有 `GEOIP,CN,DIRECT` 时
+> mihomo 必须先把 `geoip.metadb` 下完（本机 8.4 MB / 约 45 s）才开始监听任何端口。启动窗口现在按证据分两档
+> （spec §9「启动窗口分档」）：controller 没应答而进程还活着 = 仍在启动，宽限 120 s，界面上会显示
+> 「内核仍在启动……首次要下 geo 数据库」；controller 应答了而 mixed 不跟进 = 带病存活，仍 5 s 判死。
+> **别在这条文案上反复拨开关**——每次都够不着下载进度，砍下来的半截 metadb 下次还得重下。
+> 实测通路：`core.start` → 若干 `Starting`（含那条宽限文案）→ `Running`，`7897`/`9097` 都在监听，
+> `GET /proxies` 回 29 个组，真节点 `🇭🇰香港1` 的 `/proxies/{name}/delay` 回 `{"delay":450}`（200）。
 
 ## 5. 系统代理真的生效【人眼 + 脚本】
 
@@ -198,7 +220,7 @@ powershell -Command "Get-Process mihomo -ErrorAction SilentlyContinue"
 
 ## v1 验收线（spec §11）
 
-- 第 1 条全绿（Core 154 / UI 28）+ 第 2~12 条勾完 + §10 三格开销线达标。
+- 第 1 条全绿（Core 159 / UI 28）+ 第 2~12 条勾完 + §10 三格开销线达标。
 - 已知遗留，**不阻塞 v1**，记在 spec §12 / 计划交接项里：
   ① 概览页横幅缺「一键拉起/重启 Tray」按钮（spec §12）；
   ② `PipeServer` 对同一连接串行处理，分钟级 `core.update` 会堵住后面的请求（头阻塞，进度走广播不受影响）；

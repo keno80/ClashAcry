@@ -368,6 +368,28 @@ public class CoreManagerTests : IDisposable
         await mgr.StopAsync(default);
     }
 
+    /// <summary>
+    /// Task 17 真机跑出来的缺陷的回归锁：默认启动参数必须指向 **runtime 目录**（注入产物 config.yaml 在那儿）。
+    /// 写成 Root 时 mihomo 在那里找不到配置，会拿空默认配置起来（监听 7890、连 external-controller 都没有），
+    /// 双探活 controller+mixed 全 fail，用户看到「崩溃」而日志里没有一行错误。
+    /// 之前每条用例都注入假的 launchFactory（cmd 脚本），这条默认分支从来没被真内核跑过。
+    /// </summary>
+    [Fact]
+    public void DefaultLaunch_PointsAtTheDirThatActuallyHoldsConfigYaml()
+    {
+        var paths = AppPaths.ForTest(_dir); paths.EnsureCreated();
+        File.WriteAllText(paths.ConfigFile, "mixed-port: 7897\n");            // 导入产物落在这里
+
+        var psi = CoreManager.DefaultLaunch(paths, paths.CoreExecutable);
+        var d = psi.Arguments[4..^1];                                          // 从 -d "<dir>" 里取回目录
+
+        Assert.Equal(paths.RuntimeDir, d);
+        Assert.True(File.Exists(Path.Combine(d, "config.yaml")),
+            $"默认 -d 指向 {d}，那里没有 config.yaml——内核会按空配置起来，探活必炸");
+        Assert.False(psi.UseShellExecute);
+        Assert.True(psi.RedirectStandardOutput);                               // Task 1 实测：真内核日志走 stdout
+    }
+
     private static void TryDelete(string dir)
     { try { Directory.Delete(dir, true); } catch { } }
 }

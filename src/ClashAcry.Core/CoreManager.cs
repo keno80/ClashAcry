@@ -38,10 +38,20 @@ public sealed class CoreManager : IAsyncDisposable
                        Func<string, ProcessStartInfo>? launchFactory = null)
     {
         (_paths, _store, _client, _probe) = (paths, store, client, probe);
-        _launch = launchFactory ?? (exe => new ProcessStartInfo(exe, $"-d \"{paths.Root}\"")
-        { RedirectStandardError = true, RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true });
+        _launch = launchFactory ?? (exe => DefaultLaunch(paths, exe));
         MixedPort = store.Load().MixedPort;
     }
+
+    /// <summary>
+    /// 默认启动参数：`mihomo -d &lt;runtime&gt;`。目录**必须是 RuntimeDir 而不是 Root**——
+    /// mihomo 在 -d 里找 `config.yaml`，而注入产物只写在那里（AppPaths.ConfigFile）；
+    /// 给成 Root 时那里没有 config.yaml，mihomo 会用空默认配置起来（监听 7890、连 external-controller 都没有），
+    /// 双探活于是 controller+mixed 全 fail，界面看到的是「崩溃」而不是「配置没生效」。
+    /// Task 8~16 的用例全走注入的假 launchFactory，这条默认路径第一次被真内核跑到时才发现（Task 17 实测）。
+    /// </summary>
+    public static ProcessStartInfo DefaultLaunch(AppPaths paths, string exe) =>
+        new(exe, $"-d \"{paths.RuntimeDir}\"")
+        { RedirectStandardError = true, RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true };
 
     public IReadOnlyList<string> StderrTail(int n = 50) => _stderr.Snapshot().TakeLast(n).ToList();
 

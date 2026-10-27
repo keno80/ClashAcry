@@ -7,7 +7,7 @@ public static class CmdTypes
     public const string Handshake = "handshake", CoreStart = "core.start", CoreStop = "core.stop",
         CoreReload = "core.reload", ModeSet = "mode.set", SysProxySet = "sysproxy.set",
         CoreUpdate = "core.update", SubImport = "sub.import",
-        SettingsUpdate = "settings.update", UiFocus = "ui.focus";
+        SettingsUpdate = "settings.update", SettingsGet = "settings.get", UiFocus = "ui.focus";
 }
 
 // Task 10：命令的**请求体**与 `settings.changed` 的**唯一载荷形状**都住在这里（不放 Tray 也不放 UI）——

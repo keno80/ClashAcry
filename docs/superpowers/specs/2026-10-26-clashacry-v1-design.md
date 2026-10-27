@@ -70,11 +70,13 @@ mihomo.exe                原版 Go 内核，external-controller 127.0.0.1:9097
 
 握手回包 `handshake` 的形状（UI 起 REST 客户端所需的全部参数，一次给齐）：`{state,host,port,secret,mixed_port,core_version?,delay_test_url}`——`delay_test_url` 走握手而非另开一条读设置的通路，UI 测速与设置页的测速地址下拉都用它。**secret 只在 `handshake` 的回包里下发，UI 不持久化、不展示。**
 
-命令（UI → Tray）：`core.start`、`core.stop`、`core.reload`、`mode.set{mode}`、`sysproxy.set{enabled}`、`core.update`、`settings.update{patch}`、`ui.focus`、`handshake`（返回 `CoreState` + controller 地址 + secret，供 UI 起 REST 客户端）。
+命令（UI → Tray）：`core.start`、`core.stop`、`core.reload`、`mode.set{mode}`、`sysproxy.set{enabled}`、`core.update`、`settings.update{patch}`、`settings.get`、`ui.focus`、`handshake`（返回 `CoreState` + controller 地址 + secret，供 UI 起 REST 客户端）。
+
+> `settings.get` 是 Task 14 补的**只读**命令，回包就是同一个 `SettingsSnapshot`（不含 secret/core_path），**绝不落盘、绝不广播**。开它的理由：概览页要显示"系统代理现在开着没有"，而那一项只活在 Tray 的 `settings.json` 里；不开这条，UI 就只能发一条 no-op 的 `settings.update` 去骗取回包——那是写通路（违反"UI 不写引擎设置"），而且 no-op 也会广播一次 `settings.changed`，凭空造出一个没人改过的改动。这条命令的存在也让"读设置"与"改设置"在契约上是两条不同的路，回归锁分别钉住（`TrayCommandRoutingTests` 断言回包无 secret、`settings.json` 的 `LastWriteTimeUtc` 未变）。
 
 事件（Tray → UI）：`core.state{state,reason?,stderr_tail?}`、`core.update.progress{received,total,pct}`、`core.update.result{result}`、`settings.changed{SettingsSnapshot 全量}`——**四个即全部**。日志文本不单独成事件（`log{level,msg}` 在预检评审中作为无广播方的死契约删除），内核输出随 `core.state` 的 `stderr_tail` 下发；`settings.changed` 恒为完整的 `SettingsSnapshot` 而非键增量，以免"同一个事件两种 payload"。（键名拼写以 `stderr_tail`/`SettingsSnapshot` 为准，Task 3 已实测落码。）
 
-UI 起来发现管道不存在（Tray 未运行或被杀）→ 顶部横幅"托盘宿主未运行" + 一键拉起 Tray 进程。
+UI 起来发现管道不存在（Tray 未运行或被杀）→ 顶部横幅"托盘宿主未运行" + 一键拉起 Tray 进程。（**Task 14 落地口径**：横幅文案与"控制不了的东西一律置灰"已实现并由 `TrayAbsent_CoreToggleDisabled_AndBannerShown` 钉住；**"一键拉起/重启 Tray"的按钮本身还没接**，见 §12。轮询期间只做 `WaitUpAsync` 探活、绝不在轮询里 `Process.Start`——拉起托盘仍是外壳那一次的动作。）
 
 ### 4.2 mihomo REST 面（v1 用到的）
 
@@ -208,7 +210,7 @@ docs/superpowers/{specs,plans,checklists}/
 
 **探活成本实测（Task 8 回写，2026-10-26 / win-x64）**：mixed 端口的 TCP 探活对**没人监听的 loopback 端口**发起 connect，本机约 **2.03 s** 才拿到拒绝（控制器独立复现：`TcpClient.ConnectAsync` 与同步 `Socket.Connect` 各三次，2027~2044 ms，无预热效应；**真在听的端口 0 ms**）。原写法 `for (i < 20) { Delay(250); ... TcpAlive(1s 预算) }` 里"每轮 250 ms"只是**间隔**、不是预算——每轮还要付一次探活，于是名义 5 s 的窗口实测 25 s/次尝试、50 s/两次尝试（回归用例 `Start_DoesNotReachRunning_WhenControllerAliveButMixedPortDead` 实测 50 s）。这不是慢而是**说谎**：本节承诺"5 s 内未就绪"，实现给了 25 s，UI 会把"内核起不来"渲染成 25 秒假死。**裁定 R-8i**：① 探活窗口按**墙上时间**计（`Stopwatch` 起表、`Elapsed < 5 s` 继续轮），不许用固定轮数当预算——轮数 × 间隔在任何一次探活变慢时都会失真；② `TcpAlive` 单次超时 **250 ms**（loopback 上活监听者 0 ms 应答，250 ms 是三个数量级余量），这同时把 controller 占用预检的最坏成本从 1 s 压到 250 ms；③ 失败文案仍写"5 s 内未就绪"，改完它才名副其实。净效果：单次探活一轮 ≤ ~500 ms、窗口 5 s 封顶；一次失败的 `StartAsync`（自动重试一次 = 两个 5 s 窗口串在同一次调用里）实测 ~10.3 s，取代原来的 ~50 s。回归用例 `Start_DoesNotReachRunning_...` 用 `Stopwatch` 夹住 `StartAsync` 断言 **`elapsed < 12 s`**（阈值不是 8 s：8 s 漏算了"失败自动重试一次"会把两个窗口串联，正确实现下也要 ~10.3 s，会被自己的锁判红）。全套 Core.Tests 时长随之从 1 m 5 s 降到 25 s。双探活判据本身不改；`Starting` 期间 UI 仍必须显示"正在探活"（§11 与 AGENTS.md：长耗时操作必须有进行中反馈），只是不再有失真窗口。**遗留**：`KillProcess` 的 `catch { }` 理论上能吞掉"树杀没成功"却广播 `Stopped`（可能留下占端口的孤儿内核）；v1 不加特判——同一用户同一安全上下文下 `Kill(entireProcessTree)` 对自己子进程返回拒绝访问无可达路径，且回归用例 `DisposeAsync_KillsCoreAndLeavesStopped` 已用真 PID 在进程表里等它消失，把"说 Stopped 就得真没了"钉成可执行断言。若将来引入提权运行或外部看管进程，这条重开。
 
-**进度语义（Task 11 回写，裁定 R-11c 落地口径）**：`core.update.progress` 的百分比是**下载进度**，不是"解包/替换"进度——分母优先取响应 `Content-Length`，缺失时回落到 release 元数据的资产 `size`（§4.5），两者都拿不到就**不报中间档**，只在读满后补一次 100% 收尾。节流判据是"整数百分比变了没有"：同一档位只发一帧，2 MB 包实测 25 帧、`pct` 单调不减且去重（回归用例 `Progress_IsMonotonic_Throttled_AndEndsAt100`）。缓存命中（`core\downloads\<资产名>` 存在**且能解出 `.exe` 条目**）完全跳过网络、也就没有进度帧——这不是缺反馈，那条路径本来就是瞬时的。结果帧 `core.update.result` 必发，UI 的"…中"才有终点。
+**进度语义（Task 11 回写，裁定 R-11c 落地口径）**：`core.update.progress` 的百分比是**下载进度**，不是"解包/替换"进度——分母优先取响应 `Content-Length`，缺失时回落到 release 元数据的资产 `size`（§4.5），两者都拿不到就**不报中间档**，只在读满后补一次 100% 收尾。节流判据是"整数百分比变了没有"：同一档位只发一帧，2 MB 包实测 25 帧、`pct` 单调不减且去重（回归用例 `Progress_IsMonotonic_Throttled_AndEndsAt100`）。缓存命中（`core\downloads\<资产名>` 存在**且能解出 `.exe` 条目**）完全跳过网络、也就没有进度帧——这不是缺反馈，那条路径本来就是瞬时的。结果帧 `core.update.result` 必发，UI 的"…中"才有终点。**UI 侧的同一口径（Task 14 落地）**：按钮文案里的百分号**留到结果帧**才收回，`100%` 不解锁按钮、也不把版本号那行改成进度数字——下载满格后面还在解包换文件，此刻收回反馈等于骗人；版本号只在结果帧之后**重新握手**取 `core_version`（回归锁 `UpdateClick_DisablesButton_ShowsPercent_AndRestoresOnResult` 同时钉住"100% 仍在进行中"和"版本来自握手"）。更新期间概览页的 2 s 轮询整体暂停（裁定 R-14c）：`PipeServer` 对**同一条连接**的请求是串行处理的，一条分钟级的 `core.update` 会把后面的 `settings.get` 全堵在它后面；进度与结果走广播那条独立写路径，不受影响。
 
 **失败分类（Task 11 回写）**：源站取不到 / 没有匹配当前平台的资产 / 传输失败 → `DownloadFailed`；包能下下来却解不出 `.exe` 条目 → `ExtractFailed`（两种失败不混，否则"源站挂了"和"上游发了个空包"在 UI 上是同一句话）；目标 exe 被运行中的内核占用 → 备份已落 `.bak`、换文件抛 `IOException` → `InUseRolledBack`，**`version.txt` 不写**（写了下次就以为已是新版本，用户永久卡在坏版本）。`AlreadyLatest` 在任何联网动作之前判定，零下载零换文件。更新器全程不碰内核进程、不改 `CoreState`（§3 禁令 1）：停核 / 换文件 / 起核由 `CoreManager.SwapExecutableAsync` 在生命周期锁内完成。
 
@@ -278,6 +280,7 @@ Stop-Process -Name ClashAcry.Tray   # 测完必须杀进程，否则污染后续
 - **provider 成员与延迟端点——已有真机答案（v1.19.33，不再是风险项）**：`GET /proxies` 顶层表**不含** provider 成员（仅组 `all` 与 `GET /providers/proxies` 的 `proxies` 列表含之）；`GET /proxies/{成员名}/delay` 对成员**404**。据此 §4.2 已把"测 provider 成员延迟走 providers 详情 / 拿不到样本显示'上次'并标注"从兜底升级为既定实现要求。
 - **mixed 端口被占时内核"带病存活"**（v1.19.33 实测，详见 §4.2 末段）：进程不退出、controller 全功能应答、仅 stdout 一行 `level=error` bind 失败；`Running` 判据必须双探活（controller + mixed 端口 TCP），与计划 Task 8 一致。另实测内核 Go 日志写在 **stdout**（stderr 恒空），`CoreManager` 的 stderr 环应同时采集两个流。
 - **mihomo 跨版本 REST 漂移**：契约以 §4.2 + 源码为准，冒烟清单兜底。
+- **横幅的"一键拉起/重启 Tray"尚未接（Task 14 记账）**：现在横幅只说"托盘宿主未运行"，界面随即把所有内核控制置灰；用户想让界面重新连上，得自己启动 `ClashAcry.Tray.exe` 或重开 UI。补法已想清楚但不属 v1 最小闭环：横幅加一个按钮 → `EnsureTrayRunningAsync()` + 重新握手 + 清故障（故障文案按"第一条说话"，恢复靠一次成功轮询把它清空）。同批遗留：`PipeClient` 重连后 `_pending` 仍跨连接共享，且界面侧断开后**不会自动重连**（探活只在"从未握手成功"时做）。
 - **secret 落盘明文**（同用户可读）：自用容忍；管道 ACL 限当前用户 SID，`handshake` 之外不向其他进程暴露。
 - **yaml 保真度（Task 5 已实测结案，不再是待探针项）**：YamlDotNet 18.1.0 的 `YamlStream`/DOM 通路**保留全部字段值与键序、保留 block/flow 风格与用户锚点别名**（`&x`、`*x`、`<<:`），但**不保留注释**（DOM 不承载 comment token），且会出现三类无害漂移：block 序列压平到父键同列、flow 节点内部空白归一、文档尾部多一行 `...`。因此 v1 的公开承诺只有“不认识的原样透传、只做顶层必需键覆盖、用户手写原件永不被改写”，**UI 文案与导入说明不得声称保留注释或原始格式**；如日后要真保注释，需换库并另立任务。另：`YamlStream.Save` 必须显式 `assignAnchors: false`，否则会给内容重复的节点自动发随机锚点，产物里长出用户没写过的 `&203281033`。
 

@@ -52,6 +52,7 @@ public sealed class TrayCommandRouting
                 CmdTypes.ModeSet => await SetModeAsync(Read<ModeRequest>(f).Mode),
                 CmdTypes.SysProxySet => ApplySysProxy(Read<SysProxyRequest>(f).Enabled),
                 CmdTypes.SettingsUpdate => ApplySettings(Read<SettingsPatch>(f)),
+                CmdTypes.SettingsGet => Snapshot(),        // 只读取快照，绝不落盘、绝不广播（R-14a）
                 CmdTypes.UiFocus => FocusUi(),
                 CmdTypes.CoreUpdate => await UpdateCoreAsync(),
                 CmdTypes.SubImport => await ImportAsync(f),

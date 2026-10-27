@@ -127,7 +127,7 @@ public class TrayCommandRoutingTests
     [InlineData(CmdTypes.Handshake)]
     [InlineData(CmdTypes.CoreStart)] [InlineData(CmdTypes.CoreStop)]
     [InlineData(CmdTypes.CoreReload)] [InlineData(CmdTypes.ModeSet)]
-    [InlineData(CmdTypes.SysProxySet)] [InlineData(CmdTypes.SettingsUpdate)]
+    [InlineData(CmdTypes.SysProxySet)] [InlineData(CmdTypes.SettingsUpdate)] [InlineData(CmdTypes.SettingsGet)]
     [InlineData(CmdTypes.UiFocus)] [InlineData(CmdTypes.CoreUpdate)] [InlineData(CmdTypes.SubImport)]
     public async Task EveryDeclaredCommand_HasAHandler(string cmd)
     {
@@ -182,6 +182,27 @@ public class TrayCommandRoutingTests
         // 与 settings.changed 广播同一种形状（硬规矩③：一个事件类型只有一种 payload）
         var evt = new Frame("event", EventTypes.SettingsChanged, JsonUtil.Element(snap), 1, "e", null, null);
         Assert.Equal(wire, evt.Payload!.Value.GetRawText());
+    }
+
+    [Fact]
+    public async Task SettingsGet_RepliesSnapshot_WithoutWritingAnything()
+    {
+        // R-14a：UI 起页要拿 sys_proxy_enabled，计划里只有 settings.update 回快照——用它做「读」就得发一次
+        // no-op 补丁，代价是每次开界面都把引擎设置重写一遍（还顺带广播一次 settings.changed）。
+        // 这条只读命令的判据就是「拿到同一种形状」+「一个字节都没落盘」。
+        using var h = new TrayHarness();
+        var before = File.GetLastWriteTimeUtc(h.Paths.SettingsFile);
+
+        var reply = await h.Routing.Handle(Cmd(CmdTypes.SettingsGet));
+
+        Assert.Null(reply!.Error);
+        var wire = reply.Payload!.Value.GetRawText();
+        Assert.DoesNotContain("\"secret\"", wire);                       // 与 settings.update 同一条红线（R-10f）
+        Assert.DoesNotContain(h.Store.Load().Secret, wire);
+        var snap = JsonUtil.Read<SettingsSnapshot>(reply.Payload);
+        Assert.Equal(h.Store.Load().DelayTestUrl, snap!.DelayTestUrl);
+        Assert.Equal(h.Store.Load().MixedPort, snap.MixedPort);
+        Assert.Equal(before, File.GetLastWriteTimeUtc(h.Paths.SettingsFile));   // 读快照绝不落盘
     }
 
     [Fact]

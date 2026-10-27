@@ -4314,7 +4314,7 @@ git commit -m "feat(ui): backdrop 三档即时切换 + 主题三档（默认整�
 - Consumes: `TrayLink`、`MihomoClient`、`CoreState`、`UpdateProgress`
 - Produces: `OverviewViewModel` 暴露 `bool CoreToggleEnabled`、`string CoreStateText`、`bool SysProxyOn`、`string Mode`、`int UpdatePct`（-1 = 无进行中）、`string? ErrorText`
 
-- [ ] **Step 1: 写失败的测试（真窗口 + 假 Tray）**
+- [x] **Step 1: 写失败的测试（真窗口 + 假 Tray）**
 
 关键手法：UI 侧只经命名管道与 Tray 说话，所以**测试进程里起一个 `PipeServer` 当假 Tray**，UI 的 `WaitUpAsync` 直接命中它（管道名固定，因此本项目的 UI 测试必须串行——沿用 Task 9 的 `[assembly: CollectionBehavior(DisableTestParallelization = true)]`）。不这样做就只能靠手动点击，`Crashed`、进度推进这类"事件驱动的状态"根本没法断言。
 
@@ -4473,12 +4473,12 @@ public class OverviewTests : IClassFixture<UiAppHarness>
 
 （`FlaUI` 侧 `using FlaUI.Core; using FlaUI.Core.Automation; using FlaUI.Core.Input;`——`Keyboard.Type` 在 `FlaUI.Core.Input` 命名空间下，漏了它编译不过；`System` 侧 `using System.Linq; using System.Threading.Tasks; using ClashAcry.Contracts; using ClashAcry.Core;`。`FakeTray` 与 `WaitUntil` 写到 `tests/ClashAcry.UI.Tests/Fakes/` 下，Task 15 的窗口测试要共用。测试项目引用 Core 即可，**不引用 UI 工程**。最后一个用例断言的是"点下去不等于已启动——状态必须等 Tray 事件"（spec §3 禁令 3 的 UI 侧对应物），UI 不许做乐观翻转。）
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `dotnet test tests/ClashAcry.UI.Tests --filter OverviewTests`
-Expected: FAIL
+Expected: FAIL（实测首轮 6/6 红，全部红在 `UiSession.Require` 的 `Assert.NotNull`——即假 Tray 与管道通路已通，缺的只是界面控件）
 
-- [ ] **Step 3: 实现页面**
+- [x] **Step 3: 实现页面**
 
 XAML 结构（自上而下，全部控件带 `AutomationProperties.AutomationId`，**id 必须与 Step 1 测试里的字符串逐字对齐**，否则测试找不到元素只会得到 `null` 引用异常）：
 
@@ -4502,17 +4502,30 @@ ViewModel 要求：
 - 更新按钮：`UpdatePct` 来自 `core.update.progress` 事件；`100` 后按钮文案回「更新内核」并更新 `CoreVersionLabel`
 - 日志区原样展示 `CoreStateChanged.StderrTail` 的 Go 原文，一行一条，**不翻译、不裁剪、不加表情**（spec §9）
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `dotnet test tests/ClashAcry.UI.Tests --filter OverviewTests`
 Expected: PASS，5/5（`CrashedEvent` / `UpdateProgress` / `SilentRefresh` / `CoreToggle` / `ImportUrl`）
+实测：**6/6**（比计划多一条 `TrayAbsent_CoreToggleDisabled_AndBannerShown`，那是 Task 12 欠的 R-12h 那半条）；UI.Tests 全量 **15/15**、Core.Tests **131 全绿**、`dotnet build ClashAcry.sln -c Release` 0 警告。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/ClashAcry.UI tests/ClashAcry.UI.Tests/OverviewTests.cs tests/ClashAcry.UI.Tests/Fakes
 git commit -m "feat(ui): 概览页（内核/模式/系统代理开关与内核更新进度反馈）"
 ```
+
+实施日回写（Task 14 落地时踩到的，全部有对应代码行或用例作证）：
+
+- **R-14a｜新开只读的 `settings.get`，不拿 no-op 的 `settings.update` 骗回包**：概览页要显示"系统代理当前开着没有"，而那一项只在 Tray 的 `settings.json` 里。走 `settings.update` 有两条都不可接受：UI 成了引擎设置的写者（违反两棵真相树），且 no-op 也会广播一次 `settings.changed`——凭空造出一个没人改过的改动。新命令回包 = 同一个 `SettingsSnapshot`（无 secret、无 core_path），不落盘不广播；`TrayCommandRoutingTests` 用 `settings.json` 的 `LastWriteTimeUtc` 未变 + 回包不含 secret 两条钉住，并已回写 spec §4.1。
+- **R-14b｜日志是页内展开面板，不是 Flyout；`ModeRadioBorder` 这个 id 取消**：① 计划的 Flyout 里 `LogText` 活在独立 Popup，失焦即收，FlaUI 每次读它都得先跟"弹层还在不在"的轮询较劲（计划自己那份取样代码就得写 `OpenLogFlyout` 重试循环）；改为页内 `Border`（id `LogPanelBackground` 保留）+ `ScrollViewer` + `TextBlock`，判据面完全一致且 Task 16 的像素取样不用再处理弹层。② `ModeRadioBorder` 要求往 `RadioButton` 模板外圈的 `Ellipse` 上挂 id，而那要整套重写控件模板——`Shape` 在 WinUI 里没有 automation peer，只能靠自定义模板。实测直接取 `RadioButton` **自己的** rect、按计划的同一相对偏移（宽 6%、高 50%）落点就是外圈，取样等价、零模板改动。**Task 16 的 targets 表因此把 `("NavOverview","ModeRadioBorder",0.06,0.5)` 换成 `("NavOverview","ModeRule",0.06,0.5)`；同理 `ComboArrow` 用 `("NavSettings","DelayUrlCombo",0.92,0.5)` 的箭头落点，不再挂 id。** `LogPanelBackground` 的展开改按 `LogButton`（`OpenLogFlyout` 那个 helper 作废）。
+- **R-14c｜有操作在飞时暂停 2 s 轮询**：`PipeServer` 对**同一条连接**的请求是 `await` 串行的（Task 9 的 `Pump`），一条分钟级 `core.update` 会把后面所有 `settings.get` 堵在它后面——轮询照打就是堆一串没人应答的 await。进度与结果走的是广播那条独立写路径，所以暂停轮询不会断掉"进行中反馈"。
+- **R-14d｜状态机挂外壳，不挂页面**：`OverviewViewModel` 由 `MainWindow` 持有，概览页与设置页共用。两页各自轮询会把同一条管道压满，还会让"系统代理 / 测速地址"在两页显示成两个值；页面实例本就按 Tag 复用，VM 跟着外壳走才能做到"切页不重置、不重握手"。
+- **R-14e｜横幅只有状态机一个写者**：外壳原来在自己那几条分支里直接 `ShowBanner`，界面一故障 VM 又写一条，同一个事实两句话、还互相盖。现在外壳把"托盘宿主未运行"也交进 `Overview.ReportFault(...)`，VM 的故障文案按**第一条说话**（坏着期间不换措辞——轮询会把同一个故障说出"未连接/连接中断/无应答"好几种句子，横幅跟着跳就是抖动），恢复时由一次成功轮询清空并 `ClearBanner()`。
+- **R-14f｜`dotnet test <csproj>` 与 `dotnet build <sln>` 的产物目录不同，跑 UI 测试前必须先建 sln**：夹具 `ResolveExe` 的候选顺序是 `bin\x64\Release` 在前（R-12e），而 `dotnet test tests/ClashAcry.UI.Tests` 只把测试工程编到 `bin\Release`，**不会**重建 UI 工程（R-12f：测试不引用 UI）。于是"改了 VM 跑测试却没效果"是必然的——启动的是上一次 sln 构建留下的 exe。本轮就实测踩过：修完 `_state` 打底那条 bug，`--no-build` 连跑两次仍报旧行为，`dotnet build ClashAcry.sln -c Release` 之后才见新行为。**固定顺序：`dotnet build ClashAcry.sln -c Release` → `dotnet test tests/ClashAcry.UI.Tests -c Release`（不带 `--no-build`）。**
+- **R-14g｜空 TextBlock 的 UIA `Name` 是 `NOTSUPPORTED`，不是空串**（本机 WinUI 3 + FlaUI 5 实测：元素在树里、`ControlType` 仍是 `Text`、`IsEnabled` 可读，只有 `Name` 抛 `PropertyNotSupportedException`）。`ImportResult` 的"初始必须空着"因此不能写成 `Assert.Equal("", element.Name)`——它会当场抛，而不是拿到空串。测试侧 `Text()` 把这一条读法折成空串（有文本时 `Name` 立即可读），断言含义不变；产品侧仍守住"文本是唯一读取点"这条约定，没有改用 ValuePattern。
+- **R-14h｜`_state` 打底判据订正：从"本轮没握过手"改成"还没有任何状态"**。外壳在 `Root.Loaded` 里已经握过一次，VM 若按"本轮是否新握手"决定是否打底，`_state` 会永远停在 `null`——实测症状是界面**全灰但版本行写着 `v-test`**，`UpdateButton` 直接 `ElementNotEnabledException`。打底只发生一次，此后状态只由 `core.state` 事件说（spec §3 禁令 3）。
+- **交接给 Task 15/16**：① `FakeTray` 的 controller 端口是**现取的空闲端口**（`TcpListener(0)`），界面认为内核 Running 之后打过去必然连接被拒，`RefreshAsync` 里那条 `GET /configs` 因此必须自带静默 catch——Task 15 别把它改成"抛穿到横幅"；② `OverviewTests` 里的 `Show/Press/TypeText/WaitUntilAsync/ReadyAsync` 是这批用例的通用夹具面，Task 15 的窗口测试直接复用（`ReadyAsync` 那条"先等握手落地再断言"是新用例每次都需要的，漏了就会拿到 `未知/不可用` 这套初始值）；③ Task 16 的取样表按本条 R-14b 调整，且 `ModeRule` 三条在托盘未连上时是**禁用**态，取样要先连上假 Tray 或按禁用态单独判。
 
 ---
 
@@ -4904,8 +4917,8 @@ public class ChromeContrastTests : IClassFixture<UiAppHarness>
         new object[] { "NavOverview", "PageBackground",    0.85, 0.1,  "dark" },
         new object[] { "NavOverview", "ScrollBarTrack",     0.5, 0.5,  "dark" },
         new object[] { "NavOverview", "LogPanelBackground", 0.5, 0.5,  "dark" },
-        new object[] { "NavOverview", "ModeRadioBorder",    0.06, 0.5, "foreground" },
-        new object[] { "NavSettings", "ComboArrow",         0.92, 0.5, "foreground" },
+        new object[] { "NavOverview", "ModeRule",           0.06, 0.5, "foreground" },
+        new object[] { "NavSettings", "DelayUrlCombo",      0.92, 0.5, "foreground" },
     };
 
     [Theory]
@@ -4919,7 +4932,7 @@ public class ChromeContrastTests : IClassFixture<UiAppHarness>
         var rect = WindowCapture.WindowRect(hwnd);
         using var bmp = WindowCapture.Grab(hwnd);
 
-        var part = id == "LogPanelBackground" ? OpenLogFlyout(w) : w.FindFirstDescendant(cf => cf.ByAutomationId(id));
+        var part = id == "LogPanelBackground" ? OpenLogPanel(w) : w.FindFirstDescendant(cf => cf.ByAutomationId(id));
         Assert.NotNull(part);                                    // 部件必须先带 AutomationId：找不到控件不算通过
         var px = ChromeProbe.Sample(bmp, part.BoundingRectangle, rect, fx, fy);
 
@@ -4945,8 +4958,9 @@ public class ChromeContrastTests : IClassFixture<UiAppHarness>
             $"滑块与槽看不出差别（track={Sum(track)} thumb={Sum(thumb)}）——深色下滚动条等于不可用");
     }
 
-    // 日志区在 Flyout 里，取样前必须真的展开它（不展开就找不到，等于这条核对没跑）
-    private static FlaUI.Core.AutomationElements.AutomationElement OpenLogFlyout(Window w)
+    // 日志是页内展开面板（Task 14 裁定 R-14b：不用 Flyout），取样前必须真的展开它
+    //（折叠的 Border 不在 UIA 树里，不展开就找不到，等于这条核对没跑）
+    private static FlaUI.Core.AutomationElements.AutomationElement OpenLogPanel(Window w)
     {
         w.FindFirstDescendant(cf => cf.ByAutomationId("LogButton")).Click();
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(3);
@@ -4956,12 +4970,13 @@ public class ChromeContrastTests : IClassFixture<UiAppHarness>
             if (el is not null) return el;
             Thread.Sleep(100);
         }
-        throw new TimeoutException("日志 Flyout 未展开，LogPanelBackground 取不到");
+        throw new TimeoutException("日志面板未展开，LogPanelBackground 取不到");
     }
 }
 ```
 
-（`targets` 里每个 id 都要求实现方在对应部件模板上补 `AutomationProperties.AutomationId`：`ScrollBarTrack`/`ScrollBarThumb` 挂在 `ScrollBar` 的 `Track`/`Thumb` 模板部件上，`ComboArrow` 挂在 `ComboBox` 箭头 `Border` 上，`ModeRadioBorder` 挂在 `RadioButton` 的外圈 `Ellipse` 上，`PageBackground` 挂在 `OverviewPage` 的根 `Grid`（`AutomationId="PageBackground"`）上，`LogPanelBackground` 挂在日志 Flyout 的面板 `Border` 上。**找不到控件＝不通过**，不允许 silently skip。）
+（`targets` 里每个 id 都要能在**现成控件**上取到，**找不到控件＝不通过**，不允许 silently skip。Task 14 落地后的对应关系：`PageBackground` 挂在 `OverviewPage` 的根 `Grid`（`Background="Transparent"`，让材质透出来才可测）、`LogPanelBackground` 挂在页内日志面板的 `Border` 上，两者都已带 id；`ScrollBarTrack`/`ScrollBarThumb` 仍要往 `ScrollBar` 的 `Track`/`Thumb` 模板部件上补 id；`ModeRule`（单选外圈，宽 6% 高 50% 的落点就在外圈上）与 `DelayUrlCombo`（箭头落点宽 92%）**不再另挂 id**——往 `RadioButton`/`ComboBox` 模板内的 `Ellipse`/`Border` 挂 id 要整套重写模板，而 `Shape` 在 WinUI 里没有 automation peer，代价远大于换 id 命名的收益（裁定 R-14b）。另：这三条 `ModeRule`/`ModeGlobal`/`ModeDirect` 与 `DelayUrlCombo` 在托盘没连上时是**禁用**态，取样要么连上 `FakeTray`，要么按禁用态单独定判据。）
+
 
 （`BoundingRectangle` 是 FlaUI 直接给出的 `System.Drawing.Rectangle`，屏幕坐标；`rect` 是窗口矩形，`Sample` 内部做减法换算到位图坐标。夹具侧要 `using System; using System.Drawing; using System.Drawing.Imaging; using System.Runtime.InteropServices; using System.Threading; using System.Linq; using FlaUI.Core; using FlaUI.Core.Automation; using FlaUI.Core.AutomationElements; using Xunit;`。测试项目要 `<ItemGroup>` 加 `System.Drawing.Common`（包版本随 xUnit 传递依赖即可，Windows-only），这只进测试夹具，**app 侧仍然禁 `System.Drawing`**（spec §3 的 Tray 40 MB 线）。）
 

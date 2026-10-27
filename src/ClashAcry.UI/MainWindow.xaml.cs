@@ -1,7 +1,9 @@
 using ClashAcry.Core;
 using ClashAcry.UI.Backdrops;
 using ClashAcry.UI.Services;
+using ClashAcry.UI.ViewModels;
 using ClashAcry.UI.Views;
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 
@@ -20,6 +22,17 @@ public sealed partial class MainWindow : Window
         systemAllows: App.ForceDegradeRequested ? () => false : null);
 
     /// <summary>
+    /// 外壳级状态机：概览页与设置页**共用这一个实例**（R-14d）。页面各自轮询会把同一条管道压满，
+    /// 还会让「系统代理 / 测速地址」在两页显示成两个值；轮询周期与故障文案也因此只有一处能说话。
+    /// </summary>
+    public OverviewViewModel Overview { get; }
+
+    private string _lastFault = "";
+
+    /// <summary>窗口句柄：系统选择器（FileOpenPicker）要挂在它上面，否则 unpackaged 应用点了没反应。</summary>
+    public nint Handle => WinRT.Interop.WindowNative.GetWindowHandle(this);
+
+    /// <summary>
     /// 页面实例按 Tag 复用。每次切页都新建意味着重新握手 + 重拉 <c>/proxies</c>，
     /// 整页白一下——正是「轮询/切换不得有可见抖动」那条红线的第一现场。
     /// </summary>
@@ -31,8 +44,12 @@ public sealed partial class MainWindow : Window
         Title = "ClashAcry";                       // FlaUI 的 ShellTests 断言这个字符串
         AppWindow.Resize(new Windows.Graphics.SizeInt32(1000, 680));
 
+        Overview = new OverviewViewModel(Link, DispatcherQueue.GetForCurrentThread());
+        Overview.Changed += RenderBanner;
+
         Nav.SelectionChanged += (_, e) => Show(TagOf(e.SelectedItem));
-        Root.Loaded += async (_, _) => await ConnectAsync();
+        Root.Loaded += async (_, _) => { await ConnectAsync(); Overview.Start(); };
+        Closed += (_, _) => Overview.Dispose();
 
         if (App.ResetPrefsRequested) Prefs.Reset();
         ApplyTheme(ThemeFromPref(Prefs.Theme));
@@ -53,7 +70,7 @@ public sealed partial class MainWindow : Window
             {
                 "proxies" => new ProxiesPage(),
                 "settings" => new SettingsPage(this),
-                _ => new OverviewPage(),
+                _ => new OverviewPage(this),
             };
             _pages[tag] = page;
         }
@@ -98,15 +115,27 @@ public sealed partial class MainWindow : Window
     {
         if (App.TrayAbsentRequested)
         {
-            ShowBanner(TrayAbsentText);            // 测试参数：把「Tray 不在」变成可复现状态，而不是靠机器上真没跑
+            // 故障从 Overview 走（它是横幅唯一的文本来源，R-14e）：直接 ShowBanner 的话，
+            // 轮询第一次撞上「未连接」就会把这句话盖成另一条措辞。
+            Overview.ReportFault(TrayAbsentText);
             return;
         }
-        if (!await Link.EnsureTrayRunningAsync()) { ShowBanner(TrayAbsentText); return; }
+        if (!await Link.EnsureTrayRunningAsync()) { Overview.ReportFault(TrayAbsentText); return; }
         if (await Link.HandshakeAsync() is null)
-            ShowBanner("托盘无应答，界面显示的可能不是内核当前状态");
+            Overview.ReportFault("托盘无应答，界面显示的可能不是内核当前状态");
     }
 
     private const string TrayAbsentText = "托盘宿主未运行，内核控制不可用";
+
+    /// <summary>横幅只跟随连接级故障的**边界**：故障出现时写下，恢复时收起；坏着期间不重述（同一条措辞由 VM 钉住）。</summary>
+    private void RenderBanner()
+    {
+        var fault = Overview.ErrorText;
+        if (fault == _lastFault) return;
+        _lastFault = fault;
+        if (fault.Length == 0) ClearBanner();
+        else ShowBanner(fault);
+    }
 
     /// <summary>行内反馈：不弹阻塞对话框（用户红线）。</summary>
     public void ShowBanner(string text)
@@ -114,4 +143,6 @@ public sealed partial class MainWindow : Window
         BannerText.Text = text;
         Banner.IsOpen = true;
     }
+
+    public void ClearBanner() => Banner.IsOpen = false;
 }

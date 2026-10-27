@@ -54,6 +54,12 @@ public sealed class TrayLink : IAsyncDisposable
         return await _client.WaitUpAsync(TimeSpan.FromSeconds(3));
     }
 
+    /// <summary>
+    /// 只探活、**不拉进程**（拉 Tray 仍归外壳的 <see cref="EnsureTrayRunningAsync"/>，spec §3）。
+    /// 给轮询用：托盘可能是后来才起来的，界面自己不该把一个 bool 契约变成异常。
+    /// </summary>
+    public Task<bool> WaitServerUpAsync(TimeSpan budget) => _client.WaitUpAsync(budget);
+
     /// <summary>握手失败回 null（不抛）：这是"界面还开得住、但数据不是内核当前状态"的降级入口。</summary>
     public async Task<HandshakeReply?> HandshakeAsync()
     {
@@ -66,6 +72,9 @@ public sealed class TrayLink : IAsyncDisposable
     {
         Frame? reply;
         try { reply = await _client.RequestAsync(cmd, payload, _ct.Token); }
+        // PipeClient 在未连接时是 InvalidOperationException（不是 IOException）：轮询在「托盘根本没起来」
+        // 时每 2 s 都会撞上它。不折进 TrayCommandException 就等于让界面弹一条裸栈。
+        catch (InvalidOperationException ex) { throw new TrayCommandException($"与托盘宿主未连接：{ex.Message}"); }
         catch (IOException ex) { throw new TrayCommandException($"与托盘的连接中断：{ex.Message}"); }
         catch (OperationCanceledException) { throw new TrayCommandException("请求已取消"); }
 

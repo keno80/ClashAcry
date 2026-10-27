@@ -47,7 +47,9 @@ public class CoreManagerTests : IDisposable
     private static int Port(TcpListener l) => ((IPEndPoint)l.LocalEndpoint).Port;
 
     private CoreManager Build(string script, int mixedPort, int controllerPort, bool portOccupied = false,
-                              TaskCompletionSource<bool>? aliveGate = null, Exception? aliveThrows = null)
+                              TaskCompletionSource<bool>? aliveGate = null, Exception? aliveThrows = null,
+                              TimeSpan? fastWindow = null, TimeSpan? startGrace = null,
+                              Func<bool>? controllerReady = null)
     {
         var paths = AppPaths.ForTest(_dir); paths.EnsureCreated();
         // 本机实测（Task 8）：cmd.exe 不肯执行「扩展名是 .exe、内容是批处理」的文件（报"不是有效的
@@ -59,7 +61,9 @@ public class CoreManagerTests : IDisposable
         store.Save(store.Load() with { ControllerPort = controllerPort, MixedPort = mixedPort, CorePath = fakeCore });
         var client = new MihomoClient(new HttpClient { Timeout = TimeSpan.FromSeconds(2) },
             "127.0.0.1", controllerPort, store.Load().Secret);
-        return new CoreManager(paths, store, client, new FakeProbe(client, portOccupied, aliveGate, aliveThrows), CmdLaunch);
+        return new CoreManager(paths, store, client,
+            new FakeProbe(client, portOccupied, aliveGate, aliveThrows, controllerReady),
+            CmdLaunch, fastWindow, startGrace);
     }
 
     // 裁定 R-8a：夹具里 WireMock 常驻在 controller 端口上冒充内核的应答面，所以"端口被别的进程占了"
@@ -67,13 +71,17 @@ public class CoreManagerTests : IDisposable
     // 三条测试必红）。生产路径不传这个类，预检退回真实的 TcpAlive。
     private sealed class FakeProbe(MihomoClient client, bool portOccupied,
                                    TaskCompletionSource<bool>? aliveGate = null,
-                                   Exception? aliveThrows = null) : CoreProbe(client)
+                                   Exception? aliveThrows = null,
+                                   Func<bool>? controllerReady = null) : CoreProbe(client)
     {
         // 裁定 R-8h 的时序闸门：ControllerAlive 卡在这道闸上（**不带 ct**，时机由测试掌控），
         // 取消才能落在探活循环中间——进函数前就取消好的令牌会在 InLifecycle 的 WaitAsync 就抛，
         // 压根没 spawn，测试空转。
         public override async Task<bool> ControllerAlive(CancellationToken ct)
         {
+            // 慢启动的假内核：真内核在解析配置（下 geo 数据库）期间 controller 根本不应答，
+            // 这里用「到某个时刻才算得通」表达，才能把窗口分档的那条支路跑出来。
+            if (controllerReady is not null && !controllerReady()) return false;
             if (aliveGate is not null) await aliveGate.Task;
             if (aliveThrows is not null) throw aliveThrows;
             return await base.ControllerAlive(ct);
@@ -123,7 +131,10 @@ public class CoreManagerTests : IDisposable
     {
         _wire.Reset();                       // /version 不再返回 200
         using var mixed = new TcpListener(IPAddress.Loopback, 0); mixed.Start();
-        var mgr = Build(KernelLogScript("config file error: bad dns section"), Port(mixed), _wire.Port);
+        // startGrace 收到 1 s：这条走的是「controller 一直不应答」的宽限档，生产默认是 120 s，
+        // 不在测试里等它——宽限档本身的行为由 Start_SlowBoot_* 那两条钉。
+        var mgr = Build(KernelLogScript("config file error: bad dns section"), Port(mixed), _wire.Port,
+            startGrace: TimeSpan.FromSeconds(1));
 
         Assert.False(await mgr.StartAsync(default));
         Assert.Equal(CoreState.Crashed, mgr.State);
@@ -146,6 +157,46 @@ public class CoreManagerTests : IDisposable
         var starts = mgr.StateChangedEvents.Where(e => e.State == CoreState.Starting).ToList();
         Assert.Equal(2, starts.Count);
         Assert.Contains("重试", starts[1].Reason);
+    }
+
+    [Fact]
+    public async Task Start_SlowBoot_PastFastWindow_KeepsWaiting_AndReachesRunning()
+    {
+        // 真机踩到（2026-10-27，用户机场订阅里有 `GEOIP,CN,DIRECT`）：mihomo 必须先把 geoip.metadb 下完
+        // 才开始监听任何端口，实测它自己给这次下载留了 90 s。旧实现 5 s 就判死并 KillProcess，
+        // 把下载掐成半截 metadb → 下一次「MMDB invalid, remove and download」重下 → 再被掐死，
+        // 用户看到的是「导入成功后内核永远起不来」。
+        // 这条锁的是分档后的宽限支路：controller 不应答 **且进程还活着** = 还在启动，不是崩溃。
+        using var _ = new RegistrySnapshot();
+        using var mixed = new TcpListener(IPAddress.Loopback, 0); mixed.Start();
+        var boot = Stopwatch.StartNew();
+        var mgr = Build(SleepScript(), Port(mixed), _wire.Port,
+            fastWindow: TimeSpan.FromMilliseconds(300), startGrace: TimeSpan.FromSeconds(5),
+            controllerReady: () => boot.Elapsed >= TimeSpan.FromMilliseconds(900));
+
+        Assert.True(await mgr.StartAsync(default));
+
+        Assert.Equal(CoreState.Running, mgr.State);
+        Assert.Equal(1, mgr.SpawnCount);                       // 没被提前杀，所以不需要第二次 spawn
+        Assert.Contains(mgr.StateChangedEvents,
+            e => e.State == CoreState.Starting && e.Reason is not null && e.Reason.Contains("仍在启动"));
+        await mgr.StopAsync(default);
+    }
+
+    [Fact]
+    public async Task Start_ControllerNeverBoots_GraceExpires_CrashesWithGraceInReason()
+    {
+        // 宽限不是无限等：进程活着但 controller 到 _startGrace 仍不应答，照旧判死（不留孤儿）。
+        using var _ = new RegistrySnapshot();
+        using var mixed = new TcpListener(IPAddress.Loopback, 0); mixed.Start();
+        var mgr = Build(SleepScript(), Port(mixed), _wire.Port,
+            fastWindow: TimeSpan.FromMilliseconds(200), startGrace: TimeSpan.FromSeconds(1),
+            controllerReady: () => false);
+
+        Assert.False(await mgr.StartAsync(default));
+
+        Assert.Equal(CoreState.Crashed, mgr.State);
+        Assert.Contains("1 s 内未就绪", mgr.StateChangedEvents.Last().Reason);
     }
 
     [Fact]

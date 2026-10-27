@@ -10,6 +10,8 @@ public sealed class CoreManager : IAsyncDisposable
     private readonly StderrRing _stderr = new(200);
     private readonly SemaphoreSlim _lifecycle = new(1, 1);
     private readonly List<CoreStateChanged> _events = new();
+    private readonly TimeSpan _fastWindow;
+    private readonly TimeSpan _startGrace;
     private Process? _proc; private string? _lastReason; private int _disposed;
 
     public CoreState State { get; private set; } = CoreState.Stopped;
@@ -35,10 +37,16 @@ public sealed class CoreManager : IAsyncDisposable
     public int ConcurrentGuardHits { get; private set; }
 
     public CoreManager(AppPaths paths, SettingsStore store, MihomoClient client, CoreProbe probe,
-                       Func<string, ProcessStartInfo>? launchFactory = null)
+                       Func<string, ProcessStartInfo>? launchFactory = null,
+                       TimeSpan? fastWindow = null, TimeSpan? startGrace = null)
     {
         (_paths, _store, _client, _probe) = (paths, store, client, probe);
         _launch = launchFactory ?? (exe => DefaultLaunch(paths, exe));
+        _fastWindow = fastWindow ?? TimeSpan.FromSeconds(5);
+        // 120 s 不是拍的：真机实测 mihomo v1.19.33 给自己那次 MMDB 下载留的截止正是 90 s
+        // （17:49:52 起下载 → 17:51:22 `context deadline exceeded` 自己退出），留 30 s 余量让它先跑完，
+        // 跑不完由它自己的 fatal 退出告诉我们，而不是我们提前掐。
+        _startGrace = startGrace ?? TimeSpan.FromSeconds(120);
         MixedPort = store.Load().MixedPort;
     }
 
@@ -133,11 +141,21 @@ public sealed class CoreManager : IAsyncDisposable
             _proc.BeginOutputReadLine(); _proc.BeginErrorReadLine();
 
             var controllerOk = false; var mixedOk = false;
+            var timedOut = false; var bootAnnounced = false;
             // 裁定 R-8i① / spec §9「探活成本实测」：窗口按**墙上时间**算，不许改回固定轮数当预算。
             // 旧写法 `for (i < 20)` 把 250 ms 当成了预算，可它只是间隔——每轮还要付一次 TCP 探活，
             // 而实测 loopback 上没人听时 connect 要 ~2.03 s 才拿到拒绝，名义 5 s 实际 25 s/尝试（UI 假死）。
+            //
+            // 窗口分档（2026-10-27 真机踩到，用户机场订阅）：配置里一条 `GEOIP,CN,DIRECT` 就让 mihomo
+            // 必须先把 geoip.metadb 下完才继续解析配置，实测它自己给这次下载留了 90 s，而我们的窗口是 5 s。
+            // 于是每次启动都在下载中途被 KillProcess 掐死，留下半截 metadb；下一次读到「MMDB invalid,
+            // remove and download」重下、再被掐死——用户看到的是「内核永远起不来」。
+            // 判据不是"把 5 s 放宽成 120 s"：**controller 应答 = 配置已经解析完**，这之后的等待才是异常。
+            // 所以 controller 没起来且进程还活着 → 仍在启动期，给到 _startGrace；
+            // controller 起来了而 mixed 不跟进 → 就是 v1.19.33 实测的「带病存活」，仍按 _fastWindow 判死。
             var probeWindow = Stopwatch.StartNew();
-            while (probeWindow.Elapsed < TimeSpan.FromSeconds(5))
+            Stopwatch? mixedWindow = null;
+            while (true)
             {
                 await Task.Delay(250, ct);
                 if (_proc.HasExited)
@@ -147,8 +165,29 @@ public sealed class CoreManager : IAsyncDisposable
                 controllerOk = await _probe.ControllerAlive(ct);
                 mixedOk = controllerOk && await CoreProbe.TcpAlive("127.0.0.1", MixedPort, ct);
                 if (mixedOk) { Transition(CoreState.Running); return true; }
+
+                if (controllerOk)
+                {
+                    mixedWindow ??= Stopwatch.StartNew();
+                    if (mixedWindow.Elapsed >= _fastWindow) { timedOut = true; break; }
+                }
+                else
+                {
+                    mixedWindow = null;
+                    if (probeWindow.Elapsed >= _startGrace) { timedOut = true; break; }
+                    if (!bootAnnounced && probeWindow.Elapsed >= _fastWindow)
+                    {
+                        bootAnnounced = true;
+                        Transition(CoreState.Starting,
+                            $"内核仍在启动（controller 未监听，已等 {probeWindow.Elapsed.TotalSeconds:F0} s，" +
+                            $"最多等 {_startGrace.TotalSeconds:F0} s）——带 GEOIP/GEOSITE 规则的订阅首次要下 geo 数据库");
+                    }
+                }
             }
-            _lastReason = $"探活失败：controller={(controllerOk ? "ok" : "fail")} mixed({MixedPort})={(mixedOk ? "ok" : "fail")}，5s 内未就绪";
+            if (timedOut)
+                _lastReason = $"探活失败：controller={(controllerOk ? "ok" : "fail")} " +
+                              $"mixed({MixedPort})={(mixedOk ? "ok" : "fail")}，" +
+                              $"{(controllerOk ? _fastWindow : _startGrace).TotalSeconds:F0} s 内未就绪";
             await KillProcess();
             return false;
         }

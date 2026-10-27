@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ClashAcry.Core\ClashAcry.Core.csproj" />
+  </ItemGroup>
+  <!-- 裁定 R-10d④：app.ico 是「复制到输出目录」，不是嵌入资源。Win32NotifyIcon 用
+       Path.Combine(AppContext.BaseDirectory, "app.ico") + LoadImageW(LR_LOADFROMFILE) 从**磁盘**读，
+       嵌进程序集就没有那个路径了。图标本身由 scripts/make-icon.ps1 产出后入库（产物入库，构建不依赖脚本）。 -->
+  <ItemGroup>
+    <None Include="app.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+  <!-- 裁定 R-10c/R-10k：Win32NotifyIcon.DecodeTrayParam 是 internal（托盘 lParam 的打包顺序是本平台
+       最容易「图标在、点了没反应」的地方，必须能被单测锁住），而测试住在 ClashAcry.Core.Tests。
+       写法照 R-9f 在 Core 里的同一条。 -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="ClashAcry.Core.Tests" />
+  </ItemGroup>
+</Project>

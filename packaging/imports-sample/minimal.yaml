@@ -1,0 +1,29 @@
+# probe fixture — 注释必须能被原样读回
+mixed-port: 7897
+external-controller: 127.0.0.1:9097
+secret: probe-secret
+proxies:
+  - name: direct-node
+    type: direct
+proxy-providers:
+  PROBE-PROV:
+    type: file
+    path: ./providers-sample.yaml
+    url: http://127.0.0.1/unused.yaml
+    interval: 3600
+    health-check:
+      enable: true
+      url: http://www.gstatic.com/generate_204
+      interval: 600
+proxy-groups:
+  - name: PROBE-SELECT
+    type: select
+    # 实测 v1.19.33：组内直接写 provider 名（proxies: [..., PROBE-PROV]）会 fatal
+    # "'PROBE-PROV' not found"；聚合整个 provider 必须用 use 字段。
+    use: [PROBE-PROV]
+    proxies: [direct-node]
+  - name: PROBE-AUTO
+    type: url-test
+    proxies: [direct-node]
+    url: http://www.gstatic.com/generate_204
+    interval: 600

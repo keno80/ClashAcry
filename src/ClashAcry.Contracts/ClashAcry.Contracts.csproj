@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- 契约层不碰 Win32，显式钉 net10.0（其余工程走 Directory.Build.props 的 windows TFM） -->
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+</Project>

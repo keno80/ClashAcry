@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page x:Class="ClashAcry.UI.Views.SettingsPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      AutomationProperties.AutomationId="SettingsPage">
+  <ScrollViewer>
+    <StackPanel Padding="24" Spacing="8">
+      <TextBlock Text="设置" Style="{ThemeResource TitleTextBlockStyle}" />
+
+      <!-- 订阅导入区：这条通路是 config.yaml 的唯一写入口，所以只发命令、绝不在 UI 里下载或落盘（spec §3）。 -->
+      <TextBlock Text="订阅导入" Style="{ThemeResource SubtitleTextBlockStyle}" />
+      <TextBox x:Name="ImportUrlBox" AutomationProperties.AutomationId="ImportUrlBox"
+               Header="订阅链接" PlaceholderText="订阅链接 / 节点配置 URL" />
+      <StackPanel Orientation="Horizontal" Spacing="8">
+        <Button x:Name="ImportButton" Content="导入订阅" AutomationProperties.AutomationId="ImportButton"
+                Click="OnImportUrlClick" />
+        <!-- 本地 yaml 走系统 FileOpenPicker（另一进程的对话框），UIA 驱动不稳，因此不进 FlaUI；
+             它的行为由 Task 5 的导入单测 + Task 10 的 sub.import(path) 路由测试 + Task 18 人工一步覆盖。 -->
+        <Button x:Name="ImportFileButton" Content="从本地 yaml 导入"
+                AutomationProperties.AutomationId="ImportFileButton" Click="OnImportFileClick" />
+      </StackPanel>
+      <!-- 初始必须空着，且不预填任何提示：行内结果只有一个读取点（MinHeight 留住这一行，
+           结果落地时不会把下面的控件顶跳——「刷新不得可见抖动」同一条红线）。 -->
+      <TextBlock x:Name="ImportResult" AutomationProperties.AutomationId="ImportResult" MinHeight="20"
+                 Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="WrapWholeWords" />
+
+      <TextBlock Text="测速地址" Style="{ThemeResource SubtitleTextBlockStyle}" />
+      <ComboBox x:Name="DelayUrlCombo" AutomationProperties.AutomationId="DelayUrlCombo"
+                HorizontalAlignment="Left" MinWidth="360" SelectionChanged="OnDelayUrlSelected" />
+
+      <TextBlock Text="窗口材质" Style="{ThemeResource SubtitleTextBlockStyle}" />
+      <RadioButton x:Name="BackdropAcrylic" Content="Acrylic（默认）" GroupName="BackdropGroup"
+                   AutomationProperties.AutomationId="BackdropAcrylic" Checked="OnBackdropChecked" />
+      <RadioButton x:Name="BackdropMica" Content="Mica" GroupName="BackdropGroup"
+                   AutomationProperties.AutomationId="BackdropMica" Checked="OnBackdropChecked" />
+      <RadioButton x:Name="BackdropSolid" Content="纯色" GroupName="BackdropGroup"
+                   AutomationProperties.AutomationId="BackdropSolid" Checked="OnBackdropChecked" />
+      <!-- 两行状态文案：FlaUI 各版本读 TogglePattern 的写法不一样，UIA 的 Name 才是跨版本稳定的判据，
+           所以 UI 自己把状态写成可读文本，测试不跟 pattern API 较劲。 -->
+      <TextBlock x:Name="BackdropSelectedLabel" AutomationProperties.AutomationId="BackdropSelectedLabel" />
+      <TextBlock x:Name="BackdropEffectiveLabel" AutomationProperties.AutomationId="BackdropEffectiveLabel"
+                 Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+
+      <TextBlock Text="主题" Style="{ThemeResource SubtitleTextBlockStyle}" />
+      <RadioButton x:Name="ThemeLight" Content="浅色" GroupName="ThemeGroup"
+                   AutomationProperties.AutomationId="ThemeLight" Checked="OnThemeChecked" />
+      <RadioButton x:Name="ThemeDark" Content="深色" GroupName="ThemeGroup"
+                   AutomationProperties.AutomationId="ThemeDark" Checked="OnThemeChecked" />
+      <RadioButton x:Name="ThemeSystem" Content="跟随系统" GroupName="ThemeGroup"
+                   AutomationProperties.AutomationId="ThemeSystem" Checked="OnThemeChecked" />
+    </StackPanel>
+  </ScrollViewer>
+</Page>

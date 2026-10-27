@@ -40,3 +40,11 @@ UI 冒烟与验收清单：`docs/superpowers/checklists/v1-acceptance.md`（随�
 ## 环境
 
 Windows x64 / Windows 11；.NET 10 SDK；Windows App SDK 2.5.1；Visual Studio Build Tools 或 `dotnet` CLI；Git Bash。
+
+**SDK 调用方式（本机实测，2026-10-26）**：`C:\Program Files\dotnet` 里只有 6/8 **运行时**、无 SDK；.NET 10 SDK 装在
+`C:\Users\Keno\AppData\Local\Microsoft\dotnet`（官方 `dotnet-install.ps1`，用户目录、未改系统 PATH）。
+PATH 上那个 `dotnet` 会报 "No .NET SDKs were found"。所有命令走全路径或先把该目录前置到 PATH：
+
+```
+export PATH=/c/Users/Keno/AppData/Local/Microsoft/dotnet:$PATH
+```

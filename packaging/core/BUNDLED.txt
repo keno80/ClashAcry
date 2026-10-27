@@ -1,0 +1,4 @@
+tag: v1.19.33
+asset: https://github.com/MetaCubeX/mihomo/releases/download/v1.19.33/mihomo-windows-amd64-compatible-v1.19.33.zip
+sha256: 7aaf636a4f2172dcd8ec34ac4f52797b059195e5afd6409508c963e545f8864d
+exe_sha256: 926bfea2ce48a247d6a7ce4cf641980e416202d5e40fe4ee5c949089ace0e197

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Application
+    x:Class="ClashAcry.UI.App"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <!-- InfoBar / NavigationView 的样式都住在 XamlControlsResources 里；
+                     不合并进来就是「编译过、运行时无样式」的一类空白窗。 -->
+                <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>

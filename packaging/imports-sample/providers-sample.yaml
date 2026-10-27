@@ -1,0 +1,13 @@
+proxies:
+  - name: prov-node-1
+    type: ss
+    server: 127.0.0.1
+    port: 8331
+    cipher: aes-256-gcm
+    password: probe-pass-1
+  - name: prov-node-2
+    type: ss
+    server: 127.0.0.1
+    port: 8332
+    cipher: aes-256-gcm
+    password: probe-pass-2

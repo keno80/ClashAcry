@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="ClashAcry.UI.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- 标题在代码里设：MainWindow ctor 里 `Title = "ClashAcry";`，FlaUI 的 ShellTests 断言 w.Title == "ClashAcry" -->
+    <!-- WinUI 3 的 Window 没有 Loaded 事件（那是 FrameworkElement 上的），所以挂根 Grid——R-12d -->
+    <Grid x:Name="Root">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <InfoBar x:Name="Banner" Grid.Row="0" IsOpen="False" Severity="Warning"
+                 AutomationProperties.AutomationId="Banner">
+            <!-- 文案放子 TextBlock 而不是 InfoBar.Message：UIA 里 Message 不保证成为 Name，
+                 断言只有一个可靠的读取点 -->
+            <TextBlock x:Name="BannerText" AutomationProperties.AutomationId="BannerText" />
+        </InfoBar>
+        <!-- IsSettingsVisible="False"（R-12b）：NavigationView 自带一个底部「设置」页脚项，
+             而本设计的设置是普通第三页（Tag=settings）。两者都留着 = 侧栏出现两个「设置」，
+             第二个点了没反应（它走 SettingsSelected，不走 SelectionChanged）。 -->
+        <NavigationView x:Name="Nav" Grid.Row="1" PaneDisplayMode="Left" SelectionFollowsFocus="Disabled"
+                        IsBackButtonVisible="Collapsed" IsSettingsVisible="False">
+            <NavigationView.MenuItems>
+                <NavigationViewItem Content="概览" Tag="overview" AutomationProperties.AutomationId="NavOverview" />
+                <NavigationViewItem Content="节点" Tag="proxies" AutomationProperties.AutomationId="NavProxies" />
+                <NavigationViewItem Content="设置" Tag="settings" AutomationProperties.AutomationId="NavSettings" />
+            </NavigationView.MenuItems>
+            <!-- ContentTransitions 置空：默认 EntranceThemeTransition 让每次切页整块淡入，
+                 会被读成"界面在闪"（用户不抖动红线的第一现场）；页面实例由 MainWindow 缓存，见代码里 _pages -->
+            <Frame x:Name="RootFrame">
+                <Frame.ContentTransitions>
+                    <TransitionCollection />
+                </Frame.ContentTransitions>
+            </Frame>
+        </NavigationView>
+    </Grid>
+</Window>

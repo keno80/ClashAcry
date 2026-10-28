@@ -54,9 +54,13 @@ mihomo.exe                原版 Go 内核，external-controller 127.0.0.1:9097
 
 关窗语义：UI 的窗口关闭 = 进程退出（`Application.Exit`），代理链路因内核归 Tray 而不中断。单实例：二次启动 UI 时经管道发 `ui.focus` 让既有窗口前置，自身退出。
 
-**反向语义（裁定 R-20a，用户实测提出，2026-10-27）**：托盘「退出」= 整个应用退出，界面窗口跟着关。原来只有正向那半条，实测露出的形态是——托盘走了、内核停了，屏幕上还留着一格窗口，内容是「与托盘的连接中断：Pipe is broken.」+ 全置灰 + 一屏缓存节点值。这不是设计里的降级态（§3 只承诺过「UI 起来发现管道不存在 → 横幅 + 一键拉起」，那是 **UI 先起** 的场景），在用户眼里就是"没退干净"。落点：`TrayHost.ShutdownAsync` 在停内核之后、关管道之前遍历 `Process.GetProcessesByName("ClashAcry.UI")` 调 `CloseMainWindow()`，由 UI 自己的「关窗即退」把进程带走。
+**反向语义（裁定 R-20a，用户实测提出，2026-10-27）**：托盘「退出」= 整个应用退出，界面窗口跟着关。原来只有正向那半条，实测露出的形态是——托盘走了、内核停了，屏幕上还留着一格窗口，内容是「与托盘的连接中断：Pipe is broken.」+ 全置灰 + 一屏缓存节点值。这不是设计里的降级态（§3 只承诺过「UI 起来发现管道不存在 → 横幅 + 一键拉起」，那是 **UI 先起** 的场景；那一格里"拉起按钮"半条第五轮接成 R-21b、第六轮按 **R-22 同生死**撤销，见下面两段），在用户眼里就是"没退干净"。落点：`TrayHost.ShutdownAsync` 在停内核之后、关管道之前遍历 `Process.GetProcessesByName("ClashAcry.UI")` 调 `CloseMainWindow()`，由 UI 自己的「关窗即退」把进程带走。
 
 R-20a 的两条实现约束（真机核实过，不是推测）：① **只用 `CloseMainWindow()`，绝不 `Kill()`**——本机对真窗口实测 `MainWindowHandle=592352`（非 0，WinUI 3 unpackaged 窗口是标准 HWND）、`CloseMainWindow()` 返回 `True`、3 s 内进程消失；强杀会吞掉 `App.OnUnhandled` 的崩溃落盘，还可能连带杀掉 UI.Tests 的 FlaUI 窗口。② **关不掉就留着**：`CloseMainWindow()` 失败或窗口正忙时不重试、不硬来，退出钩子不为它发明第二种失败表达——留着的那扇窗显示断连横幅，不比今天更坏。
+
+**同生死（裁定 R-22，用户提出并于 2026-10-28 拍板，覆盖 R-21b 的"降级可用"路线）**：R-20a 关掉的是**优雅退出**那条路（托盘菜单「退出」→ 遍历 UI 进程 `CloseMainWindow()`），Tray 被强杀/崩溃时界面照旧活着——留着一条"横幅 + 置灰 + 一屏缓存值"的降级态，第五轮还给它配了「一键拉起托盘」按钮。用户实测后的判定是这条路本身错了：「没必要保留横幅，内核和 ui 应该一起」。于是 v1 的边界改成——**UI 与 Tray 同生死**：够不着托盘且宽限（3 轮轮询 ≈ 6 s）用尽，界面自己关窗退出；横幅里不再有任何恢复按钮。这不是把 R-20a 又反回去，而是把它没覆盖的那半条按同一条原则补齐：**屏幕上不留没有宿主的数据**。落地细节、四条真机/夹具判据与"内核崩溃时界面必须活着"的反向边界见 §4.1 末（同一批锁：`ShellTests.TrayAbsent_BannerSaysWhy_ThenUiQuitsItself` / `TrayDiesMidSession_UiQuitsItself` / `CoreCrashed_BannerShowsFault_ButUiStaysAlive_AndNoRelaunchAffordance`）。
+
+**同生死换来的一条必须写明后果**：硬杀 Tray 会让那颗 mihomo 变成**孤儿**（真机实测：杀 Tray 后 12 s 内 UI 自己退，`mihomo` 进程数仍是 1，9097/7897 仍被它占着）。Tray 侧**不认领、也不杀**别人的子进程——`CoreManager.AttemptStart` 的占用预检（CoreManager.cs:129）会直接拒绝再 spawn，两次尝试后落 `Crashed`，原因就是"controller 端口 9097 已被其他进程占用"。所以优雅路径（菜单「退出」→ `ShutdownAsync` 里 `Core.StopAsync`）不留孤儿，而任务管理器强杀留的孤儿要靠**结束那颗 mihomo**或重启机器出路。v1 接受这个形态（强杀不是设计路径，且"预检拒绝 + 说清原因"比"自动杀进程"更符合 §3 的谨慎），把「Tray 冷启动认领自家孤儿内核」记在 §12 待办里。
 
 **Tray 退出路径实测（Task 10，2026-10-27）**：`OutputType=WinExe` 的进程**不继承父控制台**——从 Git Bash 起它之后 `kill -INT` 打不进去，`Console.CancelKeyPress` 与 `SetConsoleCtrlHandler` 两条都没被触发（进程照跑、管道照应答）。所以优雅收尾在发布形态下**只有一条真路**：托盘菜单「退出」→ `TrayHost.ShutdownAsync`（摘图标 → 关系统代理 → 停内核 → 关界面 → 关管道 → `Environment.Exit`；「关界面」是 R-20a 补的一格）。两条连带结论：① `--no-tray` 的 CI/FlaUI 形态因此没有优雅出口，收尾只能硬杀进程（Task 12 需要它自己可控地停宿主时再补一条命令）；② 计划里「WinExe 从终端起来时 CancelKeyPress 是可用的主路」这句被实测否证，代码注释已按实测改写。
 
@@ -81,7 +85,13 @@ R-20a 的两条实现约束（真机核实过，不是推测）：① **只用 `
 
 事件（Tray → UI）：`core.state{state,reason?,stderr_tail?}`、`core.update.progress{received,total,pct}`、`core.update.result{result}`、`settings.changed{SettingsSnapshot 全量}`——**四个即全部**。日志文本不单独成事件（`log{level,msg}` 在预检评审中作为无广播方的死契约删除），内核输出随 `core.state` 的 `stderr_tail` 下发；`settings.changed` 恒为完整的 `SettingsSnapshot` 而非键增量，以免"同一个事件两种 payload"。（键名拼写以 `stderr_tail`/`SettingsSnapshot` 为准，Task 3 已实测落码。）
 
-UI 起来发现管道不存在（Tray 未运行或被杀）→ 顶部横幅"托盘宿主未运行" + 一键拉起 Tray 进程。（**Task 14 落地口径**：横幅文案与"控制不了的东西一律置灰"已实现并由 `TrayAbsent_CoreToggleDisabled_AndBannerShown` 钉住。**按钮本身在第五轮接上（裁定 R-21b，见 §12 末）**：`MainWindow.xaml` 的 `InfoBar` 内容里一个「一键拉起托盘」按钮 → `TrayLink.EnsureTrayRunningAsync()`（UI 唯一允许的跨进程 `Process.Start`，且只起 Tray，禁令 1 不动）→ 成就地 `Overview.RefreshAsync()` 重握手 + 重读、不等下一个 2 s 周期，失败则文案落回「重试拉起托盘」并保留那句故障。进行中有反馈（§9）：按钮「拉起中…」+ 禁用，覆盖 500 ms + 3 s 的探活预算。可见判据是**够不够得着托盘**（有故障文案 **且** `_state is null`），不是"横幅开着"——内核崩溃时横幅也开着，那时托盘活得好好的，正确的动作是概览页那个内核开关（锁 `ShellTests.CoreCrashed_BannerShowsFault_ButNoRelaunchAction`）。轮询期间只做 `WaitUpAsync` 探活、绝不在轮询里 `Process.Start`。）
+UI 起来发现管道不存在（Tray 未运行或被杀）→ 顶部横幅说清"托盘宿主未运行 / 与托盘的连接中断：{真错误}"，内核控制一律置灰；**宽限一尽（连续 3 轮轮询失败 ≈ 6 s）界面自己退**——第六轮裁定 **R-22（同生死）** 把第五轮接上的「一键拉起托盘」按钮（R-21b）**撤掉**，用户 2026-10-28 的话：「没必要保留横幅，内核和 ui 应该一起」。落地口径：
+
+- **计数在哪**：`OverviewViewModel` 的 2 s 轮询里，握手回包为 null 或命令抛 `TrayCommandException` 各计一轮（`NoteLinkDown()`），任何一次说得上话就销账（`_linkDownRounds = 0`）。到 3 轮广播 `TrayLost`，`MainWindow` 订阅它调 `Close()`，由 UI 自己的「关窗即退」（`App.Closed → Exit()`）把进程带走。**轮询里绝不 `Process.Start`**（这条从第五轮起就没变）。
+- **为什么是 3 轮而不是当场退**：托盘可能只是自己重启（在线更新换核、崩一次又被用户拉起来），6 s 内回来就继续说话。锁 `OverviewTests.TrayRestarts_WithinGraceUiKeepsTalking` 钉住"宽限内回来就不退"，`ShellTests.TrayDiesMidSession_UiQuitsItself` 钉住"宽限一尽就退"。
+- **不许有的东西**：横幅里没有任何恢复按钮（判据 `ShellTests.NoRelaunchAffordance`——UIA 树里查不到 `RelaunchTrayButton` 才算）。够不着托盘时界面唯一该做的事是说明原因然后走掉；重新拉起托盘由用户重开应用完成（UI 冷启动的 `TrayLink.EnsureTrayRunningAsync()` 那条通路仍在，它是**起 UI 时**的探活，不是断连后的自救按钮）。
+- **反向边界（内核崩溃 ≠ 断连，一条都没放松）**：`core.state` 到 `Crashed` 时托盘活得好好的，横幅显示内核那句故障、界面**必须活着**让用户看见并复现。锁 `ShellTests.CoreCrashed_BannerShowsFault_ButUiStaysAlive_AndNoRelaunchAffordance`（9 s > 宽限后断言进程仍在）。
+- **退场时不做的三件事**：不 kill mihomo（§3 禁令 1）、不动系统代理载荷（R-20b：那条还原由下一次冷启动的 `CleanupIfStale` 按判据触发）、不写界面偏好。
 
 ### 4.2 mihomo REST 面（v1 用到的）
 
@@ -263,7 +273,7 @@ docs/superpowers/{specs,plans,checklists}/
 |---|---|---|
 | 内核启动失败 | controller 端口占用、yaml 语法错 | 内核输出环形缓冲（stdout+stderr），UI 展示 Go 原文**不翻译**；仅启动时自动重试一次，重试仍失败落 `Crashed` 并保留原因。**窗口分两档**：controller 未应答且进程还活着 = 仍在启动（下 geodata 属于这一档），宽限 120 s；controller 已应答而 mixed 不跟进 = 带病存活，仍 5 s 判死——见下面「启动窗口分档」 |
 | 状态失真 | mixed 端口被占但 controller 正常，内核活着却不通 | `Running` 判据 = `GET /version` 成功 **且** mixed 端口 TCP 可连；任一不符不进入 `Running`，横幅报"端口 7897 被占用" |
-| API 断连 | secret 不符、controller 未监听、Tray 掉线 | `MihomoClient` 透出真实状态码；UI 顶部横幅态 + 写操作按钮置灰；管道断开则提示一键重启 Tray |
+| API 断连 | secret 不符、controller 未监听、Tray 掉线 | `MihomoClient` 透出真实状态码；UI 顶部横幅态 + 写操作按钮置灰；**托盘够不着时界面自己退**（裁定 R-22，见 §3 同生死：连续 3 轮轮询失败 ≈ 6 s 宽限一尽即关窗退出，横幅里**不放**重启按钮） |
 | 系统代理残留 | UI/Tray 被强杀后注册表悬挂 | 三层：正常退出钩子必清；Tray 启动时校验"注册表代理指向本应用端口且探活失败"才清（指向其他软件的代理**绝不触碰**）；托盘"停止内核"顺带清 |
 | 系统代理**载荷**被我们覆盖 | `Enable()` 无条件写 `ProxyServer`/`ProxyOverride`，关掉开关并不换回去（R-20b，第四轮真机吃到） | 开启前把两键原值快照进 `settings.json` 的 `sys_proxy_backup`，关闭时**只在当前值仍等于我们写的那份**才还原（第三方在我们之后写过就不动，与 R-7c 同向）；强杀那条路由冷启动的 `CleanupIfStale` 返回值触发同一次还原 |
 | 订阅下载失败 | 网络/源站错误/非 yaml 响应 | 保留旧 `config.yaml` + 横幅报错；**永不清空配置** |
@@ -302,12 +312,12 @@ docs/superpowers/{specs,plans,checklists}/
 | 形态 | 目标 | 测量 | 实测（空壳，2026-10-26 / Task 2） |
 |---|---|---|---|
 | **Tray 空闲态**（没内核在跑：冷启动后、或内核已停） | Tray ≤ **40 MB** | `scripts/measure-residency.ps1`：`Get-Process` 采 `WorkingSet64` 与 `PrivateMemorySize64` 各 5 次取中位数 | Tray 空壳（self-contained 未 trim）WS **16.4 MB** / Private **4.6 MB**（三轮各取中位数：17.0 / 16.4 / 16.4）；trim 版 15.9 MB。**Task 17 满载产物**：空闲 31.4 / Private 7.2，连开 5 次管道会话后 37.4~37.8 ⇒ 在线内 |
-| **日常常驻（满载）**：Tray + mihomo 在跑（UI 已关） | **合计 ≤ 80 MB**（Tray 自身在这一格不设 40 线，见下面的裁定） | 同上，两个进程各采一次并求和 | Task 17 真内核 3 分钟 soak：Tray 49.8→51.5 / mihomo 26.1→26.5 ⇒ **合计 74.0~77.5 MB**，线内但只剩 2.5~6 MB 余量 |
-| UI 打开（Acrylic 档） | UI 进程 ≤ **220 MB**，Tray+内核+UI 合计 ≤ 260 MB | 同上，另记纯色档差值用于量化整窗 Acrylic 的成本 | Task 12 外壳（NavigationView + 空页，未上 Acrylic）WS **140.4 MB** / Private **86.5 MB**；Task 17 最坏档（节点页 30 行全落地 + 刚跑完全组测速）**180.0 / 104.9**，再轮询 20 s 回落 178.3 ⇒ 线内余量 40 MB |
+| **日常常驻（满载）**：Tray + mihomo 在跑（UI 已关） | **合计 ≤ 120 MB**（第六轮裁定 R-22c，由 80 放宽；Tray 自身在这一格不设 40 线，见下面的裁定） | 同上，两个进程各采一次并求和 | 桩节点（3 个 direct）74.0~77.5；**真实订阅**（25 anytls 节点 + 4 组 provider + 8.4 MB `geoip.metadb`，UI 已关、静置 3 分钟）**Tray 46.4 + mihomo 39.4 = 合计 85.8 MB** |
+| UI 打开（Acrylic 档） | UI 进程 ≤ **220 MB**，Tray+内核+UI 合计 ≤ **300 MB**（同上随 80→120 一起动，构造方式不变） | 同上，另记纯色档差值用于量化整窗 Acrylic 的成本 | Task 12 外壳（NavigationView + 空页，未上 Acrylic）WS **140.4 MB** / Private **86.5 MB**；Task 17 最坏档（节点页 30 行全落地 + 刚跑完全组测速）**180.0 / 104.9**，再轮询 20 s 回落 178.3 ⇒ 线内余量 40 MB |
 
 **判据口径的裁定（2026-10-27，用户批准"按空闲和满载拆两格执行"）**：原来那一行"日常常驻：Tray ≤ 40 MB，合计 ≤ 80 MB"把两种形态压在同一个 40 上，而 40 是 Task 2 在什么都没装的空壳（16.4 MB）上定的。Task 17 的归因数据说明这是**错位而不是严格**：顶穿 40 的驱动项是「内核在 Tray 里跑起来」（`core.start` 后、界面一个字节都没发的采样点 49.0 MB；连开 5 次管道会话只有 37.8，3 次连续界面会话 40.2~45.1），且 WS +17.6 而 Private 只 +5.2、`DOTNET_GCHardLimit=32MB` 实测一格没动 ⇒ 多出来的是映像共享页与已触碰未归还的页，**不是可裁掉的托管堆**（trim 路线另有实测判死，见本节末 Task 17 段④）。拆两格之后**一个数字都没放宽**：空闲那格仍按 40 判（实测 31.4 / 37.8，在线内），满载那格由本就在的合计线 80 判（实测 74.0~77.5）。UI 的 220 与三进程的 260 不动。
 
-数字原本是**待实测校准的初始线**（任务 0 探针先出空壳实测，若 WinUI 3 空壳常态即超线就回来改档默认值并记录，而不是悄悄放宽判据）——**Task 18 定稿**：三格全部有真机实测（Tray 空闲 31.4/37.8、满载合计 74.0~77.5、UI 最坏档 180.0），三条线一条没放宽；唯一动过的是**口径**（40 只管空闲态，见上面的裁定），且那次改动经用户批准。
+数字原本是**待实测校准的初始线**（任务 0 探针先出空壳实测，若 WinUI 3 空壳常态即超线就回来改档默认值并记录，而不是悄悄放宽判据）——**Task 18 定稿**：三格全部有真机实测（Tray 空闲 31.4/37.8、满载合计 74.0~77.5、UI 最坏档 180.0），三条线一条没放宽；唯一动过的是**口径**（40 只管空闲态，见上面的裁定），且那次改动经用户批准。**这句"一条没放宽"只到第四轮为止**：第六轮（2026-10-28）用真实订阅重采之后，满载那格的合计线由 80 **放宽到 120**（裁定 **R-22c**，用户批准，见本节末）；Tray 空闲 40 与 UI 220 两格至今未动。
 
 **Task 2 基线复现命令**（本机 .NET SDK 10.0.203，win-x64，Release）：
 
@@ -378,7 +388,16 @@ Stop-Process -Name ClashAcry.Tray   # 测完必须杀进程，否则污染后续
 
 ② **内核侧不是我们的账**：mihomo 自身从 26~27 MB 涨到 40.9 MB，多出来的是它自己的节点连接池与 geodata，我们一行代码都动不了——**80 这条线当初就没把真实订阅的规模算进去**；
 
-③ **本轮 Tray 的采样条件不干净**：这个 Tray 生命周期里跑了 `core.start`（含一次 45 s 的 geodata 下载）、几十轮握手与轮询、还带着界面连着开——按上面的口径，这一格本就该由合计线判，而合计线里 mihomo 那半是真实规模。**要做的收尾**：用户过完人工冒烟后，用「真订阅 + 内核在跑 + UI 已关 + 静置 3 分钟」重采一次，再裁定这条线是按真实规模重写（比如 Tray ≤60 / 合计 ≤120）还是先做 Tray 侧归因（§12 遗留④那三条：tooltip 泵每 2 s 读盘 + JSON、`StderrTail` 双拷贝、两条重定向流）。**没有把数字藏起来**：本节的表与裁定句保持原样，破线只写在这一段里。
+③ **本轮 Tray 的采样条件不干净**：这个 Tray 生命周期里跑了 `core.start`（含一次 45 s 的 geodata 下载）、几十轮握手与轮询、还带着界面连着开——按上面的口径，这一格本就该由合计线判，而合计线里 mihomo 那半是真实规模。
+
+**这条线第六轮已裁定（R-22c，2026-10-28，用户一句话「放宽」）**。裁定前先把 §10 上面欠的那次干净采样补上，口径就是当时写下的**真订阅 + 内核在跑 + UI 已关 + 静置 3 分钟**：
+
+| 采样点 | Tray WS/Private | mihomo WS/Private | 合计 WS |
+|---|---|---|---|
+| 发布产物冷启动 Tray → `core.start` 成功（真订阅：`星网-Starnetwork` 等 4 个 provider，`Load MMDB file: geoip.metadb` 8.4 MB）→ 静置 3 min（全程无 UI 进程） | **46.4 / 11.2** | **39.4 / 70.5** | **85.8** |
+
+**结论与线的位置**：合计线由 **80 放宽到 120**，三进程（含 UI）线由 260 同比例放宽到 300（构造方式没变：满载线 + UI 的 220 线取整）。取 120 的理由按数字而不是按"想宽松"：① 上面那格 85.8 是这一格的**干净口径**，线内余量 34 MB；② 已观测到的最坏档是第三轮那次带 UI 会话的 **104.7**（Tray 63.8 + mihomo 40.9），120 给它留 ~15% 余量而不是留零；③ **mihomo 那半本来就不归我们裁**——真实规模下它自己从 26 MB 涨到 39~41 MB（节点连接池 + geodata），80 这条线从写下那天起就只覆盖过 3 个 `type: direct` 桩节点的规模，把它读成"我们超标"是错位。三格里的另两格**一格没动**：Tray 空闲 ≤ 40（本轮冷启动仍读 33.4 一档）、UI ≤ 220（最坏档 180.0）。
+**没有把数字藏起来**：80 的原表行、原裁定句与本节上面那三段归因全部保留，只在表格与这里写明"由 80 放宽到 120、经用户批准、理由是真实订阅规模"。Tray 侧那三条可动的实现（§12 遗留④：tooltip 泵每 2 s 读盘 + JSON、`StderrTail` 双拷贝、两条重定向流）**仍是待做的归因实验**——放宽线不等于那条账销了，只是不再拿桩规模的线去判真订阅的形态。
 
 同批自测过的非开销项（都算清单第 3/4 条的脚本半程）：`handshake` 回 `state:"Running"` 且 `secret` 只在 handshake 回包里（`settings.get` 回包实测三字段、无 secret、无 `core_path`）；`sub.import` 两条通路（loopback HTTP URL 与本地 path）都回 `config_file`、原件按哈希落 `imports\`、**源 yaml mtime 与字节数逐字未变**；`/version` 无 token **401**、带 token **200** 回 `v1.19.33`；`/proxies/t1..t3/delay` 三条 200（72/62/60 ms）；HKCU 代理三值全程未动（`0` / `127.0.0.1:8090` / `localhost;127.*;<local>`，与清单第 0 条抄下的原值一致）。
 
@@ -413,6 +432,10 @@ Stop-Process -Name ClashAcry.Tray   # 测完必须杀进程，否则污染后续
 > **合并实况（2026-10-27）**：v1 已进 `main`，合并提交 `2b21483`（`--no-ff`，树内容与修复轮末位提交 `ca7bf8c` 完全相同），合并前在 main 的树上重跑三件套全绿。仓库上从未开过 PR（匿名 API `pulls?state=all` 返空），所以这一步走的是 git 而非 `gh`；远端分支 `feat/clashacry-v1` 保留未删。过程细节与「为什么没装 gh」记在计划 Task 18 Step 4。
 >
 > **真订阅轮（2026-10-27 第三轮，同批实测）**：用户拿真机场 URL 报"导入失败 403"，挖出三条假夹具测不到的缺陷（UA 准入与空模板、`mixed-port` 透传、geodata 首下被探活窗口掐死），全部修 + 上锁，基线抬到 **Core 159/159、UI 28/28、构建 0 警告**。三条的细节分别记在 §12 ⑥、§12 ⑦ + §7、§9「启动窗口分档」；冒烟侧的观感与等待时长记在清单第 3/4 条。**假夹具的盲区样本再补一条**：`SubscriptionImportTests` 十条与 `ConfigInjectorTests` 全部用"我们自己写的 yaml + WireMock 随意回的 200"，所以"200 但零节点"和"订阅自带端口"这两种**真面板才会造出来的形状**一次都没暴露过。
+>
+> **同生死轮（2026-10-28 第六轮）**：基线 **Core 168/168、UI 33/33、构建 0 警告 0 错误**，UI 五组改成 Shell 7 / Backdrop 4 / Overview 10 / ProxiesNoJitter 5 / **ChromeContrast 7**（上面那句"后者 6 条"到此作废）。
+> 本轮两条测试纪律值得单列：① **RED 抽验做法升级**——实现做完后把修复摘掉再跑一遍对应锁（`Overview.TrayLost += () => Close();` 注释掉 ⇒ 两条"该退"的锁各红 25 s、对照组"不该退"那条仍绿；`ErrorText` 退回单格 ⇒ 崩溃原因持久化那条红 10 s），比"先写先红"的记忆更可靠，且**对照组必须一起跑**，否则锁可能是空的；
+> ② **鼠标输入/像素取样这两类用例在本机有抖动**：本轮第一次全量 UI 跑出 2 红（其一为 `RevealScrollBar` 真滚轮 12 轮没展开），原样重跑第二次 33/33 全绿——判据与阈值一个字没改，处置是"红一次不足以判失败、必须复跑确认；连续两次同一点位红才是真问题"，另记一条工具教训：**别用 `tail` 截掉失败清单**（第一次跑另一条红的名子就这么丢了）。
 
 
 ## 12. 风险与开放问题
@@ -422,10 +445,11 @@ Stop-Process -Name ClashAcry.Tray   # 测完必须杀进程，否则污染后续
 - **provider 成员与延迟端点——已有真机答案（v1.19.33，不再是风险项）**：`GET /proxies` 顶层表**不含** provider 成员（仅组 `all` 与 `GET /providers/proxies` 的 `proxies` 列表含之）；`GET /proxies/{成员名}/delay` 对成员**404**。据此 §4.2 已把"测 provider 成员延迟走 providers 详情 / 拿不到样本显示'上次'并标注"从兜底升级为既定实现要求。
 - **mixed 端口被占时内核"带病存活"**（v1.19.33 实测，详见 §4.2 末段）：进程不退出、controller 全功能应答、仅 stdout 一行 `level=error` bind 失败；`Running` 判据必须双探活（controller + mixed 端口 TCP），与计划 Task 8 一致。另实测内核 Go 日志写在 **stdout**（stderr 恒空），`CoreManager` 的 stderr 环应同时采集两个流。
 - **mihomo 跨版本 REST 漂移**：契约以 §4.2 + 源码为准，冒烟清单兜底。
-- **横幅的"一键拉起/重启 Tray"尚未接（Task 14 记账；**2026-10-28 第五轮已接，裁定 R-21b，落地口径见 §3 与本节末**）**：现在横幅只说"托盘宿主未运行"，界面随即把所有内核控制置灰；用户想让界面重新连上，得自己启动 `ClashAcry.Tray.exe` 或重开 UI。补法已想清楚但不属 v1 最小闭环：横幅加一个按钮 → `EnsureTrayRunningAsync()` + 重新握手 + 清故障（故障文案按"第一条说话"，恢复靠一次成功轮询把它清空）。同批遗留：`PipeClient` 重连后 `_pending` 仍跨连接共享。
+- **横幅的"一键拉起/重启 Tray"：第五轮接上（R-21b）、**第六轮撤销（R-22，同生死，见 §3 与 §4.1 末）**——不要再把它接回来。这条的完整历史：Task 14 记账时缺按钮 → 第五轮补按钮 + 「拉起中…」反馈 → 用户实测后判定"横幅不该保留，内核和 ui 应该一起"，于是改成"宽限 3 轮 ≈ 6 s 说不上话就界面自己退"，按钮与 `MainWindow` 里的 `NeedsRelaunch`/`OnRelaunchTrayClick` 一并删除。** 同批遗留：`PipeClient` 重连后 `_pending` 仍跨连接共享。
   **界面侧"断开后不会自动重连"这条已在合并前评审修复轮解决**（2026-10-27）：`RefreshAsync` 的失败分支现在调 `TrayLink.InvalidateHandshake()`，缓存握手一作废，下一轮（2 s）就走"探活 → 重新握手"，Tray 死过又起来时版本号与 controller 地址都会重新读回来；回归锁 `OverviewTests.TrayRestarts_UIReHandshakes_AndReadsTheNewVersion`。按钮侧同批修掉一条：`core.update` 在飞时连接断掉，回帧与结果广播一起丢，`_updatePct` 若不在失败分支复位就是「更新内核 37%」挂到进程重启（锁 `UpdateInterruptedByTrayDeath_TextDoesNotStallAtPercent`）。
 - **评审修复轮记下但未动的四条（v1.1 账上，均不阻塞合并）**：
   ① `measure-residency.ps1` 按 `-ProcessName mihomo` 取进程，**不限定路径**——本机现在就有 `verge-mihomo.exe` 在跑，脚本会心平气和地量到别家内核的内存数（AGENTS 红线的另一面）。修法很小：按 `Path -like "$env:LOCALAPPDATA\ClashAcry\*"` 过滤或收 `-Pid`。
+  **订正（第六轮实测，2026-10-28）**：这条的**机制**写错了——`Get-Process -Name` 是精确名匹配，本机只有 `verge-mihomo` 在跑时 `-ProcessName mihomo` 直接抛「找不到名为 mihomo 的进程」（实测复现），量不到别家。真实存在的洞是那句「不限定路径」：名字恰也叫 `mihomo` 的第三方内核会被当我们的取走；更要紧的是**自家两颗同名内核同时在跑**（§12 记的孤儿内核 + 新起那颗）时，旧脚本 `$p` 拿到数组、静默量错那颗，中位数跟着失真。修法与裁定不变，只是判据按「路径 + 命中数恰好 1」，不是按名字。
   ② `--reset-prefs` 走 `UiPrefs.Reset()` = `Values.Clear()`，会把开发者自己存的界面偏好整份抹掉，测试侧无人还原。应收窄到测试读写的那两个键。
   ③ `PipeServer`：`AcceptLoop` 的 `using var linked` 在循环因产线故障抛出而死时，会把令牌 dispose 给还在跑的 `Pump`（`ObjectDisposedException` 不在它的 catch 过滤器里 → 未观察的任务异常）；`DrainAsync` 的裸 `catch` 只停写半边、连接仍留在 `_clients` 里。两条都是窄窗口的控制通道退化，不是常态路径。
   ④ 三条宿主生命周期侧的宽限期缺失：`CoreManager.KillProcess` 的 `WaitForExitAsync()` 无超时（卡住的 mihomo 会楔死 `StopAsync`/退出钩子，5 s 预算后硬杀 → 孤儿内核 + 代理留在开启态）；`SubscriptionImport.ImportFromUrl` 是 sync-over-async + 无上限 `ReadToEnd` 且 `ct=default`（慢发订阅源能把它拖过 `HttpClient.Timeout`）；`TrayHost` 托盘分支的 `MessageLoop` 返回后不跑 `ShutdownAsync`（只有 `--no-tray` 分支跑）。
@@ -452,13 +476,20 @@ Stop-Process -Name ClashAcry.Tray   # 测完必须杀进程，否则污染后续
   ⑦ **注入必须无条件覆盖 `mixed-port`**（§7 已改）：真订阅第一行就是 `mixed-port: 7890`，旧的"有端口键就不补"让内核听 7890，而系统代理与双探活用设置里的 7897 → 界面全绿、流量全断。锁 `Inject_ForcesMixedPort_EvenWhenSubscriptionShipsOne`；真机旁证是起核后 `GET /configs` 回 `mixed-port: 7897`。**遗留同族**：订阅若写了 `port: 7897` 或 `socks-port: 7897`（撞我们那个 mixed 端口），mihomo 先绑走、mixed 绑不上 ⇒ 回到"带病存活"档，5 s 判死。v1 不去猜、不改用户的端口键，撞上了由 §9 的②档文案指出来。
   ⑧ **geodata 首下**：见 §9「启动窗口分档」——分档修掉了"我们把下载掐死"，但**冷装 + 带 `GEOIP` 规则**的首次启动仍要等一次 8.4 MB 的 `geoip.metadb`（本机 ~45 s，且源站不稳：实测也出现过 90 s 超时 fatal）。v1.1 候选是把 `geoip.metadb` / `geosite.dat` 随包分发并在起核前种进 `runtime\`（与 `BUNDLED.txt` 同一套溯源口径），代价是 zip 再加 ~10 MB。
 - **托盘退出轮暴露的两条（2026-10-27 第四轮人工冒烟）**：
-  ⑨ **托盘「退出」后界面窗口还留在屏幕上（已修，裁定 R-20a，见 §3 反向语义）**：退出钩子原本只做「摘图标 → 关代理 → 停内核 → 关管道」，界面于是停在"宿主没了但我还开着"的形态——横幅 `与托盘的连接中断：Pipe is broken.`、控制全置灰、节点列表还显示上一世的「442 ms」。修法是在停内核之后遍历 `ClashAcry.UI` 进程调 `CloseMainWindow()`（**不 Kill**），由 UI 自己的「关窗即退」收尾；机制对真窗口实测：`MainWindowHandle=592352`、`CloseMainWindow()` 回 `True`、3 s 内进程消失。这条没有回归锁——`TrayHost.ShutdownAsync` 以 `Environment.Exit` 结尾、且要真托盘菜单才可达，单元侧无法在不掏空 TrayHost 的前提下钉住，以真机实测代替（同 §3 的 WinExe 退出路实测同一口径）。**仍然留着的相邻形态**：Tray 被强杀/崩溃时界面照旧活着显示断连横幅——那一条的出路是 §12 早就记过的「横幅一键拉起 Tray」按钮，**第五轮已接（裁定 R-21b，见下）**。
+  ⑨ **托盘「退出」后界面窗口还留在屏幕上（已修，裁定 R-20a，见 §3 反向语义）**：退出钩子原本只做「摘图标 → 关代理 → 停内核 → 关管道」，界面于是停在"宿主没了但我还开着"的形态——横幅 `与托盘的连接中断：Pipe is broken.`、控制全置灰、节点列表还显示上一世的「442 ms」。修法是在停内核之后遍历 `ClashAcry.UI` 进程调 `CloseMainWindow()`（**不 Kill**），由 UI 自己的「关窗即退」收尾；机制对真窗口实测：`MainWindowHandle=592352`、`CloseMainWindow()` 回 `True`、3 s 内进程消失。这条没有回归锁——`TrayHost.ShutdownAsync` 以 `Environment.Exit` 结尾、且要真托盘菜单才可达，单元侧无法在不掏空 TrayHost 的前提下钉住，以真机实测代替（同 §3 的 WinExe 退出路实测同一口径）。**相邻形态已在第六轮闭合（裁定 R-22 同生死，见 §3）**：Tray 被强杀/崩溃时界面原本照旧活着显示断连横幅，第五轮给它的出路是「一键拉起 Tray」按钮（R-21b），第六轮按用户判定撤销、改成宽限一尽界面自己退。与 ⑨ 不同，这一条**有回归锁**（退的那半在 UI 侧，夹具 FakeTray 可停可杀）：`ShellTests.TrayDiesMidSession_UiQuitsItself`、`TrayAbsent_BannerSaysWhy_ThenUiQuitsItself`、`CoreCrashed_BannerShowsFault_ButUiStaysAlive_AndNoRelaunchAffordance`，加真机一次（发布产物里硬杀 Tray ⇒ UI 12 s 内消失）。
   ⑩ **`sysproxy.set(true)` 会覆盖别人写的 `ProxyServer` / `ProxyOverride`（本轮真机吃到，已修：R-20b）**：`SystemProxy.Enable` 无条件写这两键（I-3 只调整了写序，没做快照），`Disable` 依 R-7c 只翻 `ProxyEnable`、不碰载荷。这条**不是暗坑**——清单第 0 条的原话就是「过完第 5 条就回不去了，先把三值抄下来」，并据此要求人工先备份。第四轮实测确认它真的发生了：基线 `ProxyServer=127.0.0.1:8090` / `ProxyOverride=localhost;127.*;<local>`（clash-verge 留下的）变成 `127.0.0.1:7897` / `localhost,127.0.0.1,<local>`，托盘退出的清理链不会把它换回去（`ProxyEnable` 回了 0，流量没被劫走，但那两键回不去）。
   **修法（已落地）**：`Enable` 前 `SystemProxy.Capture()` 取两键原值 → 存进 `settings.json` 的 `sys_proxy_backup`（§4.3；Tray 独占写，符合两棵真相树；不进 `settings.get` 回包）→ `Disable` 调 `Restore(backup, ourServer, ourBypass)`，**判据是当前 `ProxyServer` 仍等于我们写的那份**（不是判 `ProxyEnable`：第三方可以在我们开着时改地址而不动开关）；不成立就一条都不写、快照留着，方向与 R-7c 一致——宁可漏还，不反向抹别人。还原语义含"原本不存在 ⇒ 删除该值"，不写空串（R-7b 同口径）。三条建档/销账规矩：① 只在当前值**不是**我们自己的串时建档，否则「开→还原失败→再开」会把自己写成"原值"、真原值永久丢失（锁 `SysProxy_EnableTwice_KeepsTheTrueOriginal_NotOurOwnLeftover`）；② 冷启动的悬挂清理也触发还原——强杀没有退出钩子，那是唯一还能还的时机，所以 `CleanupIfStale` 改成返回"是否真清掉了我们那条"，返回假绝不碰快照（锁 `CleanupIfStale_ReportsWhetherItCleanedOurOwnLeftover`）；③ 还原成功才销凭证（锁 `SysProxy_EnableThenDisable_RestoresTheForeignProxyServer`）。
   **本机的现值已手工改回基线**（`ProxyEnable=0` / `ProxyServer=127.0.0.1:8090` / `ProxyOverride=localhost;127.*;<local>`，用户指令「开始吧」）：旧产物没留快照，新代码无从代劳。**「停止内核」这条路径不还原**——它只翻开关（`CoreManager.Stop` → `CleanupIfStale`），载荷留在盘上等下一次 `sysproxy.set(false)` 或冷启动清理，避免"关了代理又开内核"时地址已被换掉。
 - **第五轮（2026-10-28）把 v1.1 账上的两条一起收掉**：⑤「内核版本恒未知」（裁定 **R-21a**，三层修法见上）与横幅「一键拉起 Tray」按钮（裁定 **R-21b**，§3 已回写落地口径）。
   按钮这一条的三条判据值得单独记：① **只走既有通路**——点击处理调的就是外壳启动时那句 `EnsureTrayRunningAsync()`，UI 依旧不起内核（禁令 1），新增的只是"让用户按一下"这个入口；② **可见判据取"够不够得着托盘"而非"横幅开没开"**，`ErrorText` 非空 **且** `_state is null` 才露面——内核崩溃（托盘健在）时横幅同样开着，给一个「拉起托盘」是把人往错的方向推，这条用 `ShellTests.CoreCrashed_BannerShowsFault_ButNoRelaunchAction` 钉住（红证：把判据退化成"横幅开着就显示"，该用例当场变红）；③ **测试里绝不真按这个按钮**——`Process.Start` 会拉起真 `ClashAcry.Tray.exe` 抢生产管名，所以两条 UIA 锁都只读存在性/`IsOffscreen`，点击后的链路由 `--tray-absent` 的可见性 + 真机冒烟覆盖（回归锁 `TrayAbsent_BannerOffersOneClickRelaunch`）。
   本轮回归锁合计 6 条新增（Core 2 / UI 4：`OverviewTests` 2 条 + `ShellTests` 2 条），Core 168、UI 32 全绿。
+- **第六轮（2026-10-28）三件事：同生死（R-22）、横幅拆成两格（R-22b）、满载线按真实规模重写（R-22c，用户拍板「放宽」）**。
+  ① **R-22 撤按钮改同生死**：落地口径见 §3 与 §4.1 末。撤掉的是 `MainWindow.xaml` 里那段 `StackPanel` + `RelaunchTrayButton` 与 code-behind 的 `NeedsRelaunch`/`_relaunchBusy`/`OnRelaunchTrayClick`；加的是 `OverviewViewModel.TrayLost` 事件（连续 3 轮轮询失败）+ `MainWindow` 里 `Overview.TrayLost += () => Close()`。判据正反各钉住：宽限内托盘回来就不退（`TrayRestarts_WithinGraceUiKeepsTalking`）、宽限一尽必退（`TrayDiesMidSession_UiQuitsItself`、`--tray-absent` 那条冷启动形态）、内核崩溃时不许退（`CoreCrashed_BannerShowsFault_ButUiStaysAlive_AndNoRelaunchAffordance`）。**一条连带清账**：第五轮的 R-21b 只活了轮次之隔就被撤销，`ShellTests` 里它那两条锁（`TrayAbsent_ShowsBanner` / `TrayAbsent_BannerOffersOneClickRelaunch`）删除，判据合并进新的三条。
+  ② **R-22b 真机自测撞出来的回归**（不是本轮原计划，是撤按钮过程中在发布产物上读到的）：第五轮 R-21a 让「每条 `core.state` 事件都作废缓存握手」，于是**内核崩溃那句原因只活一个轮询周期**——下一次 2 s 轮询握手成功，故障格被清空，用户看到的是一闪而过的横幅。修法是把横幅拆成两格：`_errorText`（连接故障，一次成功轮询即销账）与 `_coreFault`（内核故障，只有 `core.state` 离开 `Crashed` 才销账），`ErrorText => _errorText.Length > 0 ? _errorText : _coreFault`——**连接优先**，因为够不着托盘时那句内核原因谁也读不到。锁 `OverviewTests.CoreCrashFault_StaysReadable_UntilCoreStateMoves`（先红：`Assert.NotNull` 拿到 null——InfoBar 一关整格就从 UIA 树里消失，判据改成"元素还在且仍带着『配置解析失败』"才有表达力）。
+  ③ **R-22c 满载线**：见 §10 末「真实订阅 + UI 已关」那格，Tray ≤ 40（空闲）/ 合计线由 80 **放宽到 120**，判据口径与理由一并写明。
+  ④ **测量脚本只认自家进程的缺陷同轮闭合（v1.1 账上第①条）**：`measure-residency.ps1` 原本只按进程名取、完全不看路径（机制订正见上条 ①——`Get-Process -Name mihomo` 打不到 `verge-mihomo`，它会抛；被打到的是**同名**别家内核或自家多颗）；现在默认只认 `%LOCALAPPDATA%\ClashAcry\*` 与仓库根 `\*` 两处，命中数不是恰好 1 就当场失败并列出被排除的路径。另修一处静默恒假的嵌套 `Where-Object`（内层 `$_` 是模式串，进程对象先落 `$proc`）。**PowerShell 5.1 的编码坑记一笔**：含中文的 `.ps1` 必须带 UTF-8 **BOM**，无 BOM 时被按 ANSI 读，`-f` 格式化直接报「格式字符串无效」。
+  本轮回归锁：UI 侧 +4 / −3（净 +1，33 条：新增同生死 3 条 + 故障横幅像素 1 条，删除"横幅还活着/带按钮"3 条），Core 侧 0（168 条不变）。
+- **强杀 Tray 留下的孤儿内核无人认领（第六轮同生死暴露，v1.1 候选）**：`ShutdownAsync` 会 `Core.StopAsync`，所以菜单「退出」不留孤儿；但任务管理器强杀 / Tray 崩溃后那颗 `%LOCALAPPDATA%\ClashAcry\core\mihomo.exe` 继续占着 9097/7897，而新 Tray 的 `CoreManager.AttemptStart` 占用预检（CoreManager.cs:129）只拒绝、不认领 ⇒ 用户点「启动内核」永远得 `controller 端口 9097 已被其他进程占用`，手动出路是结束那颗进程或重启机器。候选修法（**归 Tray，不违反 §3 禁令 1**：杀内核恰恰是 Tray 的职权）：Tray 冷启动时若 `Process.GetProcessesByName("mihomo")` 里存在 `Path == _paths.CoreExecutable` 的那颗（**按完整路径认，别按进程名**——本机常驻的 `verge-mihomo` 与任何改名内核都不是我们的，§9 的"绝不触碰别家"同一条纪律），结束它并记一次 `SpawnCount` 之外的"认领"事件，让下一次 `core.start` 走干净路径。没在本轮做的原因：它需要一条真进程夹具，而当前 Core.Tests 的进程侧断言只有 `DisposeAsync_KillsCoreAndLeavesStopped` 那一类，不该为它临时造一套半真半假的杀进程测试。
 - **secret 落盘明文**（同用户可读）：自用容忍；管道 ACL 限当前用户 SID，`handshake` 之外不向其他进程暴露。
 - **yaml 保真度（Task 5 已实测结案，不再是待探针项）**：YamlDotNet 18.1.0 的 `YamlStream`/DOM 通路**保留全部字段值与键序、保留 block/flow 风格与用户锚点别名**（`&x`、`*x`、`<<:`），但**不保留注释**（DOM 不承载 comment token），且会出现三类无害漂移：block 序列压平到父键同列、flow 节点内部空白归一、文档尾部多一行 `...`。因此 v1 的公开承诺只有“不认识的原样透传、只做顶层必需键覆盖、用户手写原件永不被改写”，**UI 文案与导入说明不得声称保留注释或原始格式**；如日后要真保注释，需换库并另立任务。另：`YamlStream.Save` 必须显式 `assignAnchors: false`，否则会给内容重复的节点自动发随机锚点，产物里长出用户没写过的 `&203281033`。
 

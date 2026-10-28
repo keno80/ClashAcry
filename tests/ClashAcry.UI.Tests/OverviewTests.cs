@@ -84,15 +84,17 @@ public class OverviewTests : IClassFixture<UiAppHarness>
         await WaitUntilAsync(() => Text(s, "UpdateButton").Contains("%"), 5);
 
         await tray.DisposeAsync();
-        await WaitUntilAsync(() => Text(s, "UpdateButton") == "更新内核", 10);
+        // 5 s 而不是 10 s：托盘死透后界面在宽限（3 轮 ≈6 s）一尽会自行退出（第六轮裁定），
+        // 等到十秒就是拿一个已经关掉的窗口读按钮文案。复位本身发生在失败的那一轮，约 2 s。
+        await WaitUntilAsync(() => Text(s, "UpdateButton") == "更新内核", 5);
         Assert.Contains("更新内核", Text(s, "UpdateButton"));
     }
 
     [Fact]
-    public async Task TrayRestarts_UIReHandshakes_AndReadsTheNewVersion()
+    public async Task TrayRestarts_WithinGraceUiKeepsTalking()
     {
-        // 合并前评审 Important 3：RefreshAsync 用缓存的 LastHandshake 短路，而它只在 HandshakeAsync 里被清；
-        // 失败不复位 = Tray 重启后界面永远拿着上一世的版本号与 controller 地址。
+        // 断连即退（第六轮裁定）的**反面**判据：宽限是给"托盘重启得快"留的，不是摆设。
+        // 真机上托盘重启（更新内核、用户手动重开）几秒内就能续上，界面不该把这一次也当成永别。
         var first = await FakeTray.StartAsync();
         using var s = _harness.Launch("--reset-prefs");
         Assert.True(await first.WaitUiConnectedAsync(TimeSpan.FromSeconds(10)));
@@ -104,6 +106,7 @@ public class OverviewTests : IClassFixture<UiAppHarness>
         second.Handshake = second.Handshake with { CoreVersion = "v-second" };
         Assert.True(await second.WaitUiConnectedAsync(TimeSpan.FromSeconds(10)), "界面没重连上新的托盘");
         await WaitUntilAsync(() => Text(s, "CoreVersionLabel") == "v-second", 15);
+        Assert.False(s.Process.HasExited, "托盘在宽限内就回来了，界面不该退");
         await second.DisposeAsync();
     }
 
@@ -209,13 +212,34 @@ public class OverviewTests : IClassFixture<UiAppHarness>
     }
 
     [Fact]
-    public void TrayAbsent_CoreToggleDisabled_AndBannerShown()
+    public async Task CoreCrashFault_StaysReadable_UntilCoreStateMoves()
     {
-        // Task 12 欠下的那半条（R-12h）：那时还没有内核开关，只能断言横幅。现在补齐判据。
-        using var s = _harness.Launch("--tray-absent", "--reset-prefs");
-        Assert.Contains("托盘宿主未运行", Text(s, "BannerText"));
-        Assert.False(s.Require("CoreToggle").IsEnabled);               // 控制不了的东西不许做出"能控制"的样子
-        Assert.Equal("不可用", Text(s, "CoreStateLabel"));
+        // 第五轮为「版本号那一格」给 core.state 事件加了 _link.InvalidateHandshake()，副作用是把崩溃那句
+        // 原因压成一次闪光：连接一直好着 ⇒ 下一轮 RefreshAsync 走到 SetFault("")，「配置解析失败」约 2 s 就没。
+        // 用户读到的是"界面闪了一下然后一切正常"，而内核其实起不来了。
+        // 判据分两格：横幅的**连接**故障照旧由轮询恢复来收；**内核**故障那句话留到状态离开 Crashed。
+        await using var tray = await FakeTray.StartAsync();
+        using var s = _harness.Launch("--reset-prefs");
+        Assert.True(await tray.WaitUiConnectedAsync(TimeSpan.FromSeconds(10)), "界面没连上假 Tray");
+        await ReadyAsync(s);
+
+        tray.Emit(EventTypes.CoreStateChanged,
+            new CoreStateChanged(CoreState.Crashed, "配置解析失败：proxies 缺失", Array.Empty<string>()));
+        await WaitUntilAsync(() => Text(s, "BannerText").Contains("配置解析失败"), 10);
+
+        await Task.Delay(6000);                                     // 跨过三个轮询周期：托盘一直说得上话
+        Assert.False(s.Process.HasExited, "内核崩了但托盘还在，界面不该把自己关掉");
+        var still = s.Window.FindFirstDescendant(cf => cf.ByAutomationId("BannerText"));
+        Assert.True(still is not null && still.Name.Contains("配置解析失败"),
+            "内核故障那句原因被成功的轮询抹掉了（横幅整条收起）——用户只看到界面闪了一下，内核其实起不来");
+
+        tray.Emit(EventTypes.CoreStateChanged, new CoreStateChanged(CoreState.Running, null, Array.Empty<string>()));
+        await WaitUntilAsync(() =>
+        {
+            var b = s.Window.FindFirstDescendant(cf => cf.ByAutomationId("Banner"));
+            return b is null || b.IsOffscreen;                      // 状态一动（Crashed → Running）那句话就销账
+        }, 10);
+        Assert.Equal("运行中", Text(s, "CoreStateLabel"));
     }
 
     /// <summary>

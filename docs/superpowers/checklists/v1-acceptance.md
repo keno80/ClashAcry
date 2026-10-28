@@ -28,17 +28,19 @@
 **版本与拉起轮（2026-10-28 第五轮，收掉 v1.1 账上两条，agent 侧自测）**：⑤「概览页内核版本冷装后恒显示"未知"」按裁定 **R-21a** 修好——
 Tray 在 `core.start`（含 `core.reload` 的"没在跑就起"那条）成功后回读一次 `/version` 写进 `settings.core_version`，读失败保持原值且绝不抛成错误帧；
 界面侧补了两层，缺任一层都仍是恒未知：`core.state` 事件一到就作废缓存握手，以及「Running 却没版本号」那份握手不留缓存、下一轮重问。
-「横幅一键拉起 Tray」按裁定 **R-21b** 接上：横幅里一个按钮走 `EnsureTrayRunningAsync()`，进行中「拉起中…」+ 禁用，成功后立刻重握手收横幅。
-测试基线抬到 **Core 168 / UI 32**（新增 6 条锁），构建仍 0 警告 0 错误。**产物已再次重打包**，第 4 条与第 12 条之后的两格新判据见下：
+同轮按裁定 **R-21b** 接上的「横幅一键拉起 Tray」按钮，**第六轮已撤销**（裁定 **R-22 同生死**，见下）。
+第五轮测试基线 **Core 168 / UI 32**（新增 6 条锁）。
 
-- **第 4 条加一格判据（版本）**：内核起来后，概览页「内核版本」那一格应在**一次轮询（≤2 s）内**从「未知」变成真 tag（本机是 `v1.19.33`），
-  且**停止再启动**一次后仍然显示真 tag（不是一次性的）。停在「未知」就是 R-21a 没打通，把那次的现象记下来。
-- **第 12 条之后加一格（拉起）**：托盘「退出」后界面窗口现在会一起消失（R-20a），所以这一格要另开路径复现断连——
-  **硬杀 Tray**（`powershell -Command "Get-Process ClashAcry.Tray | Stop-Process -Force"`，界面活着、横幅念断连），
-  然后点横幅上的「一键拉起托盘」：应显示「拉起中…」并禁用，几秒内横幅收起、内核状态回「未运行」、控制重新可用；
-  拉不起来时按钮文案落「重试拉起托盘」、故障那句不重述。
-  **UI.Tests 里不点这个按钮**（`Process.Start` 会拉起真 Tray 抢生产管名），所以点击后的链路只有这一条人工判据。
-  顺带按第 11 条的口径眼过这个新位置的按钮 chrome：它落在 `InfoBar` 的黄色面里，与内容区的卡片不是同一层底——浅/深两档各看一眼，判据仍是像素而不是肉眼看图。
+**同生死轮（2026-10-28 第六轮，用户拍板「没必要保留横幅，内核和 ui 应该一起」）**：横幅里的按钮没了，代之以**够不着托盘且宽限（连续 3 轮轮询 ≈ 6 s）用尽 ⇒ 界面自己关窗退出**；内核崩溃（`Crashed`）不算断连，那时托盘还在，界面必须活着把原因说完。
+同轮把横幅拆成两格（裁定 **R-22b**）：连接故障一次成功轮询即销账，内核故障只在 `core.state` 离开 `Crashed` 时销账——第五轮那条"每个事件都作废握手"曾把崩溃原因压成一闪而过。测试基线 **Core 168 / UI 33**（加 4 删 3，净 +1），构建 0 警告 0 错误，**产物已按第六轮代码重打包**（`artifacts/publish/ClashAcry-v0.1.0-win-x64.zip`）。
+
+- **第 4 条那一格（版本）本轮已由 agent 在发布产物上自测**：真 Tray + 真内核起来后 `CoreVersionLabel` UIA 读到 `v1.19.33`，`core.stop` → `core.start` 之后**仍是** `v1.19.33`（不是一次性的）。人工复核顺手看一眼即可，不必再当未验项。
+- **第 12 条之后那一格改成「同生死」（替换第五轮的"拉起"判据，按钮已不存在）**：先起界面并让内核跑着，然后硬杀托盘
+  `powershell -Command "Get-Process ClashAcry.Tray | Stop-Process -Force"` → **界面窗口应在约 6~12 s 内自己消失**（横幅先念一句断连，宽限一尽就退）。
+  还留着一扇"宿主没了但我还开着"的窗 = R-22 没生效。**代价要认**：这条路径会留下**孤儿 mihomo**（实测杀 Tray 后它仍占着 9097/7897），
+  之后重开托盘再点「启动内核」会得 `controller 端口 9097 已被其他进程占用` 并落 `Crashed`——出路是结束那颗 `mihomo.exe`（或重启机器）；
+  走**托盘菜单「退出」**那条优雅路径则不留孤儿（`ShutdownAsync` 里有 `Core.StopAsync`）。
+- **横幅那格不再有点按钮这回事**，第五轮那句「眼过新位置的按钮 chrome / 浅深两档各看一眼」作废；故障横幅的深色判据已改成自动化像素断言（`ChromeContrastTests.DarkChrome_Banner_FaultSurfaceIsDark_WithLightText`，实测 `InfoBar` 面 P25=67、文字 max=255、跨度 188，并有浅色档反例证明判据有区分力），人工只需按第 11 条顺带看一眼横幅在深色下读不读得清。
 
 环境前提（AGENTS.md）：本机 .NET 10 SDK 在 `%LOCALAPPDATA%\Microsoft\dotnet`，Git Bash 里先
 `export PATH=/c/Users/Keno/AppData/Local/Microsoft/dotnet:$PATH`，否则 `dotnet` 会报 "No .NET SDKs were found"。
@@ -64,13 +66,13 @@ Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Setti
 
 ```bash
 dotnet build ClashAcry.sln -c Release              # 期望：0 警告 0 错误
-dotnet test  tests/ClashAcry.Core.Tests -c Release # 期望：159/159
-dotnet test  tests/ClashAcry.UI.Tests  -c Release  # 期望：28/28
+dotnet test  tests/ClashAcry.Core.Tests -c Release # 期望：168/168
+dotnet test  tests/ClashAcry.UI.Tests  -c Release  # 期望：33/33
 ```
 
-UI 侧五组：Shell 7 / Backdrop 4 / Overview 10 / ProxiesNoJitter 5 / ChromeContrast 6（第五轮 R-21a 给
-Overview 加 2 条、R-21b 给 Shell 加 2 条，合计 32；后者每类控件的
-深色底与浅色前景**极性分开判**，加一条滚动条轨道-滑块对比、一条浅色反证）。四条跑测试的坑：
+UI 侧五组：Shell 7 / Backdrop 4 / Overview 10 / ProxiesNoJitter 5 / ChromeContrast 7（第五轮 R-21a 给
+Overview 加 2 条、R-21b 给 Shell 加 2 条到 32；第六轮 R-22 删掉 3 条"横幅还活着"的锁、加 4 条同生死与横幅像素的锁，净 +1 到 33；ChromeContrast
+深色底与浅色前景**极性分开判**，加一条滚动条轨道-滑块对比、一条浅色反证，第六轮再补故障横幅一格）。四条跑测试的坑：
 
 - **两套测试都必须不带 `--no-build` 跑**（测试自己解析 `bin\Release\…`，而解决方案构建写的是 `bin\x64\Release\…`，见 R-12e/R-14f）。第五轮的现场：合并后按惯性给 Core.Tests 加了 `--no-build`，它拿到昨天的旧副本、报 **166/166 全绿**——比本轮的 168 恰好少两条新锁，却一句错都不说。**总数与文档基线不一致时先怀疑产物目录，不要怀疑代码。**
 - **改过 UI/Tray 源码后必须先 `dotnet build ClashAcry.sln -c Release` 再跑 UI.Tests**：`dotnet test tests/ClashAcry.UI.Tests`
@@ -178,16 +180,20 @@ powershell -File scripts/measure-residency.ps1 -ProcessName mihomo -Json
 期望：`Get-Process ClashAcry.UI` 无输出（关窗即退）；
 - **Tray 空闲态** WS ≤ **40 MB** —— 判据**只在「这一进程生命周期里没起过内核」的新 Tray 上读**（2026-10-27 复测：冷启动 5 s **33.4**；连开 5 次管道会话后 **37.4~37.8**）。
   **`core.stop` 不归还工作集**：跑过内核再停掉的 Tray，60 s 后仍读 **49.0**（Private 只有 12.3），这一格由下面的合计线判——别拿它当超标，也别为此放宽 40。
-- **满载常驻**（Tray + mihomo 在跑，UI 已关）合计 ≤ **80 MB** —— 本会话 3 分钟 soak 实测 **74.0~77.5**（mihomo 自身 WS 25~26 MB）；合并后复测单点 **48.0 + 27.0 = 75.0**。
+- **满载常驻**（Tray + mihomo 在跑，UI 已关）合计 ≤ **120 MB**（第六轮裁定 **R-22c**：由 80 放宽，理由与数字见 spec §10 末）
+  —— 桩节点（3 个 `type: direct`）3 分钟 soak **74.0~77.5**、合并后单点 **48.0 + 27.0 = 75.0**；
+  **真订阅干净口径**（25 anytls 节点 + 4 个 provider 组 + `geoip.metadb` 8.4 MB，UI 全程没起、静置 3 min）**Tray 46.4 + mihomo 39.4 = 85.8**（第六轮 agent 实测）。
 
-口径是 Task 17 裁定的「按空闲/满载拆两格」（spec §10 开头的判据表）：40 只管空闲态，
-满载那格由合计线管。这一条**不是把 40 放宽**——内核在跑时 Tray 读 49~51 MB 是实测事实，写在这里备查。
-> **真订阅那一格已经破线，量之前先读这条**（spec §10 末段）：74.0~77.5 那组数字是在 3 个 `type: direct`
-> 桩节点上量的；换成用户的真订阅（25 个 anytls 节点 / 29 个组 / 内核自己载了 8.4 MB geodata）后，
-> 本会话采到 **Tray 63.8 + mihomo 40.9 = 104.7 MB**，合计线 80 直接顶穿，而且 mihomo 那半从 26 涨到 41
-> 不是我们能改的。请按「真订阅 + 内核在跑 + UI 已关 + 静置 3 分钟」再采一次并把三个数抄回来——
-> 这一格要么按真实规模重写判据，要么先做 Tray 侧归因，**不在验收时口头放行**。
+口径是 Task 17 裁定的「按空闲/满载拆两格」（spec §10 开头的判据表）：40 只管空闲态，满载那格由合计线管。这一条**不是把 40 放宽**——内核在跑时 Tray 读 49~51 MB 是实测事实，写在这里备查。
+> **真订阅那一格已在第六轮裁定并闭合（原话留此备查）**：80 那组数字是在 3 个 `type: direct` 桩节点上量的；换成用户的真订阅
+> （25 个 anytls 节点 / 29 个组 / 内核自己载了 8.4 MB geodata）后，第三轮采到 **Tray 63.8 + mihomo 40.9 = 104.7 MB** 直接顶穿 80，
+> 而 mihomo 那半从 26 涨到 41 不是我们能改的。当时写下「要么按真实规模重写判据、要么先做 Tray 侧归因，**不在验收时口头放行**」——
+> 第六轮走的是前半条：先按要求的口径（真订阅 + 内核在跑 + UI 已关 + 静置 3 分钟）重采一次（85.8），再据此把线写到 120。
+> Tray 侧那三条归因实验（tooltip 泵每 2 s 读盘、`StderrTail` 双拷贝、两条重定向流）**仍是待做**，放宽线没把这条账销掉。
 UI 自己那格（≤220）在节点页 30 行全落地 + 刚跑完全组测速的最坏档实测 **180.0 MB**（spec §10 Task 17 表）。
+> **脚本只认自家进程这一条本轮修好了**（v1.1 账上第①条）：`measure-residency.ps1` 原本按进程名取、**完全不看路径**——洞不是「量到 `verge-mihomo`」（第六轮实测订正：`Get-Process -Name mihomo` 是精确匹配，只有 verge 在跑时它直接抛「找不到名为 mihomo 的进程」），而是**同名的第三方内核**、或**自家两颗同名内核同时在跑**（孤儿 + 新起）时它静默取错那颗；
+> 现在默认只认 `%LOCALAPPDATA%\ClashAcry\*` 与仓库根 `\*` 两处，命中数不是恰好 1 就**当场失败**并列出排除掉的路径，回包 `path` 字段带来源。
+> 也就是说：这条命令再也不会把一个别家内核的内存数当成我们的读数。
 
 ## 7. 托盘「打开界面」重连回显【人眼】
 
@@ -254,15 +260,17 @@ powershell -Command "Get-Process ClashAcry.UI,ClashAcry.Tray -ErrorAction Silent
 
 期望：这条在点完「退出」几秒后**什么都不打印**。第四轮真机测到的是旧行为（窗口留着显示断连横幅），已修；
 关不掉的窗口不阻塞退出（不重试、不硬杀），所以你若看到窗口还在，就是 `CloseMainWindow()` 没送进去——把那次的现象记下来即可。
+**强杀 Tray 那一格第六轮起也跟着退**（裁定 R-22 同生死，判据见本节开头那一格）：现在两条路都不留窗口，区别只在优雅退出会顺手停掉内核、强杀留下孤儿 mihomo。
 最后按第 0 条把 `ProxyServer` / `ProxyOverride` 还原成你抄下的原值——**从这份构建起这一步该由程序自己做**（R-20b：退出钩子发的是 `sysproxy.set(false)`，走的就是带快照还原的那段路由），你只需要核对它确实回去了。
 
 ---
 
 ## v1 验收线（spec §11）
 
-- 第 1 条全绿（Core 168 / UI 32）+ 第 2~12 条勾完 + §10 三格开销线达标。
+- 第 1 条全绿（Core 168 / UI 33）+ 第 2~12 条勾完 + §10 三格开销线达标（Tray 空闲 ≤40 / 满载合计 ≤**120** / UI ≤220）。
 - 已知遗留，**不阻塞 v1**，记在 spec §12 / 计划交接项里：
-  ① ~~概览页横幅缺「一键拉起/重启 Tray」按钮~~ —— **第五轮已接（R-21b）**，判据见第 12 条后那一格；
+  ① ~~概览页横幅缺「一键拉起/重启 Tray」按钮~~ —— **第五轮接上（R-21b）、第六轮撤销（R-22 同生死）**：横幅不再带任何恢复按钮，够不着托盘且宽限用尽时界面自己退；想重新连上是"重开应用"，不是"点一下"。
+  ①b **强杀 Tray 会留下孤儿 mihomo**（实测占着 9097/7897），下一次冷启动托盘点「启动内核」会得到"controller 端口已被其他进程占用"并落 `Crashed`；出路是结束那颗 `mihomo.exe`。「Tray 冷启动认领自家孤儿内核」记在 spec §12 待办。
   ② `PipeServer` 对同一连接串行处理，分钟级 `core.update` 会堵住后面的请求（头阻塞，进度走广播不受影响）；
   ③ `ProviderInfo.Extra` 里的健康样本字段未建模；
   ④ Tray 满载 49~51 MB 的实现级压缩空间（tooltip 泵每 2 s 读盘 + JSON、`StderrTail` 双拷贝、两条重定向流），

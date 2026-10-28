@@ -13,16 +13,9 @@
         <InfoBar x:Name="Banner" Grid.Row="0" IsOpen="False" Severity="Warning"
                  AutomationProperties.AutomationId="Banner">
             <!-- 文案放子 TextBlock 而不是 InfoBar.Message：UIA 里 Message 不保证成为 Name，
-                 断言只有一个可靠的读取点 -->
-            <StackPanel Orientation="Horizontal" Spacing="12">
-                <TextBlock x:Name="BannerText" AutomationProperties.AutomationId="BannerText"
-                           VerticalAlignment="Center" />
-                <!-- 「一键拉起托盘」：默认收起，只在**够不着托盘**时由 RenderBanner 放出来（连接级故障）。
-                     内核崩溃时托盘活得好好的，那一条的正确动作是概览页的内核开关，不是再起一个宿主。 -->
-                <Button x:Name="RelaunchTrayButton" Content="一键拉起托盘" Visibility="Collapsed"
-                        AutomationProperties.AutomationId="RelaunchTrayButton"
-                        VerticalAlignment="Center" Click="OnRelaunchTrayClick" />
-            </StackPanel>
+                 断言只有一个可靠的读取点。这里**不放任何恢复按钮**：横幅只用于内核崩溃这类
+                 "托盘还在、界面还能干活"的故障；托盘够不着时界面自己退（spec §3 同生死）。 -->
+            <TextBlock x:Name="BannerText" AutomationProperties.AutomationId="BannerText" />
         </InfoBar>
         <!-- IsSettingsVisible="False"（R-12b）：NavigationView 自带一个底部「设置」页脚项，
              而本设计的设置是普通第三页（Tag=settings）。两者都留着 = 侧栏出现两个「设置」，

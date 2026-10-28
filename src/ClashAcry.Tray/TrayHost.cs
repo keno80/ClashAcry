@@ -62,6 +62,10 @@ public sealed class TrayHost
             (p, ct2) => updater.InstallLatestAsync(p, Core.SwapExecutableAsync, ct2),
             Pipe, FocusUi);
         Core.StateChanged += e => Pipe.Broadcast(EventTypes.CoreStateChanged, e);
+        // 裁定 R-23（feat/core-liveness）：内核起来之后的死活要有低频复核，否则「在任务管理器里结束 mihomo」
+        // 会永远停在 Running。泵的判据与落点都在 CoreManager 里，这里只装配节奏（默认 5 s / 连续 2 轮）；
+        // 它照旧只说真话、不重启（spec §9 可预期的显式启停）。常驻任务：与 Pipe 一样不许 await 到底。
+        new CoreLivenessPump(Core).Start(ct);
         await Pipe.StartAsync(ct);                                              // 常驻任务：不能 await 到底
 
         // 裁定 R-10j②：accept 循环的死因必须有去处，且**不许自动退出**——控制通道断了就把正在跑的内核

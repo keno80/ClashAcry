@@ -12,6 +12,7 @@ public sealed class CoreManager : IAsyncDisposable
     private readonly List<CoreStateChanged> _events = new();
     private readonly TimeSpan _fastWindow;
     private readonly TimeSpan _startGrace;
+    private readonly TimeSpan _controllerProbeBudget = TimeSpan.FromSeconds(1);
     private Process? _proc; private string? _lastReason; private int _disposed;
 
     public CoreState State { get; private set; } = CoreState.Stopped;
@@ -63,6 +64,50 @@ public sealed class CoreManager : IAsyncDisposable
 
     public IReadOnlyList<string> StderrTail(int n = 50) => _stderr.Snapshot().TakeLast(n).ToList();
 
+    /// <summary>
+    /// 双探活口径（spec §9）在**运行期**的复用：判死三通路（<see cref="CoreLivenessPump"/> 低频泵、
+    /// <see cref="StartAsync"/> 的 Running 闸门）都问这一个问题，不再各写一份。
+    /// 走生命周期锁：探活期间不许有人同时换核或起第二个进程。
+    /// </summary>
+    public Task<bool> CheckLivenessAsync(CancellationToken ct) => InLifecycle(() => CheckLivenessLockedAsync(ct), ct);
+
+    private async Task<bool> CheckLivenessLockedAsync(CancellationToken ct)
+    {
+        // 与 RunningProcessId 同一条纪律：先取局部再判，句柄可能已被 KillProcess 释放。
+        var p = _proc;
+        if (p is null) return false;
+        try { if (p.HasExited) return false; }
+        catch (ObjectDisposedException) { return false; }        // 句柄没了＝我们不再知道有活内核
+
+        // 裁定 R-8i 的同一条纪律：预算按墙上时间，一次 controller 探活最多 1 s。
+        // CoreProbe.ControllerAlive 自己不带预算（它依赖调用方），没有这道 cap，
+        // 「端口挂着但不答」会把低频泵的一轮拖成 HttpClient 的 30 s——Tray 里不许再有假死。
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        budget.CancelAfter(_controllerProbeBudget);
+        bool controllerOk;
+        try { controllerOk = await _probe.ControllerAlive(budget.Token); }
+        // 预算到点＝「探不到」，调用方的取消＝「别问了」（R-6b 同一条闸门，不许把两者混成一回事）
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { controllerOk = false; }
+        if (!controllerOk) return false;
+        // mixed 用启动时那次的端口，不重读设置：改了端口要重启才生效，探现在真正在听的口。
+        return await CoreProbe.TcpAlive("127.0.0.1", MixedPort, ct);
+    }
+
+    /// <summary>
+    /// 低频泵判死的落点：**只把状态说真，不动进程**。
+    /// 不顺手 Kill 是有意的——controller 一时不答而进程还活着（真机上「带病存活」与「正在下 geo 库」都可能），
+    /// 误杀会把「说不清」变成「真断了」。收尸交给下一条 <see cref="StartAsync"/> 的闸门。
+    /// </summary>
+    public Task MarkCrashedByLivenessAsync(int deadRounds, CancellationToken ct) =>
+        InLifecycle(async () =>
+        {
+            // 只有 Running 会被判死：Starting 有自己的窗口分档，Stopped/Crashed/Updating 期探不到是常态。
+            if (State is not CoreState.Running) return false;
+            Transition(CoreState.Crashed,
+                $"内核在运行状态下连续 {deadRounds} 轮双探活无应答（疑似被外部结束或假死）");
+            return true;
+        }, ct);
+
     // 锁纪律：只有公开入口取 _lifecycle，内部 *Locked 方法一律不取（信号量不可重入，Task 11 的换核流程也走这条）
     private async Task<T> InLifecycle<T>(Func<Task<T>> body, CancellationToken ct)
     {
@@ -97,7 +142,16 @@ public sealed class CoreManager : IAsyncDisposable
 
     private async Task<bool> StartLockedAsync(CancellationToken ct)
     {
-        if (State is CoreState.Running or CoreState.Starting) { ConcurrentGuardHits++; return State == CoreState.Running; }
+        if (State is CoreState.Starting) { ConcurrentGuardHits++; return false; }
+        if (State is CoreState.Running)
+        {
+            // 裁定 R-23（feat/core-liveness）：状态机自己说「在跑」不算数。`core.start` 回 true 从此只表示
+            // 「确实在跑」——先探一次活，探不到就收自己的尸、走完整 spawn 路径。
+            // 这不是自动重启：重起是用户这一笔点击授权的（spec §9「v1 不做自动重启」的边界）。
+            ConcurrentGuardHits++;
+            if (await CheckLivenessLockedAsync(ct)) return true;
+            await KillProcess();
+        }
 
         StartAttemptCount = 0;
         for (var attempt = 1; attempt <= 2; attempt++)
@@ -133,6 +187,10 @@ public sealed class CoreManager : IAsyncDisposable
         {
             SpawnCount++;
             _proc = Process.Start(_launch(exe))!;
+            // 裁定 R-23：`Running` 之后进程的死活原本无人复核——探活循环只在启动窗口里盯 HasExited，
+            // 真机后果是用户在任务管理器里结束 mihomo 后界面还写「运行中」。Exit 事件是最实时的一条通路。
+            _proc.EnableRaisingEvents = true;
+            _proc.Exited += OnCoreExited;
             // Task 1 实测：mihomo v1.19.33 的 Go 日志全部走 **stdout**，stderr 恒空。
             // 两条流进同一个环（字段名 `_stderr` 是历史名，实际是"内核输出环"），顺序由到达时间决定；
             // 只订阅 ErrorDataReceived 的话日志面板永远是一片空白。每条流各订阅一次，重复订阅会让每行进环两次。
@@ -213,6 +271,36 @@ public sealed class CoreManager : IAsyncDisposable
     }
 
     public Task ReloadAsync(CancellationToken ct) => _client.ReloadConfigAsync(_paths.ConfigFile, ct);
+
+    /// <summary>
+    /// 裁定 R-23 的第一条通路：内核进程自己退出（外部结束、自己 fatal）时把状态说真。
+    /// 三道闸门缺一不可，否则正常路径会多报一次崩溃：
+    /// ① 释放后不排队——<c>_lifecycle</c> 已被 DisposeAsync 释放，再 WaitAsync 就是 ObjectDisposedException；
+    /// ② <c>ReferenceEquals(sender, _proc)</c>——我们自己杀的（<see cref="KillProcess"/> 把 _proc 置 null）
+    ///    与换核起的新一代（_proc 已是别的对象）都不算「被外部结束」；这条判据必须在锁内读，
+    ///    因为置 null 就发生在同一把锁的持有期里；
+    /// ③ 只认 Running/Starting——R-8h 的取消语义（落 Stopped）与启动失败路径（自己会落 Crashed 并写更准的原因）
+    ///    都不许被这里覆盖。
+    /// </summary>
+    private void OnCoreExited(object? sender, EventArgs e)
+    {
+        if (Volatile.Read(ref _disposed) == 1) return;
+        _ = InLifecycle(async () =>
+        {
+            if (!ReferenceEquals(sender, _proc)) return false;
+            if (State is not (CoreState.Running or CoreState.Starting)) return false;
+            Transition(CoreState.Crashed,
+                $"内核进程退出，退出码 {ExitCodeOf(sender as Process)}（不是本程序发起的停止）");
+            return true;
+        }, CancellationToken.None);
+    }
+
+    // 句柄可能已被 KillProcess 释放；这里只表达「拿不到退出码」，不许把异常抛进事件线程。
+    private static string ExitCodeOf(Process? p)
+    {
+        try { return p?.ExitCode.ToString() ?? "未知"; }
+        catch (Exception) { return "未知"; }
+    }
 
     private async Task KillProcess()
     {

@@ -46,6 +46,9 @@ public class CoreManagerTests : IDisposable
     }
     private static int Port(TcpListener l) => ((IPEndPoint)l.LocalEndpoint).Port;
 
+    /// <summary>Build 造出来的探针，供用例在启动之后改它的口供（feat/core-liveness 的闸门/泵用例要它）。</summary>
+    private FakeProbe? LastProbe;
+
     private CoreManager Build(string script, int mixedPort, int controllerPort, bool portOccupied = false,
                               TaskCompletionSource<bool>? aliveGate = null, Exception? aliveThrows = null,
                               TimeSpan? fastWindow = null, TimeSpan? startGrace = null,
@@ -61,9 +64,9 @@ public class CoreManagerTests : IDisposable
         store.Save(store.Load() with { ControllerPort = controllerPort, MixedPort = mixedPort, CorePath = fakeCore });
         var client = new MihomoClient(new HttpClient { Timeout = TimeSpan.FromSeconds(2) },
             "127.0.0.1", controllerPort, store.Load().Secret);
-        return new CoreManager(paths, store, client,
-            new FakeProbe(client, portOccupied, aliveGate, aliveThrows, controllerReady),
-            CmdLaunch, fastWindow, startGrace);
+        var probe = new FakeProbe(client, portOccupied, aliveGate, aliveThrows, controllerReady);
+        LastProbe = probe;
+        return new CoreManager(paths, store, client, probe, CmdLaunch, fastWindow, startGrace);
     }
 
     // 裁定 R-8a：夹具里 WireMock 常驻在 controller 端口上冒充内核的应答面，所以"端口被别的进程占了"
@@ -74,11 +77,28 @@ public class CoreManagerTests : IDisposable
                                    Exception? aliveThrows = null,
                                    Func<bool>? controllerReady = null) : CoreProbe(client)
     {
+        /// <summary>ControllerAlive 被调过几次（feat/core-liveness：Stopped 期不许探活）。</summary>
+        public int ControllerAliveCalls;
+
+        /// <summary>&gt;0 时每次探活扣一次并答"controller 死了"，之后恢复正常口供。</summary>
+        public int FailAliveTimes;
+
+        /// <summary>恒答"controller 死了"（进程还活着，只有应答面断了）。</summary>
+        public bool ReportDead;
+
+        /// <summary>探活卡住不返回（只听从传入的 ct）：用来把判死通路的**预算**钉出来。</summary>
+        public bool HangsOnControllerAlive;
+
         // 裁定 R-8h 的时序闸门：ControllerAlive 卡在这道闸上（**不带 ct**，时机由测试掌控），
         // 取消才能落在探活循环中间——进函数前就取消好的令牌会在 InLifecycle 的 WaitAsync 就抛，
         // 压根没 spawn，测试空转。
         public override async Task<bool> ControllerAlive(CancellationToken ct)
         {
+            Interlocked.Increment(ref ControllerAliveCalls);
+            if (HangsOnControllerAlive) { await Task.Delay(Timeout.Infinite, ct); return false; }
+            if (ReportDead) return false;
+            // feat/core-liveness 的闸门用例要「只有那一次探不到」：按次计的口供，不改进程本身死活。
+            if (FailAliveTimes > 0) { Interlocked.Decrement(ref FailAliveTimes); return false; }
             // 慢启动的假内核：真内核在解析配置（下 geo 数据库）期间 controller 根本不应答，
             // 这里用「到某个时刻才算得通」表达，才能把窗口分档的那条支路跑出来。
             if (controllerReady is not null && !controllerReady()) return false;
@@ -439,6 +459,150 @@ public class CoreManagerTests : IDisposable
             $"默认 -d 指向 {d}，那里没有 config.yaml——内核会按空配置起来，探活必炸");
         Assert.False(psi.UseShellExecute);
         Assert.True(psi.RedirectStandardOutput);                               // Task 1 实测：真内核日志走 stdout
+    }
+
+    // ── feat/core-liveness（spec §12 第六轮真机实测：用户在任务管理器里结束 mihomo，界面还写「运行中」）──
+    // 三条判死通路各一条回归锁：① 进程自己报 Exit 事件；② 低频双探活泵；③ core.start 闸门先探活再回 true。
+
+    [Fact]
+    public async Task ExternalKill_WhileRunning_TransitionsCrashed_AndReportsExitCode()
+    {
+        // 现网缺陷：CoreManager 只在**启动窗口内**盯 `_proc.HasExited`，进了 Running 就把这棵树交了。
+        // 真机复现——起核 → 外部结束 mihomo → 状态永远停在 Running，`/version` 早已无人应答。
+        using var _ = new RegistrySnapshot();
+        using var mixed = new TcpListener(IPAddress.Loopback, 0); mixed.Start();
+        var mgr = Build(SleepScript(), Port(mixed), _wire.Port);
+        Assert.True(await mgr.StartAsync(default));
+        var pid = mgr.RunningProcessId!.Value;
+
+        // 「外部」结束：另取一个 Process 句柄杀整棵树，不走我们自己的 KillProcess。
+        using (var other = Process.GetProcessById(pid)) other.Kill(entireProcessTree: true);
+
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < deadline && mgr.State != CoreState.Crashed) await Task.Delay(50);
+
+        Assert.Equal(CoreState.Crashed, mgr.State);
+        Assert.Contains("退出码", mgr.StateChangedEvents.Last().Reason);
+        Assert.DoesNotContain(Process.GetProcesses(), p => p.Id == pid);
+        await mgr.StopAsync(default);
+    }
+
+    [Fact]
+    public async Task Start_WhileRunningButLivenessProbeFails_RespawnsInsteadOfClaimingSuccess()
+    {
+        // spec §3 禁令 3：「点下去不等于成功」。现网 `StartLockedAsync` 顶部的闸门只看状态机自己说什么，
+        // 于是状态失真时 `core.start` 回包 `true`、内核其实没跑，UI 收到「成功」却等不到任何状态事件。
+        using var _ = new RegistrySnapshot();
+        using var mixed = new TcpListener(IPAddress.Loopback, 0); mixed.Start();
+        var mgr = Build(SleepScript(), Port(mixed), _wire.Port);
+        Assert.True(await mgr.StartAsync(default));
+        var oldPid = mgr.RunningProcessId!.Value;
+        Assert.Equal(1, mgr.SpawnCount);
+        // 只有闸门那一次答「controller 不应答」，重新 spawn 之后照旧应答。
+        LastProbe!.FailAliveTimes = 1;
+
+        Assert.True(await mgr.StartAsync(default));
+
+        Assert.Equal(2, mgr.SpawnCount);                       // 闸门探不到就真重起，而不是回 true 谎报
+        Assert.Equal(CoreState.Running, mgr.State);
+        Assert.NotNull(mgr.RunningProcessId);
+        Assert.NotEqual(oldPid, mgr.RunningProcessId!.Value);  // 收了自己的尸再起新的，不留孤儿
+        await mgr.StopAsync(default);
+    }
+
+    [Fact]
+    public async Task CheckLiveness_IsFalseWhenMixedPortDiesEvenThoughControllerAnswers()
+    {
+        // §9 双探活口径在判死通路上的复用：controller 应答而 mixed 没人听 = 不算活着（带病存活）。
+        using var _ = new RegistrySnapshot();
+        var mixed = new TcpListener(IPAddress.Loopback, 0); mixed.Start();
+        var port = Port(mixed);
+        var mgr = Build(SleepScript(), port, _wire.Port);
+        Assert.True(await mgr.StartAsync(default));
+        mixed.Stop();                                          // 假内核还活着，只是 mixed 端口没了
+
+        Assert.False(await mgr.CheckLivenessAsync(default));
+        await mgr.StopAsync(default);
+    }
+
+    [Fact]
+    public async Task CheckLiveness_HangsAreCappedByOneSecondBudget_AndReadAsDead()
+    {
+        // 裁定 R-8i 的同一条纪律落到判死通路上：一次 controller 探活最多 1 s，
+        // 否则「controller 端口挂着但不答」会把低频泵的每一轮拖成 HttpClient 的 30 s（Tray 里再也不能有假死）。
+        using var _ = new RegistrySnapshot();
+        using var mixed = new TcpListener(IPAddress.Loopback, 0); mixed.Start();
+        var mgr = Build(SleepScript(), Port(mixed), _wire.Port);
+        Assert.True(await mgr.StartAsync(default));
+        LastProbe!.HangsOnControllerAlive = true;
+
+        var sw = Stopwatch.StartNew();
+        var alive = await mgr.CheckLivenessAsync(default);
+        sw.Stop();
+
+        Assert.False(alive);
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(3),
+            $"controller 探活必须有 1 s 预算，实测挂了 {sw.Elapsed.TotalSeconds:F1} s");
+        LastProbe.HangsOnControllerAlive = false;
+        await mgr.StopAsync(default);
+    }
+
+    [Fact]
+    public async Task LivenessPump_TwoConsecutiveDeadRounds_TransitionsCrashed()
+    {
+        using var _ = new RegistrySnapshot();
+        using var mixed = new TcpListener(IPAddress.Loopback, 0); mixed.Start();
+        var mgr = Build(SleepScript(), Port(mixed), _wire.Port);
+        Assert.True(await mgr.StartAsync(default));
+        LastProbe!.ReportDead = true;
+        using var cts = new CancellationTokenSource();
+        new CoreLivenessPump(mgr, TimeSpan.FromMilliseconds(50)).Start(cts.Token);
+
+        var deadline = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < deadline && mgr.State != CoreState.Crashed) await Task.Delay(50);
+
+        Assert.Equal(CoreState.Crashed, mgr.State);
+        Assert.Contains("连续", mgr.StateChangedEvents.Last().Reason);
+        // 判死不许顺手杀进程：控制器只是不答时，误杀会把「说不清」变成「真断了」。
+        Assert.NotNull(mgr.RunningProcessId);
+        await mgr.StopAsync(default);
+    }
+
+    [Fact]
+    public async Task LivenessPump_OneDeadRoundThenRecovery_KeepsRunning()
+    {
+        // 连续两轮才判死（最坏 ~10 s 说实话）：真机上一轮探活失败太容易是网络/GC 的毛刺，
+        // 单轮判死会把还在跑的内核说成崩了，用户平白丢一张界面。
+        using var _ = new RegistrySnapshot();
+        using var mixed = new TcpListener(IPAddress.Loopback, 0); mixed.Start();
+        var mgr = Build(SleepScript(), Port(mixed), _wire.Port);
+        Assert.True(await mgr.StartAsync(default));
+        LastProbe!.FailAliveTimes = 1;
+        using var cts = new CancellationTokenSource();
+        new CoreLivenessPump(mgr, TimeSpan.FromMilliseconds(50)).Start(cts.Token);
+
+        await Task.Delay(600);                                 // 远超两轮，且第二轮已经恢复正常口供
+
+        Assert.Equal(CoreState.Running, mgr.State);
+        await mgr.StopAsync(default);
+    }
+
+    [Fact]
+    public async Task LivenessPump_WhenStopped_NeverProbes_AndCancellationStopsIt()
+    {
+        // 低频泵只在 Running 探：Stopped/Starting/Crashed/Updating 期探活答"死"是常态，
+        // 照探就会在每个正常状态上误判死；取消后也不许继续留一条后台循环。
+        using var _ = new RegistrySnapshot();
+        var mgr = Build(SleepScript(), FreePort(), _wire.Port);
+        using var cts = new CancellationTokenSource();
+        new CoreLivenessPump(mgr, TimeSpan.FromMilliseconds(50)).Start(cts.Token);
+
+        await Task.Delay(400);
+        Assert.Equal(0, LastProbe!.ControllerAliveCalls);      // 没起内核，一次都不该探
+
+        cts.Cancel();
+        await Task.Delay(200);
+        Assert.Equal(CoreState.Stopped, mgr.State);
     }
 
     private static void TryDelete(string dir)

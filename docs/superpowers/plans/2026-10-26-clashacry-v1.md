@@ -5327,7 +5327,26 @@ git -c http.proxy= -c https.proxy= push origin main
 **第六轮收尾（2026-10-28，用户对"还剩什么"的回答是「1、你自己来 / 2、删远端、本地留」）**：远端 `feat/ui-exit-with-tray` 已删、本地保留；人工冒烟里 agent 能代跑的那批，在发布产物 + 真订阅上跑完了，逐格读数与"仍欠人眼哪五处"写在清单的新段「第六轮：agent 在真产物上代跑的格子」，此处只记两条**跑出来的结论**——
 
 - **§4.2 的两条 provider 结论按原样成立，但我一度把它读反了**。做了个 2×2（provider 车型 `file`/`http` × 节点可达 `direct`/死端口 `ss`）：四格一律「成员不在顶层表 + 成员级 `/delay` 404」，而同一次内核里主配置内联的 `bare-direct` 与组本身都在顶层表、都 200 ⇒ **404 的唯一原因是"不在顶层表"**，与车型、与可达性都无关（连不通给 500/504）。Task 1 的夹具当场复现（`contains prov-node-1 at top level: False` + 该成员 404）。之所以中途判成"真订阅证伪了它"：本机两份真订阅**根本没有 `proxy-providers`**（顶层键表核过），节点全内联，`GET /proxies` 的 35 个名字 `provider-name` 全空、4 个组的成员一个不落地都在顶层表——我拿内联节点当 provider 成员读了。三条探针侧的假信号都记进 spec §12 对应条：`/providers/proxies` 里每个组都会冒出一条 `vehicleType=Compatible` 的**伪 provider**（别拿它当"这节点来自 provider"的证据）、PS 5.1 变量名大小写不敏感（`$h = Get-Json …` 静默覆盖认证头 `$H`，随后满屏 401，看着像契约变了其实是脚本打到自己）、`Invoke-WebRequest -UseBasicParsing` 对无 charset 的 JSON 按 Latin-1 解码（中文名变乱码再去拼 URL 就 404）。另有一条老纪律本轮再咬一次：探针的 controller 端口**必须现抢现用**，固定端口可能已被机器上别家内核占住，打到别人家 controller 上读到的就不是我们的契约。
-- **一条新缺陷，未修、待用户拍板**：**内核被外部结束后 `Running` 永不回落**（spec §12 同名条 + 清单遗留⑤）。`CoreManager` 进 `Running` 后既没订阅 spawned 进程的 `Exited`、`TrayHost` 也没有周期探活（`git blame` 显示这两处自状态机落地 `c227407` 起没改过，不是本轮引入），实测四样同时成立：`handshake` 恒回 `Running`、界面恒「运行中」、R-22b 的内核故障格进不去、点「启动内核」回 `true` 而什么都没起（并发闸门 `CoreManager.cs:100`），只有点「重载」才抛 `由于目标计算机积极拒绝，无法连接 (127.0.0.1:9097)`。**推荐修法**（`Exited` ⇒ 落 `Crashed` 并广播 + 低频双探活 + 闸门在 `Running` 时先探一次活）写在 spec 里，**不自动重启**、保持 §9 语义；本轮不动它，因为②要在 Tray 里新增定时器就是一份常驻开销（§10 判据面），且改动横跨三层。要修就按规则 2 另起 `feat/core-liveness` 之类的分支，与「孤儿认领」共用一套真进程夹具一起做。
+- **一条新缺陷，未修、待用户拍板**（**第七轮已按这条的推荐修法落地，裁定 R-23，见下面「第七轮」那节**）：**内核被外部结束后 `Running` 永不回落**（spec §12 同名条 + 清单遗留⑤）。`CoreManager` 进 `Running` 后既没订阅 spawned 进程的 `Exited`、`TrayHost` 也没有周期探活（`git blame` 显示这两处自状态机落地 `c227407` 起没改过，不是本轮引入），实测四样同时成立：`handshake` 恒回 `Running`、界面恒「运行中」、R-22b 的内核故障格进不去、点「启动内核」回 `true` 而什么都没起（并发闸门 `CoreManager.cs:100`），只有点「重载」才抛 `由于目标计算机积极拒绝，无法连接 (127.0.0.1:9097)`。**推荐修法**（`Exited` ⇒ 落 `Crashed` 并广播 + 低频双探活 + 闸门在 `Running` 时先探一次活）写在 spec 里，**不自动重启**、保持 §9 语义；本轮不动它，因为②要在 Tray 里新增定时器就是一份常驻开销（§10 判据面），且改动横跨三层。要修就按规则 2 另起 `feat/core-liveness` 之类的分支，与「孤儿认领」共用一套真进程夹具一起做。
+
+---
+
+## 第七轮 `feat/core-liveness`（2026-10-28，收掉第六轮捞出那条待拍板缺陷，裁定 **R-23**）
+
+用户两句话开工：「同意修法，去建 `feat/core-liveness` 分支」→「参数不变，立刻开始写代码」。范围只有**内核死活自证**这一件事，「Tray 冷启动认领自家孤儿内核」（清单遗留 ①b）**没做**——它需要另一套真进程夹具，且和这一条互不覆盖（spec §12 三条边界的划分原样成立）。
+
+**三条通路**（判据一律复用 §9 双探活，落点一律 `Transition`；机制、参数与三道防误报闸门写在 spec §9「运行期死活自证」）：
+① `CoreManager` spawn 后 `EnableRaisingEvents` + `Exited` 在生命周期锁内落 `Crashed` 带退出码；
+② 新增 `CoreLivenessPump`（5 s 一轮 / 只在 `Running` 探 / 连续 2 轮才判死，最坏 ~10 s），`TrayHost.RunAsync` 装配；
+③ `StartLockedAsync` 的 `Running` 闸门先探活才回 `true`，探不到 `KillProcess()` 收尸再走完整 spawn 路径。
+**不自动重启、UI 零改动**（`Crashed` 走现成 `core.state` 广播 + R-22b 内核故障格）。
+
+**TDD 实况**：7 条用例先写先跑，**5 红 2 绿**（红的是 `Exited` 不回落、闸门谎报 `true`、`CheckLiveness` 两条、泵两条；绿的 2 条是"Stopped 期不探活 / 单轮不判死"这两条防过度探活的守卫——它们在实现前后都该绿，是护栏不是缺陷锁）。实现后 Core **175/175**、Release 构建 0 警告 0 错误。
+
+**真机加腿（发布产物 + 真订阅 + `--no-tray`，`artifacts/smoke/r7-liveness.ps1`）**：起核进「运行中」⇒ 外部 `Stop-Process` 结束 mihomo ⇒ **0.3 s** 界面「异常」+ 故障格「内核进程退出，退出码 -1（不是本程序发起的停止）」+ **界面进程数仍 1**、残留 mihomo 0 颗、HKCU 三值前后逐字未变。这一腿同时是 R-22 反向边界（内核崩溃不算断连）在真产物上的第二次确认。
+**开销复测（泵真的在干活这一档，`artifacts/smoke/r7-residency.ps1`）**：Tray 空闲（无内核、无界面会话）冷启 20 s / 40 s 两点 **WS 32.1 / 32.2 MB、Private 7.6 MB**——40 线内、两点一致无爬升；满载（真订阅内核在跑 + UI 已关 + 静置 3 min，泵约 36 轮）**Tray WS 46.3 / Private 11.4 + mihomo WS 39.8 / Private 70.4 = 合计 85.7 MB**，对照第六轮同一口径的 85.8 —— **差 0.1 MB 在噪声里，那条泵没有可测代价**，120 线守住。**线一个都没动**：R-23 加的那条循环买的是状态诚实，代价量出来在噪声里。
+
+**一条记账**：UI 全量跑时 `ChromeContrastTests.DarkChrome_NodeRows_AndGroupRow_AreDark_WithLightText` 读到 `TestAllButton` 面 **P25=113**（判据 ≤110）而**单跑即绿**；本轮 UI 源码零改动，按上一段写下的抖动口径处理（像素取样对屏幕上其他窗口/动画敏感，复跑确认即可，不放宽判据）。
 
 ---
 

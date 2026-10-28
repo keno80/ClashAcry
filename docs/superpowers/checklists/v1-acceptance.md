@@ -285,6 +285,21 @@ powershell -Command "Get-Process ClashAcry.UI,ClashAcry.Tray -ErrorAction Silent
 **代跑没覆盖、仍需人眼的**（机器做不了的都在这）：第 3 条 B 腿（本地 yaml 走 `FileOpenPicker` 系统对话框）、第 7 条托盘**右键菜单**那两下点击（`--no-tray` 形态没有图标，通路是 `ui.focus` 不是菜单）、第 9 条真实关闭系统「透明效果」后的观感、第 10 条滚动位置与闪烁、第 11 条真实数据下三页 + ComboBox 弹层的肉眼核对、第 12 条托盘菜单「退出」的清理链（`CloseMainWindow()` 只有真托盘能触发）。
 **收尾核过**：本家三进程全 0、HKCU 三值逐字为基线、`core\mihomo.exe` 哈希等于备份、`sys_proxy_backup` 为 `null`；全程未触碰 verge 那套（`verge-mihomo` 一直只在它自己的 8090 上）。
 
+## 第七轮：内核死活自证（2026-10-28，`feat/core-liveness`，裁定 R-23）
+
+同一载体（发布产物 + 真订阅 + 真内核 v1.19.33，Tray `--no-tray`）。脚本 `artifacts\smoke\r7-liveness.ps1`（判死那腿）与 `r7-residency.ps1`（开销那腿），都是 git-ignored 草稿。
+
+| 格子 | 怎么跑 | 读数 |
+|---|---|---|
+| 遗留 ⑤ 的正腿（外部结束内核） | 管道 `core.start` 到「运行中」→ 外部 `Stop-Process -Force` 结束那颗 `mihomo` → UIA 每 200 ms 抄一次 | **0.3 s** `CoreStateLabel` 由「运行中」落「异常」，内核故障格文案 `内核进程退出，退出码 -1（不是本程序发起的停止）` |
+| R-22 的反腿（内核崩溃不许退） | 同上，判死后再数进程 | `ClashAcry.UI` 进程数 **1**（界面活着把原因说完）、`ClashAcry.Tray` 1、残留 `mihomo` **0** |
+| 系统代理分毫未动 | 跑前跑后各抄一次 HKCU 三值 | `ProxyEnable=0` / `ProxyServer=127.0.0.1:8090` / `ProxyOverride=localhost;127.*;<local>` **逐字相同**（全程没发 `sysproxy.set`） |
+| Tray 空闲（泵在跑） | 冷启 20 s / 40 s 两点中位数 | WS **32.1 / 32.2** MB、Private 7.6 ⇒ ≤40 且无爬升 |
+| 满载合计（泵真探约 36 轮） | 真订阅内核在跑 + UI 已关 + 静置 3 min | Tray 46.3 + mihomo 39.8 = **85.7 MB** ≤ 120（第六轮同口径 85.8，差 0.1 在噪声里） |
+| 套件 | `dotnet build` + 两套测试 | 0 警告 0 错误；Core **175/175**（基线 168 + 新 7）；UI 33 条里像素取样那条整批跑读到 P25=113（判据 ≤110）、**单跑即绿**，本轮 UI 源码零改动 → 记账为抖动，不放宽判据 |
+
+**这条不需要人眼**：判死与文案都在 UIA 里有唯一读取点（`CoreStateLabel` / `BannerText`），上面那两腿已替用户跑过。用户若想自己确认一遍，口径就是遗留 ⑤ 那两句：起核 → 任务管理器结束 `mihomo.exe` → 界面 ≤1 s 内变「内核异常」且界面不退。
+
 ## v1 验收线（spec §11）
 
 - 第 1 条全绿（Core 168 / UI 33）+ 第 2~12 条勾完 + §10 三格开销线达标（Tray 空闲 ≤40 / 满载合计 ≤**120** / UI ≤220）。
@@ -295,6 +310,4 @@ powershell -Command "Get-Process ClashAcry.UI,ClashAcry.Tray -ErrorAction Silent
   ③ `ProviderInfo.Extra` 里的健康样本字段未建模；
   ④ Tray 满载 49~51 MB 的实现级压缩空间（tooltip 泵每 2 s 读盘 + JSON、`StderrTail` 双拷贝、两条重定向流），
     按 Task 17 归因是个位数 MB 收益，不足以回到 40，所以走的是拆两格那条路。
-  ⑤ **内核被外部结束后，界面上的「运行中」永不回落**（第六轮真机实测，spec §12 同名条目，**修法待用户拍板**）：从任务管理器结束 `mihomo.exe` 后，`handshake` 仍回 `Running`、概览页仍「运行中」、
-    R-22b 的内核故障格进不去（从没落过 `Crashed`），点「启动内核」回 `true` 而什么都不起（并发闸门 `CoreManager.cs:100`），
-    只有点「重载」才会抛 `由于目标计算机积极拒绝，无法连接 (127.0.0.1:9097)`。人工核对方法：起核到「运行中」→ 任务管理器结束那颗 `mihomo.exe` → 看界面是否还写「运行中」（**当前就是还写**）。
+  ⑤ ~~**内核被外部结束后，界面上的「运行中」永不回落**~~ —— **第七轮已修（裁定 R-23，spec §9「运行期死活自证」）**：三条通路（`Process.Exited` 落 `Crashed` / 5 s 低频双探活泵连续 2 轮 / `core.start` 闸门先探活才回 `true`），机制与回归锁见 spec。**人工核对口径不变，期望值反过来了**：起核到「运行中」→ 任务管理器结束那颗 `mihomo.exe` → 界面 **≤1 s 内**（`Exited` 通路）落「内核异常」并在内核故障格写明退出码，且界面**不跟着退**（内核崩溃不算断连，R-22 的反面）。agent 已在发布产物上代跑过一次，读数见下面「第七轮」那节。

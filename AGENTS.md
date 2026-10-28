@@ -30,6 +30,7 @@ UI 冒烟与验收清单：`docs/superpowers/checklists/v1-acceptance.md`（随�
 - **内核生命周期归 Tray**：UI 进程绝不 spawn/kill mihomo，启停重载一律走命名管道（spec §3 三条禁令）。
 - **UI 与 Tray 同生死**：够不着托盘且宽限（连续 3 轮轮询 ≈ 6 s）用尽 ⇒ 界面自己关窗退出，横幅里**不放**任何"拉起/重启托盘"按钮（spec §3 裁定 R-22）。内核崩溃不算断连：那时托盘还在，界面必须活着把原因说完。
 - **两棵真相树**：UI 不写 `settings.json`（经 `settings.update`）；引擎设置由 Tray 原子写；界面偏好走 `LocalSettings`。
+- **内核死活由 Tray 自证（spec §9 裁定 R-23）**：进了 `Running` 不等于从此不用管——三条通路都要在：`Process.Exited` 落 `Crashed`（自杀/换核/取消三条正常路径不许误报）、5 s 低频双探活泵（**连续 2 轮**不符才判死）、`core.start` 的 `Running` 闸门**先探活才回 true**。判死只把状态说真、不顺手杀进程、**不自动重启**；一次 controller 探活预算 1 s（R-8i 墙上时间口径）。
 - **mihomo 是唯一事实源**：不镜像节点状态，写操作后全量重拉；注入只覆盖 §4.3 列出的必需键，其余 yaml 原样透传。
 - **API 契约先实测再写代码**：端点方法名/请求体/响应形状必须对真机核实并回写 spec §4.2，禁止凭记忆写端点。
 - **常驻开销**：Tray 保持零 XAML、不用 WinForms 托盘；每次改动 UI 后复测 `measure-residency.ps1`（判据见 spec §10）。

@@ -18,7 +18,9 @@ public partial class App : Application
 {
     private MainWindow? _window;
 
-    /// <summary>测试启动参数 <c>--tray-absent</c>：跳过拉起、直接走「托盘宿主未运行」那条分支（Step 4 的断言面）。</summary>
+    /// <summary>测试启动参数 <c>--tray-absent</c>：跳过拉起、直接走「托盘宿主未运行」那条分支（Step 4 的断言面）。
+    /// 这条分支现在是**有终点的**：横幅先说一句为什么，宽限一尽界面自己退（<see cref="MainWindow"/> 里那条
+    /// <c>Overview.TrayLost</c>），不再留一个"看着还在、其实什么都做不了"的窗口（用户裁定 2026-10-28）。</summary>
     public static bool TrayAbsentRequested { get; private set; }
 
     /// <summary><c>--reset-prefs</c>：把 LocalSettings 里的界面偏好清空，回到「全新安装」的状态。

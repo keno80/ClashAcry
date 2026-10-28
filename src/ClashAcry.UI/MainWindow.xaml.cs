@@ -53,6 +53,10 @@ public sealed partial class MainWindow : Window
 
         Overview = new OverviewViewModel(Link, DispatcherQueue.GetForCurrentThread());
         Overview.Changed += RenderBanner;
+        // 同生死（用户裁定 2026-10-28）：托盘在宽限内再也够不着，界面就不该留着一个灰窗口——关掉它，
+        // App 那条「关窗即退」把进程一起带走。这里不 Kill 任何东西、也不动系统代理：
+        // 内核归 Tray（spec §3 禁令 1），代理载荷由下一次冷启动的 CleanupIfStale 收拾（R-20b）。
+        Overview.TrayLost += () => Close();
 
         Nav.SelectionChanged += (_, e) => Show(TagOf(e.SelectedItem));
         Root.Loaded += async (_, _) => { await ConnectAsync(); Overview.Start(); };
@@ -133,6 +137,7 @@ public sealed partial class MainWindow : Window
         {
             // 故障从 Overview 走（它是横幅唯一的文本来源，R-14e）：直接 ShowBanner 的话，
             // 轮询第一次撞上「未连接」就会把这句话盖成另一条措辞。
+            // 这一句只负责**说清为什么**：界面随后会在宽限一尽时自己退掉（<see cref="OverviewViewModel.TrayLost"/>）。
             Overview.ReportFault(TrayAbsentText);
             return;
         }
@@ -152,44 +157,6 @@ public sealed partial class MainWindow : Window
             _lastFault = fault;
             if (fault.Length == 0) ClearBanner();
             else ShowBanner(fault);
-        }
-        if (!_relaunchBusy) RelaunchTrayButton.Visibility = NeedsRelaunch ? Visibility.Visible : Visibility.Collapsed;
-    }
-
-    /// <summary>
-    /// 「一键拉起」的判据是**够不够得着托盘**，不是横幅开没开：横幅在内核崩溃时也开着，可那时托盘活得好好的，
-    /// 要的是概览页那个内核开关，不是再起一个宿主。连接级故障会把 _state 打成 null，崩溃事件不会——
-    /// 这条区分由 ShellTests 的 CoreCrashed 用例钉住。
-    /// </summary>
-    private bool NeedsRelaunch => Overview.ErrorText.Length > 0 && !Overview.TrayConnected;
-
-    private bool _relaunchBusy;
-
-    /// <summary>
-    /// 一键拉起托盘：复用外壳启动时那条通路（<see cref="TrayLink.EnsureTrayRunningAsync"/>，UI 唯一允许的
-    /// 跨进程 <c>Process.Start</c>，且只起 Tray——内核生命周期仍全在 Tray，spec §3 禁令 1）。
-    /// 进行中必须看得见（spec §9）：按钮改文案并禁用，不等 500 ms + 3 s 的探活预算跑完才回话。
-    /// </summary>
-    private async void OnRelaunchTrayClick(object sender, RoutedEventArgs e)
-    {
-        if (_relaunchBusy) return;
-        _relaunchBusy = true;
-        RelaunchTrayButton.IsEnabled = false;
-        RelaunchTrayButton.Content = "拉起中…";
-        bool up;
-        try
-        {
-            up = await Link.EnsureTrayRunningAsync();
-            if (up) await Overview.RefreshAsync();       // 起来就立刻重握手 + 重读，不让用户再等一个 2 s 周期
-            else Overview.ReportFault(TrayAbsentText);   // 拉不起来：回到「第一条说话」的那句故障文案
-            RelaunchTrayButton.Content = up ? "一键拉起托盘" : "重试拉起托盘";
-        }
-        finally
-        {
-            RelaunchTrayButton.IsEnabled = true;
-            _relaunchBusy = false;
-            // 拉起来了就把这一条收掉；没拉起来则带着「重试」的文案重新露面。
-            RelaunchTrayButton.Visibility = NeedsRelaunch ? Visibility.Visible : Visibility.Collapsed;
         }
     }
 

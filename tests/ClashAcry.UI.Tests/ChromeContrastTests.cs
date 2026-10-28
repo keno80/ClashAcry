@@ -13,7 +13,8 @@ namespace ClashAcry.UI.Tests;
 /// <summary>
 /// 深色 chrome 的**逐类像素核对**（Task 16）。AGENTS.md 的硬约束写明判据是像素而不是肉眼看截图，
 /// 所以每条断言都落在「某个控件的某个区域量出来的亮度分布」上；控件类别按约束清单逐个覆盖：
-/// <c>Button</c> / <c>ComboBox</c> / <c>ComboBoxItem</c> / 自绘节点行 / <c>ScrollBar</c>（轨道、滑块、翻页 RepeatButton）。
+/// <c>Button</c> / <c>ComboBox</c> / <c>ComboBoxItem</c> / 自绘节点行 / <c>ScrollBar</c>（轨道、滑块、翻页 RepeatButton）
+/// / 故障横幅（<c>InfoBar</c> 面与那句文字，第六轮补——它只在故障时出现，Task 16 那批量不到）。
 /// 每条都是**双极性**的：同一块上既要点出「底是暗的」，又要点出「前景（文字/箭头/滑块）是亮的」——
 /// 只量暗会把「整屏糊成黑」也判成通过，那正是深色档最常见的假通过形态。
 /// 反证在 <see cref="FillCriterion_LightThemeReallyReadsLight"/>：浅色档下同一量法必须读到发白，
@@ -194,6 +195,29 @@ public sealed class ChromeContrastTests : IClassFixture<UiAppHarness>, IDisposab
         }
     }
 
+    [Fact]
+    public async Task DarkChrome_Banner_FaultSurfaceIsDark_WithLightText()
+    {
+        // 横幅这块面**从没被像素量过**：Task 16 那批量的是常态界面，而它只在故障时出现。
+        // 第六轮按用户裁定撤掉「一键拉起托盘」按钮后，InfoBar 只剩一句文案，也是它唯一的可见形态；
+        // 判据与其余各条同规：底色要暗（P25）、文字要亮（max）、跨度够大，只量暗不算通过。
+        // 实测（探针量出来的，不是阈值倒推）：InfoBar 面 P25=67 / min=27，文字区域 max=255 ——
+        // 跨度 188，落在这组既有阈值里（≤110 / ≥140 / ≥60）；浅色档的反证由 FillCriterion 那条一起量。
+        await using var tray = await FakeTrayWithCore();
+        using var s = _harness.Launch("--force-dark", "--reset-prefs");
+        Assert.True(await tray.WaitUiConnectedAsync(TimeSpan.FromSeconds(10)), "界面没连上假 Tray");
+
+        tray.Emit(EventTypes.CoreStateChanged,
+            new CoreStateChanged(CoreState.Crashed, "配置解析失败：proxies 缺失", Array.Empty<string>()));
+        await WaitUntilAsync(() => Find(s, "Banner") is { IsOffscreen: false }, 10);
+        WaitLayoutSettled(s, "Banner", "BannerText");
+
+        using var bmp = WindowCapture.Grab(s.Hwnd);
+        var win = WindowCapture.WindowRect(s.Hwnd);
+        AssertFillDark(bmp, win, s, "Banner", "InfoBar 面（深色档）");
+        AssertFeatureLight(bmp, win, s, "BannerText", "横幅文字（深色档）");
+    }
+
     /// <summary>
     /// 反证（Task 18 补）：把主题真的切到浅色，同一套区域量法必须读到「底发白」。
     /// 没有这一条，「≤110」只是在自说自话——单点取样时代没法这样核对，因为那个点本身就不稳。
@@ -205,6 +229,11 @@ public sealed class ChromeContrastTests : IClassFixture<UiAppHarness>, IDisposab
         await using var tray = await FakeTrayWithCore();
         using var s = _harness.Launch("--reset-prefs");          // 不钉深色：让主题单选真的生效
         Assert.True(await tray.WaitUiConnectedAsync(TimeSpan.FromSeconds(10)), "界面没连上假 Tray");
+        // 把横幅一起拖进反证：DarkChrome_Banner 那条一次就过，没读过浅色档就不知道它的判据有没有区分力。
+        // 浅色档下这块面必须读到**发白**，否则那条深色判据是在自说自话。
+        tray.Emit(EventTypes.CoreStateChanged,
+            new CoreStateChanged(CoreState.Crashed, "配置解析失败：proxies 缺失", Array.Empty<string>()));
+        await WaitUntilAsync(() => Find(s, "Banner") is { IsOffscreen: false }, 10);
         Show(s, "SettingsPage");
         ScrollToEnd(s);
         Select(s, "ThemeLight");
@@ -215,8 +244,9 @@ public sealed class ChromeContrastTests : IClassFixture<UiAppHarness>, IDisposab
             var win = WindowCapture.WindowRect(s.Hwnd);
             var (pageP25, _, _) = Stats(bmp, win, s, "SettingsPage", "设置页底（浅色档）");
             var (boxP25, _, _) = Stats(bmp, win, s, "ImportUrlBox", "TextBox 面（浅色档）");
-            Assert.True(pageP25 > DarkMax && boxP25 > DarkMax,
-                $"浅色档下底色 P25 仍读到 页面 {pageP25} / 输入框 {boxP25}（判据 >{DarkMax}）" +
+            var (bannerP25, _, _) = Stats(bmp, win, s, "Banner", "InfoBar 面（浅色档）");
+            Assert.True(pageP25 > DarkMax && boxP25 > DarkMax && bannerP25 > DarkMax,
+                $"浅色档下底色 P25 仍读到 页面 {pageP25} / 输入框 {boxP25} / 横幅 {bannerP25}（判据 >{DarkMax}）" +
                 "——深色核对的判据没有区分力，是夹具坏了，不是界面没问题");
         }
         finally

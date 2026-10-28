@@ -16,9 +16,10 @@ public class ShellTests : IClassFixture<UiAppHarness>
     public ShellTests(UiAppHarness harness) => _harness = harness;
 
     [Fact]
-    public void WindowOpensWithThreeNavItems()
+    public async Task WindowOpensWithThreeNavItems()
     {
-        using var s = _harness.Launch();
+        await using var tray = await FakeTray.StartAsync();      // 界面与托盘同生死，起窗口就得有个托盘在
+        using var s = _harness.Launch("--reset-prefs");
         Assert.Equal("ClashAcry", s.Window.Title);
         Assert.NotNull(s.Window.FindFirstDescendant(cf => cf.ByAutomationId("NavOverview")));
         Assert.NotNull(s.Window.FindFirstDescendant(cf => cf.ByAutomationId("NavProxies")));
@@ -26,25 +27,44 @@ public class ShellTests : IClassFixture<UiAppHarness>
     }
 
     [Fact]
-    public void TrayAbsent_ShowsBanner()
+    public void TrayAbsent_BannerSaysWhy_ThenUiQuitsItself()
     {
-        // --tray-absent 把「托盘不在」变成可复现状态：不跑 EnsureTrayRunningAsync，
-        // 也就不依赖机器上此刻到底有没有 Tray 在跑（有的话这条会两难）。
-        // 计划里这条叫 …DisablesCoreToggle，但 Task 12 的外壳还没有内核开关（在 Task 14），
-        // 所以这里只断言横幅可见 + 文案（R-12h）。
-        using var s = _harness.Launch("--tray-absent");
-        var banner = s.Require("Banner");
-        Assert.False(banner.IsOffscreen);                                        // 横幅可见
-        Assert.Contains("托盘宿主未运行", s.Require("BannerText").Name);
+        // 用户裁定（2026-10-28，第六轮）：**界面不该在没有托盘的房间里独活**。
+        // 上一轮为这条状态加的「一键拉起托盘」被明确否掉——不必留一条横幅让用户守着个灰界面，
+        // 托盘起不来就一起不玩。--tray-absent 跳过拉起，把这条变成可复现状态。
+        // 三段判据按时间排：先看见"为什么"（横幅 + 控制置灰），然后**没有**任何恢复按钮，最后宽限一尽界面自己收。
+        using var s = _harness.Launch("--tray-absent", "--reset-prefs");
+        Assert.Contains("托盘宿主未运行", Text(s, "BannerText"));
+        Assert.False(s.Require("CoreToggle").IsEnabled);         // 控制不了的东西不许做出"能控制"的样子
+        Assert.Equal("不可用", Text(s, "CoreStateLabel"));
+        Assert.True(NoRelaunchAffordance(s), "横幅不该再挂「一键拉起托盘」——恢复入口已被裁掉");
+
+        Assert.True(s.Process.WaitForExit(25000), "托盘起不来时界面没有自行退出（还留着那条灰横幅）");
     }
 
     [Fact]
-    public void SwitchPages_ReusesTheSamePageInstance()
+    public async Task TrayDiesMidSession_UiQuitsItself()
+    {
+        // 与 R-20a 配对的那一半：**同生也同死**。托盘菜单「退出」会关掉界面是上一轮做的；
+        // 托盘被强杀/崩掉时没有退出钩子，界面原本留在"横幅念着 Pipe is broken + 控制全灰"的形态。
+        // 现在宽限（3 轮轮询）一尽就自己退——不给用户留一个看着像还在、其实什么都做不了的窗口。
+        await using var tray = await FakeTray.StartAsync();
+        using var s = _harness.Launch("--reset-prefs");
+        Assert.True(await tray.WaitUiConnectedAsync(TimeSpan.FromSeconds(10)), "界面没连上假 Tray");
+        WaitFor(s, () => Text(s, "CoreVersionLabel") == "v-test", 15);   // 真说上话了，下面的"断"才是断在半路
+
+        await tray.DisposeAsync();                                       // 模拟硬杀：没有退出钩子、连接直接死
+        Assert.True(s.Process.WaitForExit(25000), "托盘断了且宽限内没续上，界面没有自行退出");
+    }
+
+    [Fact]
+    public async Task SwitchPages_ReusesTheSamePageInstance()
     {
         // 「轮询/切页不得有可见抖动」的机制判据：页面实例按 Tag 缓存（MainWindow._pages）。
         // 每个页面实例在构造时把自己的序号写进 UIA Name（PageIdentity.Stamp），来回切页读到同一个序号
         // 就说明是同一个实例；改成每次新建，这里立刻变红。
-        using var s = _harness.Launch("--tray-absent");
+        await using var tray = await FakeTray.StartAsync();
+        using var s = _harness.Launch("--reset-prefs");
 
         var before = Show(s, "NavProxies").Name;
         Show(s, "NavOverview");
@@ -55,12 +75,13 @@ public class ShellTests : IClassFixture<UiAppHarness>
     }
 
     [Fact]
-    public void SecondInstance_ExitsImmediatelyAndLeavesFirstAlive()
+    public async Task SecondInstance_ExitsImmediatelyAndLeavesFirstAlive()
     {
         // spec §3 的单实例约束：第二份 UI 意味着两个渲染面读同一份 handshake，
         // 最坏是用户在两个窗口里对同一个内核下相反的命令。
-        using var first = _harness.Launch("--tray-absent");
-        using var second = _harness.StartBare("--tray-absent");
+        await using var tray = await FakeTray.StartAsync();
+        using var first = _harness.Launch("--reset-prefs");
+        using var second = _harness.StartBare("--reset-prefs");
 
         Assert.True(second.WaitForExit(15000), "第二实例没有自行退出");
         Assert.False(first.App.HasExited);                       // 第一份还在
@@ -68,32 +89,22 @@ public class ShellTests : IClassFixture<UiAppHarness>
     }
 
     [Fact]
-    public void ClosingWindow_ExitsTheProcess()
+    public async Task ClosingWindow_ExitsTheProcess()
     {
         // spec §3 的「关窗即退」：UI 不常驻、不藏进托盘（藏起来就意味着第二个渲染面随时可能复活）。
-        using var s = _harness.Launch("--tray-absent");
+        await using var tray = await FakeTray.StartAsync();
+        using var s = _harness.Launch("--reset-prefs");
         s.Window.Close();
         Assert.True(s.Process.WaitForExit(10000), "关窗后 UI 进程没退");
         Assert.Equal(0, s.Process.ExitCode);
     }
 
     [Fact]
-    public void TrayAbsent_BannerOffersOneClickRelaunch()
+    public async Task CoreCrashed_BannerShowsFault_ButUiStaysAlive_AndNoRelaunchAffordance()
     {
-        // v1.1 欠账②「一键拉起」：托盘退出后横幅只把故障念给用户听，恢复入口要用户自己去找 exe。
-        // UI 本来就有这条通路（外壳启动时的 EnsureTrayRunningAsync），欠的是把它交给用户按一下。
-        using var s = _harness.Launch("--tray-absent");
-        var button = s.Require("RelaunchTrayButton");
-        Assert.False(button.IsOffscreen);                       // 连接断了 = 这条动作此刻正是用户要的，不许藏着
-        Assert.Contains("拉起", button.Name);
-    }
-
-    [Fact]
-    public async Task CoreCrashed_BannerShowsFault_ButNoRelaunchAction()
-    {
-        // 按钮的可见判据必须是「**托盘**够不着」，不是「横幅开着」。
-        // 内核崩了时托盘活得好好的、横幅也开着，这时候给一个「拉起托盘」是把用户往错的方向推——
-        // 那条正确的动作是概览页上的内核开关。naive 地按横幅可见来显示按钮会在这里变红。
+        // 「一起死」指的是**跟托盘**死，不是跟内核死：内核崩了托盘还在，用户要的是在同一个界面里
+        // 把内核再按起来（概览页那个开关）。把这条与上一条对照着看，就知道退出判据取的是
+        // "够不够得着托盘"而不是"内核好不好"。同时这里钉住恢复按钮已经拆掉（第六轮裁定）。
         await using var tray = await FakeTray.StartAsync();
         using var s = _harness.Launch("--reset-prefs");
         Assert.True(await tray.WaitUiConnectedAsync(TimeSpan.FromSeconds(10)), "界面没连上假 Tray");
@@ -102,10 +113,16 @@ public class ShellTests : IClassFixture<UiAppHarness>
         tray.Emit(EventTypes.CoreStateChanged,
             new CoreStateChanged(CoreState.Crashed, "配置解析失败", Array.Empty<string>()));
         WaitFor(s, () => !s.Require("Banner").IsOffscreen && Text(s, "BannerText").Contains("配置解析失败"), 10);
+        Assert.True(NoRelaunchAffordance(s), "横幅不该再挂「一键拉起托盘」——恢复入口已被裁掉");
 
-        var button = s.Window.FindFirstDescendant(cf => cf.ByAutomationId("RelaunchTrayButton"));
-        Assert.True(button is null || button.IsOffscreen, "托盘在线、只是内核崩了，不该给「拉起托盘」");
+        // 跨过宽限期（断连那条判据是 3 轮 ≈6 s）还活着才算"内核崩了不误退"。
+        Thread.Sleep(9000);
+        Assert.False(s.Process.HasExited, "内核崩了、托盘还在，界面不该把自己关掉");
     }
+
+    /// <summary>恢复入口整条撤掉：WinUI 里 <c>Visibility.Collapsed</c> 的元素不进 UIA 树，所以"没有"就是"找不到"。</summary>
+    private static bool NoRelaunchAffordance(UiSession s) =>
+        s.Window.FindFirstDescendant(cf => cf.ByAutomationId("RelaunchTrayButton")) is null;
 
     private static string Text(UiSession s, string id)
     {

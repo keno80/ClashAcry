@@ -1,3 +1,4 @@
+using ClashAcry.UI.Tests.Fakes;
 using System.Threading;
 
 namespace ClashAcry.UI.Tests;
@@ -15,9 +16,10 @@ public class BackdropTests : IClassFixture<UiAppHarness>
     public BackdropTests(UiAppHarness harness) => _harness = harness;
 
     [Fact]
-    public void DefaultRequestsAcrylic_AndLabelIsConsistent()
+    public async Task DefaultRequestsAcrylic_AndLabelIsConsistent()
     {
-        using var s = OpenSettings("--reset-prefs", "--tray-absent");
+        await using var tray = await FakeTray.StartAsync();
+        using var s = OpenSettings("--reset-prefs");
         Assert.Equal("Acrylic", s.Require("BackdropSelectedLabel").Name);
 
         var label = s.Require("BackdropEffectiveLabel").Name;
@@ -26,9 +28,10 @@ public class BackdropTests : IClassFixture<UiAppHarness>
     }
 
     [Fact]
-    public void SwitchingToSolid_RestatesLabelsWithoutReopeningWindow()
+    public async Task SwitchingToSolid_RestatesLabelsWithoutReopeningWindow()
     {
-        using var s = OpenSettings("--reset-prefs", "--tray-absent");
+        await using var tray = await FakeTray.StartAsync();
+        using var s = OpenSettings("--reset-prefs");
         var hwndBefore = s.Hwnd;
 
         Select(s, "BackdropSolid");
@@ -38,19 +41,21 @@ public class BackdropTests : IClassFixture<UiAppHarness>
     }
 
     [Fact]
-    public void Degradation_SpellsOutTheReason()
+    public async Task Degradation_SpellsOutTheReason()
     {
         // --force-degrade 把「系统允许透明效果」注入成假：真机上这条要靠改用户的「设置 → 个性化 → 颜色 →
         // 透明效果」，测试不许动别人的机器（R-13a）。判据与计划 Step 6 第②项一致，只是可复现。
-        using var s = OpenSettings("--reset-prefs", "--tray-absent", "--force-degrade");
+        await using var tray = await FakeTray.StartAsync();
+        using var s = OpenSettings("--reset-prefs", "--force-degrade");
         Assert.Equal("Acrylic", s.Require("BackdropSelectedLabel").Name);
         Assert.Equal("当前实际生效：纯色（系统透明效果已关闭）", s.Require("BackdropEffectiveLabel").Name);
     }
 
     [Fact]
-    public void PrefsSurviveRestart()
+    public async Task PrefsSurviveRestart()
     {
-        using (var s = OpenSettings("--reset-prefs", "--tray-absent"))
+        await using var tray = await FakeTray.StartAsync();
+        using (var s = OpenSettings("--reset-prefs"))
         {
             Select(s, "BackdropMica");
             Assert.Equal("Mica", s.Require("BackdropSelectedLabel").Name);
@@ -58,12 +63,14 @@ public class BackdropTests : IClassFixture<UiAppHarness>
             Assert.True(s.Process.WaitForExit(10000), "关窗后 UI 进程没退");
         }
 
-        using var again = OpenSettings("--tray-absent");                       // 不带 --reset-prefs：读回来的必须是存过的
+        using var again = OpenSettings();                       // 不带 --reset-prefs：读回来的必须是存过的
         Assert.Equal("Mica", again.Require("BackdropSelectedLabel").Name);
 
         Select(again, "BackdropAcrylic");        // 收尾把偏好送回默认档，别给用户留下一个"Mica 机器"
     }
 
+    /// <summary>起窗口前调用方必须已经挂好 <see cref="FakeTray"/>：界面与托盘同生死（第六轮裁定），
+    /// 没有托盘的会话会在几秒内自己退出， backdrop 那几条判据就读不到了。</summary>
     private UiSession OpenSettings(params string[] args)
     {
         var s = _harness.Launch(args);

@@ -1,3 +1,5 @@
+using ClashAcry.Contracts;
+using ClashAcry.UI.Tests.Fakes;
 using FlaUI.Core.AutomationElements;
 using System.Threading;
 
@@ -73,6 +75,53 @@ public class ShellTests : IClassFixture<UiAppHarness>
         s.Window.Close();
         Assert.True(s.Process.WaitForExit(10000), "关窗后 UI 进程没退");
         Assert.Equal(0, s.Process.ExitCode);
+    }
+
+    [Fact]
+    public void TrayAbsent_BannerOffersOneClickRelaunch()
+    {
+        // v1.1 欠账②「一键拉起」：托盘退出后横幅只把故障念给用户听，恢复入口要用户自己去找 exe。
+        // UI 本来就有这条通路（外壳启动时的 EnsureTrayRunningAsync），欠的是把它交给用户按一下。
+        using var s = _harness.Launch("--tray-absent");
+        var button = s.Require("RelaunchTrayButton");
+        Assert.False(button.IsOffscreen);                       // 连接断了 = 这条动作此刻正是用户要的，不许藏着
+        Assert.Contains("拉起", button.Name);
+    }
+
+    [Fact]
+    public async Task CoreCrashed_BannerShowsFault_ButNoRelaunchAction()
+    {
+        // 按钮的可见判据必须是「**托盘**够不着」，不是「横幅开着」。
+        // 内核崩了时托盘活得好好的、横幅也开着，这时候给一个「拉起托盘」是把用户往错的方向推——
+        // 那条正确的动作是概览页上的内核开关。naive 地按横幅可见来显示按钮会在这里变红。
+        await using var tray = await FakeTray.StartAsync();
+        using var s = _harness.Launch("--reset-prefs");
+        Assert.True(await tray.WaitUiConnectedAsync(TimeSpan.FromSeconds(10)), "界面没连上假 Tray");
+        WaitFor(s, () => Text(s, "CoreStateLabel") == "未运行", 15);     // 握手已落地，界面真的在跟假 Tray 说话
+
+        tray.Emit(EventTypes.CoreStateChanged,
+            new CoreStateChanged(CoreState.Crashed, "配置解析失败", Array.Empty<string>()));
+        WaitFor(s, () => !s.Require("Banner").IsOffscreen && Text(s, "BannerText").Contains("配置解析失败"), 10);
+
+        var button = s.Window.FindFirstDescendant(cf => cf.ByAutomationId("RelaunchTrayButton"));
+        Assert.True(button is null || button.IsOffscreen, "托盘在线、只是内核崩了，不该给「拉起托盘」");
+    }
+
+    private static string Text(UiSession s, string id)
+    {
+        try { return s.Require(id).Name; }
+        catch (FlaUI.Core.Exceptions.PropertyNotSupportedException) { return ""; }   // 空文本的 TextBlock：Name 不可读
+    }
+
+    private static void WaitFor(UiSession s, Func<bool> cond, int seconds)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(seconds);
+        while (DateTime.UtcNow < deadline)
+        {
+            try { if (cond()) return; } catch (Exception) { /* 这一帧正在重建，下一轮再读 */ }
+            Thread.Sleep(100);
+        }
+        throw new Xunit.Sdk.XunitException($"界面等待超时（{seconds} s）");
     }
 
     /// <summary>点导航项并等对应页面出现在树里；返回页面元素。</summary>

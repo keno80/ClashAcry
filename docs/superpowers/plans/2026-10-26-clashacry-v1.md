@@ -25,7 +25,7 @@
 - 轮询/自动刷新不得产生可见抖动：`ListView` 的 `ItemsSource` 用节点名作 key 的集合、就地更新属性，不整表重置。
 - 长耗时操作（内核下载更新）必须有进行中反馈：按钮禁用 + 文案「下载更新中 NN%」，禁止阻塞式弹窗。
 - UI 文案仅中文；深色 chrome 逐类核对（`Button`/`ComboBox`/`ComboBoxItem`/`ListBoxItem`/`ScrollBar` 含 `Track.Thumb` 与翻页 `RepeatButton`），判据为像素取样。
-- 开销线（Task 2 建立基线，此后每次改 UI 复测；**Task 17 裁定拆两格**）：Tray **空闲态**（无内核在跑）≤ **40 MB**，**满载常驻**（Tray + mihomo 在跑）合计 ≤ **80 MB**，UI ≤ **220 MB**。判据表与裁定理由见 spec §10。
+- 开销线（Task 2 建立基线，此后每次改 UI 复测；**Task 17 裁定拆两格**；**第六轮 R-22c 把满载合计线按真实订阅规模由 80 放宽到 120**）：Tray **空闲态**（无内核在跑）≤ **40 MB**，**满载常驻**（Tray + mihomo 在跑）合计 ≤ **120 MB**，UI ≤ **220 MB**（三进程合计 ≤ 300 MB）。判据表与裁定理由见 spec §10。
 - 每个任务结尾：`dotnet test` 相关项目全绿 → `git commit` → `git push origin feat/clashacry-v1`。
 - **WireMock.Net 写法统一**：`server.Given(Request.Create()…匹配条件…).RespondWith(Response.Create()…响应…)`。`WithPath`/`UsingGet` 是请求侧，`WithStatusCode`/`WithBody`/`WithJson` 是响应侧——把响应方法挂在请求构造器上编译不过。JSON 响应一律用 `.WithBody(JsonSerializer.Serialize(obj))`，`Content-Type` 无所谓（客户端直接反序列化流）。
 - 测试项目引用面：`tests/ClashAcry.UI.Tests` **只引用 `ClashAcry.Core`**，UI 侧一律经 FlaUI 从窗口外断言；不把 WinUI 应用工程拉进测试项目（XAML 编译器依赖会污染测试构建）。
@@ -5233,6 +5233,7 @@ Expected: 三条命令全绿，构建无警告。
 - **R-19b｜一条 Critical 的前提被部分否证，但闸门照立**：报告说 `tag_name="../../x"` 配上同名资产就能借 `Path.Combine` 写到目录外——**实测拼不出来**：`PickAsset` 要求整名等于 `mihomo-windows-amd64-{tag}.zip`，那个前缀使 `..` 永远成不了独立路径段，绝对形态也过不了非法字符判据。闸门仍然要加，理由换成职责分离：路径合法性不该依赖选包判据的写法（哪天退回 `StartsWith` 就开了），而**同一条评审里真正成立的是 URL 那半**——`browser_download_url` 今天被原样发请求（任意主机、`http://` 也收），拿回来的第一个 `.exe` 又会被 `CoreManager` 执行。摘要校验**明确不做**并记进 spec §4.5：在线通路没有可信锚点可比，从同一个已攻陷的源再取一份校验文件等于没验。
 - **R-19d｜一条报告是假阳性，别照改**：「嵌套组永远选不中」不成立——`ProxiesViewModel.cs:64` 把所有 group（含嵌套）都渲染成独立行，`:141` 只是不把它重复列进父组的子项。
 - **R-19e｜汇报漏报的两条评审发现**（当轮汇报只列了五项，这两条没进我的清单，这里补记并入 v1.1）：`measure-residency.ps1` 按 `-ProcessName mihomo` 取进程不限定路径，本机 `verge-mihomo.exe` 正在跑时会量到别家内核的内存数；`--reset-prefs` 是 `Values.Clear()`，会把开发者自己存的界面偏好整份抹掉。两条都已写进 spec §12 的 v1.1 账，本轮不动代码（合并前最小改动面）。
+  **订正（第六轮）**：前半条的机制写错了——`Get-Process -Name` 精确匹配，只有 `verge-mihomo` 在跑时报的是「找不到名为 mihomo 的进程」（实测）；洞仍是「不看路径」，即同名的第三方内核、或自家孤儿内核与新内核同时在跑时取错那颗。详见 spec §12 ①。
 - 其余未修的 Important/Minor（`PipeServer` 的 `linked` CTS 生命周期与 `DrainAsync` 裸 catch、`KillProcess` 无超时、订阅导入 sync-over-async + 无上限读、`PipeClient` 请求级无截止、托盘分支 `MessageLoop` 返回后不跑清理、`settings.update` 改端口后代理指向新端口而内核听旧端口、spec §4.4 的 `window.*`/`proxies.show_hidden` 未实现）逐条落在 spec §12 的同一份账上。
 
 - [ ] **Step 3: 人工冒烟（用户参与点）**
@@ -5296,6 +5297,31 @@ git -c http.proxy= -c https.proxy= push origin main
 
 远端分支 `feat/clashacry-v1` **保留未删**（删远端分支属破坏性操作，等用户点头）。后续两轮（2026-10-27 第四轮 R-20a/R-20b、2026-10-28 第五轮 R-21a/R-21b）**仍走 `feat/clashacry-v1`**：这两轮补的都是 v1 spec 自己 §12 记账欠下的格子，不是新功能，按规则 2「新功能一律新开分支」的范围不必另起；真正的 v1.1 新增能力（geodata 随包分发、`PipeServer` 头阻塞等）才另起 `feat/<范围>`。
 第五轮合并后 **HEAD 留在 `main`**（不再切回分支）：分支与主干树内容已完全一致，v1 这条交付线到此关闭，下一步动手时按规则 2 另起 `feat/<v1.1 范围>`。
+
+**远端 `feat/clashacry-v1` 已按用户指令删除**（2026-10-28，「删除远端分支」），本地那份留着当 v1 的落点记录。第六轮改的是**行为**（撤销一条裁定、改 UI 的生死语义），不是补格子，按规则 2 另起分支 `feat/ui-exit-with-tray`。
+
+### 第六轮（2026-10-28）：同生死 + 横幅两格 + 满载线放宽
+
+派发状态（用户对第五轮汇报的四点回答，逐条对应）：① 「你自己决定」→ 内核版本真机自测由 agent 做完；② 「没必要保留横幅，内核和 ui 应该一起」→ **撤销 R-21b**、改判 UI 与 Tray 同生死；③ 「核对一下」→ 深色 chrome 像素核对；④ 「放宽」→ 满载常驻那格的线。
+
+**② 的实现（裁定 R-22，spec §3 + §4.1 末已回写，AGENTS 硬约束加了一条）**：`OverviewViewModel` 里 `PollSeconds=2` / `LinkGraceRounds=3`（≈6 s，给托盘自己重启留的口子）+ `NoteLinkDown()` 只在两条**连接级**失败分支计数、任何一次说得上话就销账（含 `RunAsync` 成功那格：轮询恰好连输三轮而界面其实在正常干活，不算宿主没了）+ `TrayLost` 事件；`MainWindow` 里一句 `Overview.TrayLost += () => Close()`，由「关窗即退」带走进程。撤掉的是 `RelaunchTrayButton`、`NeedsRelaunch`、`_relaunchBusy`、`OnRelaunchTrayClick` 整套；横幅回到只有一句文案的 `TextBlock`。
+
+**RED 抽验（本轮做完实现之后专门回跑了一次，不是"先写先红"的一句口头账）**：把 `Overview.TrayLost += () => Close();` 那一行注释掉、`dotnet build ClashAcry.sln -c Release` 后跑三条锁——
+`TrayAbsent_BannerSaysWhy_ThenUiQuitsItself` 与 `TrayDiesMidSession_UiQuitsItself` 各红 25 s 并打印各自的判据原文（「托盘起不来时界面没有自行退出（还留着那条灰横幅）」/「托盘断了且宽限内没续上，界面没有自行退出」），
+而**对照组** `CoreCrashed_BannerShowsFault_ButUiStaysAlive_AndNoRelaunchAffordance` 仍绿——这条正是"内核崩了不误退"，摘掉同生死那根线不该影响它，影响到了才说明锁是空的。
+同法把 `ErrorText` 退回单格（`=> _errorText`）跑 `CoreCrashFault_StaysReadable_UntilCoreStateMoves`：红（10 s），证明 R-22b 那格两格拆分是真判据不是装饰。两处临时改动均已还原并 `grep "RED 抽验"` 确认无残留。
+
+**③ 核对里捞出的一条真回归（R-22b）**：见 spec §12 第六轮②——第五轮 R-21a 的"每个 `core.state` 事件作废握手"把内核崩溃那句原因压成 2 s 闪光，修法是横幅两格（连接格由成功轮询销、内核格由状态离开 `Crashed` 销）。这条不是原计划任务，是在发布产物上读出来的。
+③ 的像素部分补了 `ChromeContrastTests.DarkChrome_Banner_FaultSurfaceIsDark_WithLightText`（`InfoBar` 面 P25=67 / min=27、文字 max=255、跨度 188，探针量的），并把浅色反证那条一起拖进横幅（`bannerP25 > DarkMax`）——**没有反证的深色判据不算判据**。
+
+**① 真机自测（发布产物，不是夹具）**：`CoreVersionLabel` 读到 `v1.19.33`，`core.stop` → `core.start` 之后仍是 `v1.19.33`；硬杀 Tray 后 UI 进程在 12 s 内自己消失（`Get-Process ClashAcry.UI` 计数 0），**代价是一颗孤儿 mihomo**（计数 1，占着 9097/7897）——`CoreManager.AttemptStart` 的占用预检会拒绝再 spawn 并落 `Crashed`，认领孤儿的事记在 spec §12 待办；HKCU 三值全程逐字未变（`0` / `127.0.0.1:8090` / `localhost;127.*;<local>`）。测完把孤儿结束、端口无监听、注册表回到基线才算收工。
+
+**④ 满载线（裁定 R-22c）**：按 spec §10 欠的那次干净口径重采——真订阅（`星网-Starnetwork` 等 4 个 provider、内核载 8.4 MB `geoip.metadb`）+ 内核在跑 + UI 全程没起 + 静置 3 min ⇒ **Tray WS 46.4 / Private 11.2 + mihomo WS 39.4 / Private 70.5 = 合计 85.8 MB**；合计线由 80 放宽到 **120**，三进程线由 260 同比例到 **300**（构造方式不变：满载 + UI 的 220）。Tray 空闲 40 与 UI 220 两格**没碰**。测量脚本用 `artifacts/smoke/residency-real.ps1`（起 Tray → 管道 `core.start` → 静置 → 采 → `core.stop` → 收尾）。
+同轮闭掉 v1.1 账上第①条：`measure-residency.ps1` 现在只认 `%LOCALAPPDATA%\ClashAcry\*` 与仓库根 `\*`，命中数不是恰好 1 就当场失败并列出排除的别家路径；另修了嵌套 `Where-Object` 里 `$_` 用错层导致的**静默恒假**过滤，含中文的 `.ps1` 必须带 UTF-8 **BOM**（PowerShell 5.1 无 BOM 按 ANSI 读，`-f` 直接抛「格式字符串无效」）。
+
+**套件实况**：Release 构建 0 警告 0 错误；Core **168/168**；UI **33/33**（分组 Shell 7 / Backdrop 4 / Overview 10 / ProxiesNoJitter 5 / ChromeContrast 7）。
+**一条要写下来的抖动**：本轮第一次全量 UI 跑是 **2 红 / 31 绿**，红的两条里只有滚动条展开那条留下了详情（`RevealScrollBar` 12 轮悬停+滚轮仍没展开到 ≥12 px，而日志显示落点确实属本进程、`拒发滚轮 0/6`），另一条的名字被 `tail` 截掉没拿到；原样重跑第二次 **33/33 全绿**。
+判据没改、线没动，所以按"鼠标输入类用例在本机有抖动"处理并记账：**这两类（真滚轮、像素取样）红一次不足以判失败，但要复跑确认；连续两次同一点位红就是真问题**。下次跑全量时不要用 `tail` 截掉失败清单（先 `grep "失败 "` 再收尾）。
 
 ---
 

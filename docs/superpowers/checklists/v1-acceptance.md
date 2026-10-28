@@ -25,6 +25,21 @@
 **本机现值已由 agent 手工改回基线**（`ProxyEnable=0` / `ProxyServer=127.0.0.1:8090` / `ProxyOverride=localhost;127.*;<local>`），因为旧产物没留快照、新代码无从代劳。
 测试基线抬到 **Core 166 / UI 28**，构建仍 0 警告。**产物已重打包**（`artifacts/publish/ClashAcry-v0.1.0-win-x64.zip`，110.1 MB / 535 文件），第 4~12 条要用新产物重过一遍。
 
+**版本与拉起轮（2026-10-28 第五轮，收掉 v1.1 账上两条，agent 侧自测）**：⑤「概览页内核版本冷装后恒显示"未知"」按裁定 **R-21a** 修好——
+Tray 在 `core.start`（含 `core.reload` 的"没在跑就起"那条）成功后回读一次 `/version` 写进 `settings.core_version`，读失败保持原值且绝不抛成错误帧；
+界面侧补了两层，缺任一层都仍是恒未知：`core.state` 事件一到就作废缓存握手，以及「Running 却没版本号」那份握手不留缓存、下一轮重问。
+「横幅一键拉起 Tray」按裁定 **R-21b** 接上：横幅里一个按钮走 `EnsureTrayRunningAsync()`，进行中「拉起中…」+ 禁用，成功后立刻重握手收横幅。
+测试基线抬到 **Core 168 / UI 32**（新增 6 条锁），构建仍 0 警告 0 错误。**产物已再次重打包**，第 4 条与第 12 条之后的两格新判据见下：
+
+- **第 4 条加一格判据（版本）**：内核起来后，概览页「内核版本」那一格应在**一次轮询（≤2 s）内**从「未知」变成真 tag（本机是 `v1.19.33`），
+  且**停止再启动**一次后仍然显示真 tag（不是一次性的）。停在「未知」就是 R-21a 没打通，把那次的现象记下来。
+- **第 12 条之后加一格（拉起）**：托盘「退出」后界面窗口现在会一起消失（R-20a），所以这一格要另开路径复现断连——
+  **硬杀 Tray**（`powershell -Command "Get-Process ClashAcry.Tray | Stop-Process -Force"`，界面活着、横幅念断连），
+  然后点横幅上的「一键拉起托盘」：应显示「拉起中…」并禁用，几秒内横幅收起、内核状态回「未运行」、控制重新可用；
+  拉不起来时按钮文案落「重试拉起托盘」、故障那句不重述。
+  **UI.Tests 里不点这个按钮**（`Process.Start` 会拉起真 Tray 抢生产管名），所以点击后的链路只有这一条人工判据。
+  顺带按第 11 条的口径眼过这个新位置的按钮 chrome：它落在 `InfoBar` 的黄色面里，与内容区的卡片不是同一层底——浅/深两档各看一眼，判据仍是像素而不是肉眼看图。
+
 环境前提（AGENTS.md）：本机 .NET 10 SDK 在 `%LOCALAPPDATA%\Microsoft\dotnet`，Git Bash 里先
 `export PATH=/c/Users/Keno/AppData/Local/Microsoft/dotnet:$PATH`，否则 `dotnet` 会报 "No .NET SDKs were found"。
 
@@ -244,9 +259,9 @@ powershell -Command "Get-Process ClashAcry.UI,ClashAcry.Tray -ErrorAction Silent
 
 ## v1 验收线（spec §11）
 
-- 第 1 条全绿（Core 159 / UI 28）+ 第 2~12 条勾完 + §10 三格开销线达标。
+- 第 1 条全绿（Core 168 / UI 32）+ 第 2~12 条勾完 + §10 三格开销线达标。
 - 已知遗留，**不阻塞 v1**，记在 spec §12 / 计划交接项里：
-  ① 概览页横幅缺「一键拉起/重启 Tray」按钮（spec §12）；
+  ① ~~概览页横幅缺「一键拉起/重启 Tray」按钮~~ —— **第五轮已接（R-21b）**，判据见第 12 条后那一格；
   ② `PipeServer` 对同一连接串行处理，分钟级 `core.update` 会堵住后面的请求（头阻塞，进度走广播不受影响）；
   ③ `ProviderInfo.Extra` 里的健康样本字段未建模；
   ④ Tray 满载 49~51 MB 的实现级压缩空间（tooltip 泵每 2 s 读盘 + JSON、`StderrTail` 双拷贝、两条重定向流），

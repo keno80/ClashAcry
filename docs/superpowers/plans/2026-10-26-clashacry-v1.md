@@ -5270,6 +5270,7 @@ Expected: 三条命令全绿，构建无警告。
   回归锁两条（`ShellTests`）：`TrayAbsent_BannerOffersOneClickRelaunch`（红证：`Require("RelaunchTrayButton")` 找不到元素）、`CoreCrashed_BannerShowsFault_ButNoRelaunchAction`（**反证做过**：把判据临时退化成"横幅开着就显示"，这条当场红，报的就是那句「托盘在线、只是内核崩了，不该给「拉起托盘」」）。
   **两条都只读 UIA、绝不点击**：`Invoke` 一下就会 `Process.Start` 真的 `ClashAcry.Tray.exe`、挂上生产管名，与 `FakeTray` 抢同一个实例（同 R-12f/评审 Important 2 那条纪律）。点击后的链路交给人工判据（清单第 12 条后新增那一格：硬杀 Tray 再点按钮）。
 - **本轮实测的一条工具链陷阱（值得记，因为它会让"测试通过"变成假绿）**：`dotnet test tests/ClashAcry.UI.Tests` 起的是 `src\ClashAcry.UI\bin\x64\Release\…\ClashAcry.UI.exe` 这份**预先构建的 exe**，而 `dotnet test` 本身只按 Debug 重建测试工程——改了 UI 源码不跑 `dotnet build -c Release`，用例是在拿旧二进制断言。本轮第一次跑 `CoreStartStateEvent…` 时它"红得符合预期"、加了修法仍红，就是这个原因；重构建后立刻绿。
+  **同一颗坑第五轮在 Core 侧又踩一次，且这次更阴**：合并后在 main 的树上按惯性跑了 `dotnet test tests/ClashAcry.Core.Tests -c Release --no-build`，它去 `bin\Release`（昨天 19:08 的副本）而不是 sln 构建写的 `bin\x64\Release`，于是报 **166/166 全绿**——数字少了本轮新增的两条锁，却一句错都不说（R-12e 记过"跑到上一版测试"，那时的现场是凭空多出一条已删的 `UnitTest1`；这次是**总数静默变少**，更容易当成真绿）。去掉 `--no-build` 让测试工程自己重建，当场 **168/168**。**口径：验收三件套的任何一条都不许带 `--no-build`**；看到测试总数与文档基线不一致，先怀疑产物目录再怀疑代码。
 - 基线：**Core 168/168、UI 32/32、构建 0 警告 0 错误**；产物重打包（`artifacts/publish/ClashAcry-v0.1.0-win-x64.zip`）。
 
 - [x] **Step 4: 回写 spec 并合并**
@@ -5284,14 +5285,17 @@ Expected: 三条命令全绿，构建无警告。
 ③ 实际动作：`git merge --no-ff feat/clashacry-v1`（main 原本 `4be5237` 是分支祖先，无冲突，合并提交 `2b21483`，树内容与 `ca7bf8c` **完全相同**——`git diff --stat feat/clashacry-v1..HEAD` 为空），用 `--no-ff` 是为了让 57 个提交在主干上仍成一组可回看的交付单元，与主干此前的线性 docs 历史不冲突；然后 `git push origin main`。
 ④ 合并前在 main 的树上重跑了一遍验收三件套：`dotnet build ClashAcry.sln -c Release` **0 警告 0 错误**、Core **154/154**、UI **28/28**。
 
+**第五轮的同一套动作（2026-10-28）**：`git merge --no-ff feat/clashacry-v1` → 合并提交 `8fe5b12`（11 files changed / +279 −26，无冲突），**main 的树上重跑三件套**：Release 构建 0 警告 0 错误、Core **168/168**、UI **32/32**，然后 `git push origin main`（`088e609..8fe5b12`）。推送后 `git diff --stat feat/clashacry-v1..main` 为空——主干与分支树内容逐字一致。这次推送走的是 `git -c http.proxy= -c https.proxy= push`：本机 git 全局配置里那条 `http.proxy=127.0.0.1:8090` 指向的是 clash-verge 的端口、当前并没有东西在听（改用户的全局配置属越权，一律用 per-command 覆盖）。
+
 ```bash
-git checkout main && git pull --ff-only
+git checkout main && git -c http.proxy= -c https.proxy= pull --ff-only origin main
 git merge --no-ff feat/clashacry-v1 -m "Merge branch 'feat/clashacry-v1' into main"
 dotnet build ClashAcry.sln -c Release && dotnet test tests/ClashAcry.Core.Tests -c Release && dotnet test tests/ClashAcry.UI.Tests -c Release
-git push origin main && git checkout feat/clashacry-v1
+git -c http.proxy= -c https.proxy= push origin main
 ```
 
 远端分支 `feat/clashacry-v1` **保留未删**（删远端分支属破坏性操作，等用户点头）。后续两轮（2026-10-27 第四轮 R-20a/R-20b、2026-10-28 第五轮 R-21a/R-21b）**仍走 `feat/clashacry-v1`**：这两轮补的都是 v1 spec 自己 §12 记账欠下的格子，不是新功能，按规则 2「新功能一律新开分支」的范围不必另起；真正的 v1.1 新增能力（geodata 随包分发、`PipeServer` 头阻塞等）才另起 `feat/<范围>`。
+第五轮合并后 **HEAD 留在 `main`**（不再切回分支）：分支与主干树内容已完全一致，v1 这条交付线到此关闭，下一步动手时按规则 2 另起 `feat/<v1.1 范围>`。
 
 ---
 

@@ -68,10 +68,11 @@ dotnet test  tests/ClashAcry.Core.Tests -c Release # 期望：159/159
 dotnet test  tests/ClashAcry.UI.Tests  -c Release  # 期望：28/28
 ```
 
-UI 侧五组：Shell 5 / Backdrop 4 / Overview 8 / ProxiesNoJitter 5 / ChromeContrast 6（后者每类控件的
+UI 侧五组：Shell 7 / Backdrop 4 / Overview 10 / ProxiesNoJitter 5 / ChromeContrast 6（第五轮 R-21a 给
+Overview 加 2 条、R-21b 给 Shell 加 2 条，合计 32；后者每类控件的
 深色底与浅色前景**极性分开判**，加一条滚动条轨道-滑块对比、一条浅色反证）。四条跑测试的坑：
 
-- UI.Tests 必须**不带 `--no-build`** 跑（测试解析 `bin\Release\…`，而解决方案构建写的是 `bin\x64\Release\…`，见 R-12e/R-14f）。
+- **两套测试都必须不带 `--no-build` 跑**（测试自己解析 `bin\Release\…`，而解决方案构建写的是 `bin\x64\Release\…`，见 R-12e/R-14f）。第五轮的现场：合并后按惯性给 Core.Tests 加了 `--no-build`，它拿到昨天的旧副本、报 **166/166 全绿**——比本轮的 168 恰好少两条新锁，却一句错都不说。**总数与文档基线不一致时先怀疑产物目录，不要怀疑代码。**
 - **改过 UI/Tray 源码后必须先 `dotnet build ClashAcry.sln -c Release` 再跑 UI.Tests**：`dotnet test tests/ClashAcry.UI.Tests`
   只重建测试工程（它按 R-12f 不引用 UI 工程），harness 起的是解决方案构建出来的那个 exe。
   少了这一步就是「改了没生效、测试还全绿」——评审修复轮里两条新回归锁最初就是这样被验成空锁的。

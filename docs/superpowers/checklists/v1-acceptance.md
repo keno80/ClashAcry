@@ -265,6 +265,26 @@ powershell -Command "Get-Process ClashAcry.UI,ClashAcry.Tray -ErrorAction Silent
 
 ---
 
+## 第六轮：agent 在真产物上代跑的格子（2026-10-28，用户指令「你自己来」）
+
+载体是发布产物 `artifacts\publish\ClashAcry-v0.1.0-win-x64\`，Tray 一律 `--no-tray`（不往用户通知区放图标），
+真订阅 + 真内核 v1.19.33。跑法：命名管道帧（`handshake` / `core.*` / `mode.set` / `sysproxy.set` / `ui.focus`）+ controller REST + FlaUI/UIA 读控件，脚本在 `artifacts\smoke\`（git-ignored 草稿，非验收资产）。
+
+| 清单条 | 代跑到哪一步 | 读数 |
+|---|---|---|
+| 4 起内核 | 管道那半程全程 | `handshake` → `core.start` 回 `true`，状态事件 `Starting → Running`；`curl /version` 无 token **401**、带 token **200** `v1.19.33`（secret 生效） |
+| 4 节点闭环 | 组表 / 选节点 / 测速都走 REST | 4 个组、成员级 `/proxies/{name}/delay` 出值（本轮三次采样 `241/235/205`；收尾复跑同一批名字回 **504**——节点连不通时给 504 而非空白，与 spec §4.2 一致）；`PUT /proxies/{组}` 切走再切回，`now` 跟着变 |
+| 4 旁证 | mixed 端口 | 经 `127.0.0.1:7897` 请求 `generate_204` 回 **204** 空体 |
+| 5 系统代理 | 开与关两腿 + 断言 | 开：`ProxyEnable=1` 且 `ProxyServer=127.0.0.1:7897`；关：**逐字回到第 0 条基线**（`127.0.0.1:8090` / `localhost;127.*;<local>`）、`settings.json` 的 `sys_proxy_backup` 回 `null` —— R-20b 真机成立 |
+| 6 开销 | 已在第 6 条「真订阅干净口径」那格 | 合计 85.8 MB ≤ 120 |
+| 7 回显 | `ui.focus` 这条通路 | UI 由 Tray 拉起，**30 ms** 内 `CoreStateLabel` 已是「运行中」（不是先「未运行」再跳） |
+| ① 撤销按钮 | UIA 树里找控件 | `RelaunchTrayButton` / 横幅按钮在真产物树上**不存在**（R-22 落地） |
+| 8 内核更新 | UIA Invoke 真点 | 进度帧到 `0%`→完成在 8 s 内（本机缓存命中，无网络帧，符合 §9「缓存命中没有进度帧」），换完 `core\mihomo.exe` 哈希与备份原件**相同**、`version.txt` 仍 `v1.19.33` |
+| 12 强杀那格 | 任务管理器式硬杀 Tray | 两次复现：UI 在宽限一尽后 **≈5 s 自退**，进程表 `ClashAcry.UI` 归 0（R-22 正腿）；留下的孤儿 `mihomo` 见遗留 ①b |
+
+**代跑没覆盖、仍需人眼的**（机器做不了的都在这）：第 3 条 B 腿（本地 yaml 走 `FileOpenPicker` 系统对话框）、第 7 条托盘**右键菜单**那两下点击（`--no-tray` 形态没有图标，通路是 `ui.focus` 不是菜单）、第 9 条真实关闭系统「透明效果」后的观感、第 10 条滚动位置与闪烁、第 11 条真实数据下三页 + ComboBox 弹层的肉眼核对、第 12 条托盘菜单「退出」的清理链（`CloseMainWindow()` 只有真托盘能触发）。
+**收尾核过**：本家三进程全 0、HKCU 三值逐字为基线、`core\mihomo.exe` 哈希等于备份、`sys_proxy_backup` 为 `null`；全程未触碰 verge 那套（`verge-mihomo` 一直只在它自己的 8090 上）。
+
 ## v1 验收线（spec §11）
 
 - 第 1 条全绿（Core 168 / UI 33）+ 第 2~12 条勾完 + §10 三格开销线达标（Tray 空闲 ≤40 / 满载合计 ≤**120** / UI ≤220）。
@@ -275,3 +295,6 @@ powershell -Command "Get-Process ClashAcry.UI,ClashAcry.Tray -ErrorAction Silent
   ③ `ProviderInfo.Extra` 里的健康样本字段未建模；
   ④ Tray 满载 49~51 MB 的实现级压缩空间（tooltip 泵每 2 s 读盘 + JSON、`StderrTail` 双拷贝、两条重定向流），
     按 Task 17 归因是个位数 MB 收益，不足以回到 40，所以走的是拆两格那条路。
+  ⑤ **内核被外部结束后，界面上的「运行中」永不回落**（第六轮真机实测，spec §12 同名条目，**修法待用户拍板**）：从任务管理器结束 `mihomo.exe` 后，`handshake` 仍回 `Running`、概览页仍「运行中」、
+    R-22b 的内核故障格进不去（从没落过 `Crashed`），点「启动内核」回 `true` 而什么都不起（并发闸门 `CoreManager.cs:100`），
+    只有点「重载」才会抛 `由于目标计算机积极拒绝，无法连接 (127.0.0.1:9097)`。人工核对方法：起核到「运行中」→ 任务管理器结束那颗 `mihomo.exe` → 看界面是否还写「运行中」（**当前就是还写**）。

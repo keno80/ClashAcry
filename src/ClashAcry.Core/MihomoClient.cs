@@ -37,7 +37,9 @@ public sealed class MihomoClient
         var path = $"/proxies/{Uri.EscapeDataString(name)}/delay?url={Uri.EscapeDataString(url)}&timeout={timeoutMs}";
         try { var d = await GetAsync<JsonElement>(path, ct); return d.GetProperty("delay").GetInt32(); }
         // 只把「测不了」（409 / 超时）折成 -1。Task 1 实测 provider 成员名与 provider 名一律 **404**
-        // （spec §4.2 已写成既定实现要求）：404 = 调用方用错了通路，必须原样抛出去，不许在这里顺手吞成 -1，
+        // （spec §4.2 已写成既定实现要求；第六轮 2×2 复证：file/http 车型、节点可达与否都改不了这条，
+        // 404 的唯一判据是"这个名字不在 GET /proxies 顶层表里"——内联订阅的节点在表里，所以产品路径出得来值）：
+        // 404 = 调用方用错了通路，必须原样抛出去，不许在这里顺手吞成 -1，
         // 否则 Task 15 误调成员时会安静地显示"超时"，永远看不出是通路用错。
         catch (ApiException e) when (e.StatusCode is 409) { return -1; }
         // 裁定 R-6b：`when (!ct.IsCancellationRequested)` 把「调用方取消」留在异常通道里。

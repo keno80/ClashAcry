@@ -117,6 +117,9 @@ provider 形态的两条硬结论（详证见 §12）：
 - **provider 成员不出现在 `GET /proxies` 顶层表**（实测顶层键仅 `COMPATIBLE/DIRECT/GLOBAL/PASS/PASS-RULE/PROBE-AUTO/PROBE-SELECT/REJECT/REJECT-DROP/direct-node`），只出现在所属组的 `all` 数组与 `GET /providers/proxies` 的 `proxies` 列表里。
 - **对成员直接测延迟 404**。故测 provider 成员的延迟是**既定实现要求**而非可选兜底：UI 取 provider 成员延迟只能走 `GET /providers/proxies/{name}`（成员 `history` / `extra` 健康检查样本），拿不到最新样本时显示"上次"标注或占位，禁止对成员调 `/proxies/{name}/delay` 并静默吞错。
 
+**这两条的边界与再证（第六轮 2×2 实测，2026-10-28，结论不变、判据更准）**：把 **provider 车型（`type: file` vs `type: http`）** 与 **节点可达性（`direct` vs 指向死端口的 `ss`）** 做成 2×2 各测一遍，四格完全同形——成员一律不在顶层表、成员级 `/delay` 一律 **404**；同一次内核里主配置 `proxies:` 下的 `bare-direct` 在顶层表、`/delay` **200**，组 `VAR-SELECT` 也在顶层、也 200。所以 404 的判据**只有「这个名字在不在顶层表里」一件事**，与车型无关、与节点连不连得通无关（连不通给的是 500/504，见上表「单节点测延迟」）。
+真订阅读回来的是同一枚硬币的另一面：本机两份真订阅（`imports/sub-*.yaml`）的顶层键里**没有 `proxy-providers`**，节点全在 `proxies:` 里内联，实测 `GET /proxies` 的 35 个名字**全部 `provider-name` 为空**、4 个组的成员无一缺失地都在顶层表、`/providers/proxies` 只有 4 条 `vehicleType=Compatible`（每个组自动生成的伪 provider，不是真 provider）。⇒ `MihomoClient.GetDelayAsync` 走成员级对**内联订阅**是对的（真机出值），本轮曾据此判「§4.2 被证伪」是把内联节点错看成了 provider 成员——**别拿 `Compatible` 伪 provider 当「这个节点来自 provider」的证据**，唯一的判据是节点自己的 `provider-name`。
+
 组内聚合整个 provider 的写法（夹具已用，实测有效）：`proxy-groups` 条目里用 `use: [PROBE-PROV]`；在 `proxies:` 列表里直接写 provider 名会被 v1.19.33 拒绝并在启动时 fatal（`proxy group[1]: PROBE-SELECT: 'PROBE-PROV' not found`）。file 型 provider 的 `url` 字段实测**可省略**（仅 `type/path/interval` 即可加载），填不可达占位 URL 也接受且不会被抓取；夹具保留 `url` 以贴近真实订阅形态。
 
 **Task 15 回写（节点页按实测形状实现，四条都会让"用例全绿但真机全废"）**：
@@ -272,7 +275,7 @@ docs/superpowers/{specs,plans,checklists}/
 | 类别 | 场景 | 策略 |
 |---|---|---|
 | 内核启动失败 | controller 端口占用、yaml 语法错 | 内核输出环形缓冲（stdout+stderr），UI 展示 Go 原文**不翻译**；仅启动时自动重试一次，重试仍失败落 `Crashed` 并保留原因。**窗口分两档**：controller 未应答且进程还活着 = 仍在启动（下 geodata 属于这一档），宽限 120 s；controller 已应答而 mixed 不跟进 = 带病存活，仍 5 s 判死——见下面「启动窗口分档」 |
-| 状态失真 | mixed 端口被占但 controller 正常，内核活着却不通 | `Running` 判据 = `GET /version` 成功 **且** mixed 端口 TCP 可连；任一不符不进入 `Running`，横幅报"端口 7897 被占用" |
+| 状态失真 | mixed 端口被占但 controller 正常，内核活着却不通 | `Running` 判据 = `GET /version` 成功 **且** mixed 端口 TCP 可连；任一不符不进入 `Running`，横幅报"端口 7897 被占用"。**反向的失真 v1 未覆盖**：进了 `Running` 之后内核被外部结束，状态不会再回落（无 `Exited` 订阅、无周期探活）——判据只守进门，不守在场，详见 §12「内核被外部结束后 `Running` 永不回落」 |
 | API 断连 | secret 不符、controller 未监听、Tray 掉线 | `MihomoClient` 透出真实状态码；UI 顶部横幅态 + 写操作按钮置灰；**托盘够不着时界面自己退**（裁定 R-22，见 §3 同生死：连续 3 轮轮询失败 ≈ 6 s 宽限一尽即关窗退出，横幅里**不放**重启按钮） |
 | 系统代理残留 | UI/Tray 被强杀后注册表悬挂 | 三层：正常退出钩子必清；Tray 启动时校验"注册表代理指向本应用端口且探活失败"才清（指向其他软件的代理**绝不触碰**）；托盘"停止内核"顺带清 |
 | 系统代理**载荷**被我们覆盖 | `Enable()` 无条件写 `ProxyServer`/`ProxyOverride`，关掉开关并不换回去（R-20b，第四轮真机吃到） | 开启前把两键原值快照进 `settings.json` 的 `sys_proxy_backup`，关闭时**只在当前值仍等于我们写的那份**才还原（第三方在我们之后写过就不动，与 R-7c 同向）；强杀那条路由冷启动的 `CleanupIfStale` 返回值触发同一次还原 |
@@ -443,6 +446,12 @@ Stop-Process -Name ClashAcry.Tray   # 测完必须杀进程，否则污染后续
 - **整窗 Desktop Acrylic 的合成开销——已实测，不再是风险项（Task 13/17）**：低端 GPU / 远程桌面上仍可能明显，但本机内存侧量不出代价——亚克力档 WS 145.6 vs 纯色档 145.9（差值在噪声内），最坏档（节点页 30 行 + 全组测速）180.0 / 220 线内。已用三档可切换 + 自动降级吸收；**RDP 下 `IsSupported()` 的实际表现本机未实测**，仍由 §8 的降级标注兜住。
 - **WindowsAppSDKSelfContained 的常驻代价——已有答案，不超标**：自包含 MRT Core 确实把 UI 抬到 140~180 MB（对照：外壳未装页面时 140.4），但 220 MB 线守住、余量 40 MB，不需要回退到"依赖机器已装 Windows App Runtime"。Tray 侧 self-contained 空壳 16.4 MB（§10 Task 2）。
 - **provider 成员与延迟端点——已有真机答案（v1.19.33，不再是风险项）**：`GET /proxies` 顶层表**不含** provider 成员（仅组 `all` 与 `GET /providers/proxies` 的 `proxies` 列表含之）；`GET /proxies/{成员名}/delay` 对成员**404**。据此 §4.2 已把"测 provider 成员延迟走 providers 详情 / 拿不到样本显示'上次'并标注"从兜底升级为既定实现要求。
+  **第六轮（2026-10-28）把它重测成了一条更硬的判据**：2×2（车型 file/http × 可达 direct/死端口 ss）四格一律 404、主配置内联节点一律 200 ⇒ **404 的唯一原因是「不在顶层表」，不是「节点连不通」、也不是「file 型不加载」**；Task 1 那两条结论原样成立（同一夹具当场复现：`contains prov-node-1 at top level: False` + 该成员 `/delay` 404）。
+  **同轮踩到的三个探针侧假信号，记成测试纪律**（都能让"真机实测"把契约读反，本轮就一度据此判 spec 错）：
+  ① **`/providers/proxies` 里出现某个名字不等于它来自 provider**——每个 proxy-group 都会自动生成一条 `vehicleType=Compatible` 的伪 provider，把内联节点也照抄一遍；要看的是节点的 `provider-name`。
+  ② **PowerShell 5.1 变量名大小写不敏感**：一次探针里 `$h = Get-Json ...` 静默覆盖了认证头 `$H`，随后所有请求 401，读起来像"内核契约变了"，实际是脚本打到自己（诊断证据：同一端口同一时刻手发 `Bearer` 头 200、脚本发 401）。探针脚本里响应局部量与 `$H` 必须不同名。
+  ③ **`Invoke-WebRequest -UseBasicParsing` 对无 charset 的 JSON 按 Latin-1 解码**：中文节点名取回来是乱码，拿乱码去拼 URL 就 404——本轮第一次复测的真 404/假 404 混在一起，靠 `[Text.Encoding]::UTF8.GetString($resp.RawContentStream.ToArray())` 才分得开（与 §4.5 的 UA 矩阵同为"探针先自证清白"）。
+  另：探针的控制器端口**必须现抢现用**（`TcpListener` 绑 0 取回端口号）——本机常驻的第三方内核会占住固定端口，探针打到别人家 controller 上，读到的就是别人的契约（本轮实测被 401 挡在门外才想起来）。
 - **mixed 端口被占时内核"带病存活"**（v1.19.33 实测，详见 §4.2 末段）：进程不退出、controller 全功能应答、仅 stdout 一行 `level=error` bind 失败；`Running` 判据必须双探活（controller + mixed 端口 TCP），与计划 Task 8 一致。另实测内核 Go 日志写在 **stdout**（stderr 恒空），`CoreManager` 的 stderr 环应同时采集两个流。
 - **mihomo 跨版本 REST 漂移**：契约以 §4.2 + 源码为准，冒烟清单兜底。
 - **横幅的"一键拉起/重启 Tray"：第五轮接上（R-21b）、**第六轮撤销（R-22，同生死，见 §3 与 §4.1 末）**——不要再把它接回来。这条的完整历史：Task 14 记账时缺按钮 → 第五轮补按钮 + 「拉起中…」反馈 → 用户实测后判定"横幅不该保留，内核和 ui 应该一起"，于是改成"宽限 3 轮 ≈ 6 s 说不上话就界面自己退"，按钮与 `MainWindow` 里的 `NeedsRelaunch`/`OnRelaunchTrayClick` 一并删除。** 同批遗留：`PipeClient` 重连后 `_pending` 仍跨连接共享。
@@ -490,6 +499,11 @@ Stop-Process -Name ClashAcry.Tray   # 测完必须杀进程，否则污染后续
   ④ **测量脚本只认自家进程的缺陷同轮闭合（v1.1 账上第①条）**：`measure-residency.ps1` 原本只按进程名取、完全不看路径（机制订正见上条 ①——`Get-Process -Name mihomo` 打不到 `verge-mihomo`，它会抛；被打到的是**同名**别家内核或自家多颗）；现在默认只认 `%LOCALAPPDATA%\ClashAcry\*` 与仓库根 `\*` 两处，命中数不是恰好 1 就当场失败并列出被排除的路径。另修一处静默恒假的嵌套 `Where-Object`（内层 `$_` 是模式串，进程对象先落 `$proc`）。**PowerShell 5.1 的编码坑记一笔**：含中文的 `.ps1` 必须带 UTF-8 **BOM**，无 BOM 时被按 ANSI 读，`-f` 格式化直接报「格式字符串无效」。
   本轮回归锁：UI 侧 +4 / −3（净 +1，33 条：新增同生死 3 条 + 故障横幅像素 1 条，删除"横幅还活着/带按钮"3 条），Core 侧 0（168 条不变）。
 - **强杀 Tray 留下的孤儿内核无人认领（第六轮同生死暴露，v1.1 候选）**：`ShutdownAsync` 会 `Core.StopAsync`，所以菜单「退出」不留孤儿；但任务管理器强杀 / Tray 崩溃后那颗 `%LOCALAPPDATA%\ClashAcry\core\mihomo.exe` 继续占着 9097/7897，而新 Tray 的 `CoreManager.AttemptStart` 占用预检（CoreManager.cs:129）只拒绝、不认领 ⇒ 用户点「启动内核」永远得 `controller 端口 9097 已被其他进程占用`，手动出路是结束那颗进程或重启机器。候选修法（**归 Tray，不违反 §3 禁令 1**：杀内核恰恰是 Tray 的职权）：Tray 冷启动时若 `Process.GetProcessesByName("mihomo")` 里存在 `Path == _paths.CoreExecutable` 的那颗（**按完整路径认，别按进程名**——本机常驻的 `verge-mihomo` 与任何改名内核都不是我们的，§9 的"绝不触碰别家"同一条纪律），结束它并记一次 `SpawnCount` 之外的"认领"事件，让下一次 `core.start` 走干净路径。没在本轮做的原因：它需要一条真进程夹具，而当前 Core.Tests 的进程侧断言只有 `DisposeAsync_KillsCoreAndLeavesStopped` 那一类，不该为它临时造一套半真半假的杀进程测试。
+- **内核被外部结束后 `Running` 永不回落（第六轮真机冒烟实测，2026-10-28；未修，待裁定）**：`CoreManager` 一旦进了 `Running` 就没有任何机制再往外看——`Transition(CoreState.Running)` 只出现在启动等待循环里（CoreManager.cs:167）， spawned 进程**没订阅 `Exited`**（全文件只有启动循环 161 与 `KillProcess` 220 两处读 `HasExited`，都是同步在等的那两次），`TrayHost` 也没有周期探活（那边只有 64 行的状态广播和 154 行给 tooltip 泵读 `Core.State`）。于是有人从任务管理器结束 `mihomo.exe` 之后，整条状态链一起说谎，实测（发布产物 + 真订阅，`--no-tray` 形态）四样同时成立：
+  ① `handshake` 持续回 `{"state":"Running"}`；② 界面 `CoreStateLabel` 恒「运行中」；③ R-22b 的内核故障格永远进不去（`_coreFault` 只在状态**离开** `Crashed` 时销账，从没进过 `Crashed` 就永远空着）——第六轮新加的"两格分开"在这个形态下等于没加；④ 用户点「启动内核」得到回帧 **`true`**，而内核根本没被拉起来（并发闸门 CoreManager.cs:100：`State is Running or Starting` ⇒ 直接 `return State == Running`，既不探活也不 spawn）。唯一肯说实话的是 `core.reload`——它真去打 controller，于是抛 `由于目标计算机积极拒绝，无法连接 (127.0.0.1:9097)`。也就是说：**界面上所有的绿灯都来自缓存，唯一的红灯要用户自己点重载才看得见。**
+  不是第六轮引入：并发闸门（100）与进 `Running` 的那句（167）`git blame` 都落在 2026-10-26 状态机落地的那次提交（`c227407`），此后无人改过——本轮只是第一次从外部杀它。与既有两条的边界要分清：§9 的「状态失真」讲的是**进 Running 之前**（mixed 被占 ⇒ 带病存活，双探活拦住它），上一条「孤儿内核无人认领」讲的是 **Tray 冷启动**撞上残留内核，这一条讲的是**运行中掉线**——三条互不覆盖。
+  **推荐修法（不改动 v1「内核崩溃不自动重启」的语义）**：① spawn 时订阅 `Process.Exited` ⇒ 落 `Transition(Crashed)` 并带退出码与 stderr 尾，走既有 `core.state` 广播，界面那格（`_coreFault`）现成接得住；② `TrayHost` 加一条低频双探活（controller `GET /version` + mixed TCP，判据与 §9 启动窗口同一条，复用 `TcpAlive` 的 250 ms 预算 R-8i），连续 N 轮不符 ⇒ 同样落 `Crashed`；③ `StartAsync` 的并发闸门在 `State is Running` 时**必须先探一次活**，探不到就当没在跑、走重启路径——否则「点启动谎报 true」这条永远留着，而这恰恰是用户唯一会自己去点的按钮。为什么不自动拉起：§9 只允许启动失败自动重试一次，外部杀进程按同一口径处理——报清楚原因，等人点。
+  本轮没做的理由：②要在 Tray 里新增一个 timer，就是一份常驻开销（§10 判据面），且它和「孤儿认领」共用同一套真进程夹具；改动横跨 CoreManager / TrayHost / UI 三层，第六轮的范围是同生死与测量脚本，不该再叠一层。**待用户拍板后进 v1.1 分支。**
 - **secret 落盘明文**（同用户可读）：自用容忍；管道 ACL 限当前用户 SID，`handshake` 之外不向其他进程暴露。
 - **yaml 保真度（Task 5 已实测结案，不再是待探针项）**：YamlDotNet 18.1.0 的 `YamlStream`/DOM 通路**保留全部字段值与键序、保留 block/flow 风格与用户锚点别名**（`&x`、`*x`、`<<:`），但**不保留注释**（DOM 不承载 comment token），且会出现三类无害漂移：block 序列压平到父键同列、flow 节点内部空白归一、文档尾部多一行 `...`。因此 v1 的公开承诺只有“不认识的原样透传、只做顶层必需键覆盖、用户手写原件永不被改写”，**UI 文案与导入说明不得声称保留注释或原始格式**；如日后要真保注释，需换库并另立任务。另：`YamlStream.Save` 必须显式 `assignAnchors: false`，否则会给内容重复的节点自动发随机锚点，产物里长出用户没写过的 `&203281033`。
 

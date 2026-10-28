@@ -164,6 +164,14 @@ public sealed class TrayHarness : IDisposable
         private readonly Task<bool>? _gate;
         private readonly TaskCompletionSource<bool> _entered;
 
+        /// <summary>
+        /// true = 探活不再打 <c>/version</c>，直接答「controller 活着」。
+        /// 用途：把「内核在跑」与「版本读不到」两件本来绑在同一个端点上的事**分开表达**——
+        /// <c>CoreProbe.ControllerAlive</c> 就是靠 <c>GetVersionAsync</c> 判活的，若不改探活，
+        /// 测试把 <c>/version</c> 打成 500 会连启动本身一起否掉（内核根本进不到 Running）。
+        /// </summary>
+        public bool AlwaysAlive { get; set; }
+
         public FakeProbe(MihomoClient client, Task<bool>? gate, TaskCompletionSource<bool> entered) : base(client)
             => (_gate, _entered) = (gate, entered);
 
@@ -173,6 +181,7 @@ public sealed class TrayHarness : IDisposable
             // 闸门**不带 ct**：时机由测试掌控。带上的话第二个请求的取消会在进函数前就落，
             // 测试空转（Task 8 R-8h 的同一条教训）。
             if (_gate is not null) await _gate;
+            if (AlwaysAlive) return true;
             return await base.ControllerAlive(ct);
         }
 

@@ -108,6 +108,47 @@ public class OverviewTests : IClassFixture<UiAppHarness>
     }
 
     [Fact]
+    public async Task CoreStartStateEvent_UIReHandshakes_AndVersionLeavesUnknown()
+    {
+        // v1.1 欠账①的界面那一半，与 Tray 侧「起核后回读 /version」成对：
+        // RefreshAsync 只在「从没握过手」时才握手，之后一路用缓存的 LastHandshake。冷装这条主路径上，
+        // 第一次握手时内核还没跑、版本无从可读，于是界面就停在「未知」——哪怕 Tray 已经起核、
+        // 把真版本写进 settings、界面每 2 s 都在跟它说话，也再没人回头取过一次。
+        await using var tray = await FakeTray.StartAsync();
+        tray.Handshake = tray.Handshake with { CoreVersion = null };   // 内核未跑时的真回包就是这样
+        using var s = _harness.Launch("--reset-prefs");
+        Assert.True(await tray.WaitUiConnectedAsync(TimeSpan.FromSeconds(10)));
+        // 「未知」也是 VM 的初始值，所以先等一次真轮询发生过，才证明这是握手带回来的答案而不是还没数据。
+        await WaitUntilAsync(() => tray.CommandLog.Count(f => f.Type == CmdTypes.SettingsGet) >= 1, 15);
+        Assert.Equal("未知", Text(s, "CoreVersionLabel"));
+
+        tray.Handshake = tray.Handshake with { CoreVersion = "v-live" };   // 起核后回读到的真版本
+        tray.Emit(EventTypes.CoreStateChanged, new CoreStateChanged(CoreState.Running, null, Array.Empty<string>()));
+
+        await WaitUntilAsync(() => Text(s, "CoreVersionLabel") == "v-live", 15);
+    }
+
+    [Fact]
+    public async Task RunningHandshakeWithoutVersion_IsNotCached_AsVersionCannotArriveLater()
+    {
+        // 上一条锁关掉的是「有状态事件时才重握手」；这条关掉剩下那条靠调度碰运气的路：
+        // Tray 把版本号写进 settings 落在 Transition(Running) **之后几毫秒**，握手若正好卡进那几毫秒，
+        // 缓存下来的就是一份「内核在跑却没有版本号」的描述，而同一状态不会再发第二次事件、
+        // 轮询又一路复用缓存——版本号就此钉死在「未知」，比修复前更糟（那是至少还有过一次 null→真值的机会）。
+        await using var tray = await FakeTray.StartAsync();
+        tray.Handshake = tray.Handshake with { State = CoreState.Running, CoreVersion = null };
+        using var s = _harness.Launch("--reset-prefs");
+        Assert.True(await tray.WaitUiConnectedAsync(TimeSpan.FromSeconds(10)));
+        await WaitUntilAsync(() => tray.CommandLog.Count(f => f.Type == CmdTypes.SettingsGet) >= 3, 20);
+        Assert.Equal("未知", Text(s, "CoreVersionLabel"));
+        Assert.True(tray.CommandLog.Count(f => f.Type == CmdTypes.Handshake) >= 3,
+            "「在跑但没版本号」的握手必须每轮重问——缓存它等于把真值永久关在门外");
+
+        tray.Handshake = tray.Handshake with { CoreVersion = "v-late" };   // Tray 的回读落地了
+        await WaitUntilAsync(() => Text(s, "CoreVersionLabel") == "v-late", 15);
+    }
+
+    [Fact]
     public async Task SilentRefresh_LeavesEveryVisibleTextNodeUntouched()
     {
         await using var tray = await FakeTray.StartAsync();

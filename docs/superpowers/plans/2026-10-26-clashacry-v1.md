@@ -5258,6 +5258,20 @@ Expected: 三条命令全绿，构建无警告。
   **反证做过**：把 `ApplySysProxy` 临时退回旧的两行（`Enable`/`Disable`、无快照）后，那两条路由锁当场全红（失败 2 / 通过 0），恢复接线后 Core **166/166**、UI **28/28**、构建 0 警告。
   本机的两键已手工改回基线（旧产物没留快照，新代码无从代劳）：`ProxyEnable=0` / `ProxyServer=127.0.0.1:8090` / `ProxyOverride=localhost;127.*;<local>`。
 
+派发状态（2026-10-28 第五轮，**用户指令「先把内核版本恒未知」和「一键拉起」两条一起收掉」**）：v1.1 账上的这两条都是 v1 spec 自己 §12 记下的欠账（⑤ 与「横幅一键拉起」），按 AGENTS 规则 2「新功能一律新开分支」的字面看可以另起分支，本轮仍留在 `feat/clashacry-v1` 上——它们不是新功能，而是把 v1 承诺过、当时明确记账没做的两格补上，与第四轮的 R-20a/R-20b 同源同批。
+- **R-21a｜内核版本冷装后恒"未知"（三层，缺一层都还是恒未知）**：
+  ① Tray 侧 `TrayCommandRouting.StartCoreAsync`——`StartAsync` 回真后调 `ReadVersionIntoStoreAsync()`，`core.start` 与 `core.reload`（"没在跑就起"那条）都走它，`core.update` 里那段原本裸写的 try/catch 收敛进同一个 helper；读失败保持原值、**绝不抛穿成错误帧**（Task 11 Step 6 真机同一条 bug 踩过）。
+  ② UI 侧握手缓存：`RefreshAsync` 之后一路复用 `LastHandshake`，而冷装第一次握手时内核还没跑 ⇒ 版本永远停在 `null`→「未知」。改成 `core.state` 事件一到就 `InvalidateHandshake()`（状态一变，握手带的版本/地址/secret 都不再是事实）。
+  ③ 残余窄窗口不赌调度：Tray 写版本落在 `Transition(Running)` 之后几毫秒，握手卡进去就缓存到一份「Running 却没版本号」的描述，而同一个状态不会再发第二次事件 ⇒ UI 对这种握手**只用于本轮读数、不留缓存**，下一轮重问直到真值落地。
+  回归锁三条（全部先红后绿）：`CoreStart_WritesCoreVersion_AndHandshakeCarriesIt`（红证：`Expected "v9.9.9-test" / Actual null`）、`CoreStart_VersionReadFails_StillRepliesRunning_NotErrorFrame`（红证：`Assert.Contains` 空集合——当时根本没有那次回读）、`OverviewTests.CoreStartStateEvent_UIReHandshakes_AndVersionLeavesUnknown` 与 `RunningHandshakeWithoutVersion_IsNotCached_AsVersionCannotArriveLater`（后者红证：`「在跑但没版本号」的握手必须每轮重问`）。
+  夹具侧加了一个 `TrayHarness.FakeProbe.AlwaysAlive`：`CoreProbe.ControllerAlive` 本身就是靠 `GET /version` 判活的，不把探活与版本读**拆开**，把 `/version` 打成 500 会连"内核起来"这条前提一起否掉。
+- **R-21b｜横幅「一键拉起托盘」按钮**：`MainWindow.xaml` 的 `InfoBar` 内容改成 `StackPanel`（文案 + 按钮），点击走外壳启动时那句 `Link.EnsureTrayRunningAsync()`（UI 唯一允许的跨进程 `Process.Start`，只起 Tray，禁令 1 不动），成功就地 `Overview.RefreshAsync()` 重握手 + 重读、不等下一个 2 s 周期，失败文案落「重试拉起托盘」；进行中「拉起中…」+ 禁用覆盖 500 ms + 3 s 预算（§9 禁止无反馈的进行中）。
+  可见判据 = **有故障文案 且 `_state is null`**（够不够得着托盘），不是"横幅开着"：内核崩溃时横幅同样开着，那时该点的是概览页的内核开关。
+  回归锁两条（`ShellTests`）：`TrayAbsent_BannerOffersOneClickRelaunch`（红证：`Require("RelaunchTrayButton")` 找不到元素）、`CoreCrashed_BannerShowsFault_ButNoRelaunchAction`（**反证做过**：把判据临时退化成"横幅开着就显示"，这条当场红，报的就是那句「托盘在线、只是内核崩了，不该给「拉起托盘」」）。
+  **两条都只读 UIA、绝不点击**：`Invoke` 一下就会 `Process.Start` 真的 `ClashAcry.Tray.exe`、挂上生产管名，与 `FakeTray` 抢同一个实例（同 R-12f/评审 Important 2 那条纪律）。点击后的链路交给人工判据（清单第 12 条后新增那一格：硬杀 Tray 再点按钮）。
+- **本轮实测的一条工具链陷阱（值得记，因为它会让"测试通过"变成假绿）**：`dotnet test tests/ClashAcry.UI.Tests` 起的是 `src\ClashAcry.UI\bin\x64\Release\…\ClashAcry.UI.exe` 这份**预先构建的 exe**，而 `dotnet test` 本身只按 Debug 重建测试工程——改了 UI 源码不跑 `dotnet build -c Release`，用例是在拿旧二进制断言。本轮第一次跑 `CoreStartStateEvent…` 时它"红得符合预期"、加了修法仍红，就是这个原因；重构建后立刻绿。
+- 基线：**Core 168/168、UI 32/32、构建 0 警告 0 错误**；产物重打包（`artifacts/publish/ClashAcry-v0.1.0-win-x64.zip`）。
+
 - [x] **Step 4: 回写 spec 并合并**
 
 把 §4.2 端点表、§10 实测列、§12 已消解的风险条目全部定稿。
@@ -5277,7 +5291,7 @@ dotnet build ClashAcry.sln -c Release && dotnet test tests/ClashAcry.Core.Tests 
 git push origin main && git checkout feat/clashacry-v1
 ```
 
-远端分支 `feat/clashacry-v1` **保留未删**（删远端分支属破坏性操作，等用户点头）；v1.1 的改动按 AGENTS 规则另起 `feat/<范围>` 分支。
+远端分支 `feat/clashacry-v1` **保留未删**（删远端分支属破坏性操作，等用户点头）。后续两轮（2026-10-27 第四轮 R-20a/R-20b、2026-10-28 第五轮 R-21a/R-21b）**仍走 `feat/clashacry-v1`**：这两轮补的都是 v1 spec 自己 §12 记账欠下的格子，不是新功能，按规则 2「新功能一律新开分支」的范围不必另起；真正的 v1.1 新增能力（geodata 随包分发、`PipeServer` 头阻塞等）才另起 `feat/<范围>`。
 
 ---
 

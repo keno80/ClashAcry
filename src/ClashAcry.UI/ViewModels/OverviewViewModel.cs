@@ -127,6 +127,11 @@ public sealed class OverviewViewModel : IDisposable
             if (!wasHandshaked) await _link.WaitServerUpAsync(TimeSpan.FromMilliseconds(500));
             var hs = wasHandshaked ? _link.LastHandshake : await _link.HandshakeAsync();
             if (hs is null) { Assign(ref _state, (CoreState?)null); return; }
+            // 「内核在跑却读不到版本号」的握手不是事实，只是**抓早了**：Tray 把 /version 的真值写进
+            // settings 落在 Transition(Running) 之后几毫秒，握手卡进那几毫秒就会拿到一份 null 版本的描述，
+            // 而同一状态不会再发第二次事件、轮询又一路复用它——版本号就此钉死在「未知」。
+            // 所以这一份只用于本轮读数，不许留下当缓存（下一轮重问，真值落地即止）。
+            if (hs.State is CoreState.Running && hs.CoreVersion is null) _link.InvalidateHandshake();
 
             EnsureRest(hs);
             // 「还没有任何状态」才用手串打底——不是「本轮没握手过」才打底：外壳在 Loaded 里已经握过一次，
@@ -230,6 +235,10 @@ public sealed class OverviewViewModel : IDisposable
                         if (JsonUtil.Read<CoreStateChanged>(f.Payload) is not { } e) return;
                         Assign(ref _logText, string.Join("\n", e.StderrTail));
                         Assign(ref _state, e.State);
+                        // 状态一变，缓存的握手就不再是事实：版本号只有内核跑起来后 Tray 才回读得到，
+                        // controller 地址/secret 也可能随设置改动（v1.1 欠账①「冷装后恒未知」的界面侧）。
+                        // 这里只**作废**不重握手——握手仍在轮询那条线上，界面不另开第二个说话入口。
+                        _link.InvalidateHandshake();
                         if (e.State is CoreState.Crashed) SetFault(e.Reason ?? "");
                         break;
                     case EventTypes.UpdateProgress:

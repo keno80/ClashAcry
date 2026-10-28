@@ -147,6 +147,49 @@ public class TrayCommandRoutingTests
     }
 
     [Fact]
+    public async Task CoreStart_WritesCoreVersion_AndHandshakeCarriesIt()
+    {
+        // v1.1 欠账①「冷装后版本恒未知」：只有 core.update 成功那一条路径回读过 /version，
+        // 而首次启动、以及每天最常见的「停 → 再启动」都不回读——settings.json 里 core_version 永远是 null，
+        // handshake 与 settings.get 两处展示位就永远念「未知」。版本号的真判据在内核身上，起核后就该读走。
+        using var h = new TrayHarness();
+        Assert.Null(h.Store.Load().CoreVersion);                     // 前置：夹具不预填版本号
+
+        var start = await h.Routing.Handle(Cmd(CmdTypes.CoreStart));
+
+        Assert.Null(start!.Error);
+        Assert.True(start.Payload!.Value.GetBoolean());
+        Assert.Equal("v9.9.9-test", h.Store.Load().CoreVersion);     // 起核成功就把 /version 的真值落到 settings
+
+        var hs = JsonUtil.Read<HandshakeReply>((await h.Routing.Handle(Cmd(CmdTypes.Handshake)))!.Payload);
+        Assert.Equal("v9.9.9-test", hs.CoreVersion);                 // 重新握手才念得出版本号
+    }
+
+    [Fact]
+    public async Task CoreStart_VersionReadFails_StillRepliesRunning_NotErrorFrame()
+    {
+        // 新增那次回读**不许变成新的故障面**：Task 11 Step 6 真机踩过的同一条——core.update 里那句裸
+        // GetVersionAsync 在内核已换好的当口把 connection refused 抛穿到回帧，Updated 与结果广播一起丢。
+        // 版本只是展示值：读不到就留着旧值，内核在跑这条结论不许被它带下水。
+        // 夹具用 AlwaysAlive 把「controller 应答」与「/version 读不到」拆开（两者本是同一个端点）。
+        using var h = new TrayHarness();
+        h.Probe.AlwaysAlive = true;
+        h.Wire.Reset();
+        h.Wire.Given(Request.Create().WithPath("/version").UsingGet()).RespondWith(
+            Response.Create().WithStatusCode(500));
+
+        var start = await h.Routing.Handle(Cmd(CmdTypes.CoreStart));
+
+        Assert.Null(start!.Error);
+        Assert.True(start.Payload!.Value.GetBoolean());
+        Assert.Equal(CoreState.Running, h.Core.State);
+        // 真的 attempted 过一次回读：AlwaysAlive 之后 /version 只可能来自路由本身，
+        // 这条同时是「别把守卫写成整段跳过」的反证——静默不读等于欠账原样留着。
+        Assert.Contains(h.Wire.LogEntries.Select(l => l.RequestMessage!), m => m.Path == "/version");
+        Assert.Null(h.Store.Load().CoreVersion);                     // 失败不写脏值，也不清空旧值
+    }
+
+    [Fact]
     public async Task CoreUpdate_WhenVersionReadFails_StillRepliesUpdated_NotErrorFrame()
     {
         // 真机端到端（Task 11 Step 6）：换核成功后内核**不一定在跑**（换之前没跑就不起），路由那句裸调

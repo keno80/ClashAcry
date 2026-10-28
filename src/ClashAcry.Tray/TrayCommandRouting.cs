@@ -46,7 +46,7 @@ public sealed class TrayCommandRouting
             object? result = f.Type switch
             {
                 CmdTypes.Handshake => Handshake(),
-                CmdTypes.CoreStart => await _core.StartAsync(default),
+                CmdTypes.CoreStart => await StartCoreAsync(),
                 CmdTypes.CoreStop => await StopAndCleanProxyAsync(),
                 CmdTypes.CoreReload => await ReloadOrStartAsync(),
                 CmdTypes.ModeSet => await SetModeAsync(Read<ModeRequest>(f).Mode),
@@ -94,7 +94,35 @@ public sealed class TrayCommandRouting
     private async Task<bool> ReloadOrStartAsync()
     {
         if (_core.State is CoreState.Running) { await _core.ReloadAsync(default); return true; }
-        return await _core.StartAsync(default);
+        return await StartCoreAsync();
+    }
+
+    /// <summary>
+    /// 启动内核并把版本号落到 settings（v1.1 欠账①「冷装后恒未知」的修法）。
+    /// 原来只有 <c>core.update</c> 成功那一条路径回读 <c>/version</c>，而用户第一次用是这个界面、
+    /// 每天最常见的也是「停 → 再启动」：于是 <c>settings.core_version</c> 一路是 null，
+    /// handshake 与 settings.get 两处展示位永远念「未知」——明明内核就在跑、它自己知道自己几岁。
+    /// </summary>
+    private async Task<bool> StartCoreAsync()
+    {
+        if (!await _core.StartAsync(default)) return false;
+        await ReadVersionIntoStoreAsync();
+        return true;
+    }
+
+    /// <summary>
+    /// 读一次 <c>/version</c> 写进 settings；**读不到就原样留着旧值，绝不抛**。
+    /// 版本只是展示值，不是任何结论的判据：Task 11 Step 6 真机踩过一次裸调——内核已换好但没在跑，
+    /// connection refused 抛穿到回帧，「更新成功」这条结论和结果广播一起丢了。
+    /// </summary>
+    private async Task ReadVersionIntoStoreAsync()
+    {
+        try
+        {
+            var v = await _client.GetVersionAsync(default);
+            if (v is not null) _store.Update(s => s with { CoreVersion = v.Version });
+        }
+        catch (Exception) { /* 内核没在跑 / 应答面异常：见上，展示值不值得一次故障 */ }
     }
 
     private async Task<bool> SetModeAsync(string mode)
@@ -162,18 +190,7 @@ public sealed class TrayCommandRouting
         var progress = new Progress<UpdateProgress>(p => { if (_pipe.ClientCount > 0) _pipe.Broadcast(EventTypes.UpdateProgress, p); });
         var res = await _updateCore(progress, default);   // Task 11 把装配处换成真 CoreUpdater，路由不动
         if (res is UpdateResult.Updated)                // 版本号只在更新成功时重写，UI 收到 result 后重发 handshake 取新值
-        {
-            // 真机端到端（Task 11 Step 6）踩到的：换核成功后内核**不一定在跑**——换之前没跑就不起，起了也可能探活失败，
-            // 这条裸调用于是在内核已经换好的当口把 "connection refused" 抛穿到回帧，用户看到的是一句 socket 错误，
-            // 而下面的 UpdateResult 事件也一起丢了。读不到版本号是常态不是故障：CoreVersion 只是展示值，
-            // 内核真跑起来后 handshake 会带真版本。
-            try
-            {
-                var v = await _client.GetVersionAsync(default);
-                if (v is not null) _store.Update(s => s with { CoreVersion = v.Version });
-            }
-            catch (Exception) { /* 内核没在跑：见上 */ }
-        }
+            await ReadVersionIntoStoreAsync();          // 换核成功后内核**不一定在跑**，所以这条读本身带守卫（见 helper）
         if (_pipe.ClientCount > 0) _pipe.Broadcast(EventTypes.UpdateResult, res);
         return res;
     }
